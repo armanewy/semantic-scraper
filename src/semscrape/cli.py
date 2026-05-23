@@ -17,8 +17,9 @@ from .eval_model import (
     read_jsonl,
     summarize_flat_rows,
     summarize_rows,
+    values_match,
 )
-from .extract import extract_html
+from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
 from .render import fetch_url, render_url
@@ -45,6 +46,7 @@ def _print_json(data: Any) -> None:
 def cmd_extract(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
     html = _load_input(args.input, render=args.render, wait_for=args.wait_for)
+    _apply_policy_defaults(args)
     cache = None
     if args.cache or args.learn:
         cache_path = Path(args.cache) if args.cache else SelectorCache.default_path(args.spec)
@@ -63,6 +65,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
         min_confidence=args.min_confidence,
         min_margin=args.min_margin,
         min_validator_confidence=args.min_validator_confidence,
+        policy=args.policy,
+        model_on_abstain_only=args.model_on_abstain_only,
         learn=args.learn,
     )
     if args.values_only:
@@ -112,6 +116,7 @@ def _compare_expected(expected: Any, actual: Any) -> bool:
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
+    _apply_policy_defaults(args)
     results = []
     total = 0
     passed = 0
@@ -129,6 +134,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             min_confidence=args.min_confidence,
             min_margin=args.min_margin,
             min_validator_confidence=args.min_validator_confidence,
+            policy=args.policy,
+            model_on_abstain_only=args.model_on_abstain_only,
             learn=False,
         )
         expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
@@ -234,6 +241,8 @@ def _eval_targets(paths: list[str]) -> list[tuple[str, list[str]]]:
 
 
 def cmd_eval_model(args: argparse.Namespace) -> int:
+    if getattr(args, "policy", None):
+        _apply_policy_defaults(args)
     rows, targets = _run_eval_rows(args)
 
     out_path = Path(args.out)
@@ -274,27 +283,188 @@ def _run_eval_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list
             expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
             if not expected_for_file and args.expect_like:
                 expected_for_file = spec.benchmarks.get(args.expect_like, {})
-            for field in spec.fields:
-                expected = expected_for_file.get(field.name)
-                for model in args.models:
-                    rows.append(
-                        evaluate_field(
-                            spec=spec,
-                            fixture=input_ref,
-                            html=html,
-                            field=field,
-                            expected=expected,
-                            model=model,
-                            top_k=args.top_k,
-                            ollama_host=args.ollama_host,
-                            failures_dir=failures_dir,
-                            strict=args.strict,
-                            min_confidence=args.min_confidence,
-                            min_margin=args.min_margin,
-                            min_validator_confidence=args.min_validator_confidence,
+            if getattr(args, "policy", None) == "safe-local":
+                rows.extend(_run_policy_eval_rows(args, spec, input_ref, html, expected_for_file, failures_dir))
+            else:
+                for field in spec.fields:
+                    expected = expected_for_file.get(field.name)
+                    for model in args.models:
+                        rows.append(
+                            evaluate_field(
+                                spec=spec,
+                                fixture=input_ref,
+                                html=html,
+                                field=field,
+                                expected=expected,
+                                model=model,
+                                top_k=args.top_k,
+                                ollama_host=args.ollama_host,
+                                failures_dir=failures_dir,
+                                strict=args.strict,
+                                min_confidence=args.min_confidence,
+                                min_margin=args.min_margin,
+                                min_validator_confidence=args.min_validator_confidence,
+                            )
                         )
-                    )
     return rows, targets
+
+
+def _run_policy_eval_rows(
+    args: argparse.Namespace,
+    spec,
+    input_ref: str,
+    html: str,
+    expected_for_file: dict[str, Any],
+    failures_dir: Path | None,
+) -> list[dict[str, Any]]:
+    import time
+
+    rows = []
+    candidates = generate_candidates(html)
+    for model in args.models:
+        report_started = time.perf_counter()
+        report = extract_html(
+            spec,
+            html,
+            input_name=basename_key(input_ref),
+            use_llm=model != "heuristic",
+            model=model if model != "heuristic" else "qwen3:1.7b",
+            ollama_host=args.ollama_host,
+            top_k=args.top_k,
+            strict=True,
+            min_confidence=args.min_confidence,
+            min_margin=args.min_margin,
+            min_validator_confidence=args.min_validator_confidence,
+            policy="safe-local",
+            model_on_abstain_only=True,
+            learn=False,
+        )
+        elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
+        for field in spec.fields:
+            extraction = report.fields[field.name]
+            expected = expected_for_file.get(field.name)
+            ranked = rank_candidates(field, candidates, top=max(1, args.top_k))
+            matching = [item for item in ranked if values_match(expected, item.value)]
+            expected_present = expected is not None and str(expected).strip() != ""
+            candidate_present = bool(matching)
+            model_called = any(item.get("stage") == "local_model" for item in extraction.trace)
+            model_latencies = [item.get("latency_ms") for item in extraction.trace if item.get("stage") == "local_model" and item.get("latency_ms") is not None]
+            model_recovered = extraction.source == "model_recovery" and extraction.ok
+            correct = values_match(expected, extraction.value)
+            false_positive = bool(extraction.ok and not correct)
+            heuristic_accepted = any(item.get("stage") == "strict_heuristic" and item.get("status") == "accepted" for item in extraction.trace)
+            heuristic_abstained = any(item.get("stage") == "strict_heuristic" and item.get("status") == "abstained" for item in extraction.trace)
+            model_error = any(item.get("stage") == "local_model" and item.get("status") == "error" for item in extraction.trace)
+            row = {
+                "spec": spec.name,
+                "fixture": input_ref,
+                "field": field.name,
+                "model": model,
+                "policy": "safe-local",
+                "top_k": args.top_k,
+                "expected": expected,
+                "expected_present": expected_present,
+                "candidate_present": candidate_present,
+                "expected_candidate_ids": [item.candidate.id for item in matching],
+                "heuristic_candidate_id": None,
+                "heuristic_value": None,
+                "heuristic_selector": None,
+                "proposed_candidate_id": extraction.candidate_id,
+                "proposed_value": extraction.value,
+                "proposed_selector": extraction.selector,
+                "model_candidate_id": extraction.candidate_id if extraction.source == "model_recovery" else None,
+                "model_value": extraction.value if extraction.source == "model_recovery" else None,
+                "model_selector": extraction.selector if extraction.source == "model_recovery" else None,
+                "model_confidence": None,
+                "model_reason": None,
+                "strict": True,
+                "status": extraction.status,
+                "abstention_reason": extraction.decision.get("reason") if extraction.status == "abstained" else None,
+                "decision_confidence": extraction.confidence,
+                "decision_margin": None,
+                "validated": extraction.ok,
+                "correct": correct,
+                "model_choice_correct": bool(extraction.source == "model_recovery" and extraction.candidate_id in [item.candidate.id for item in matching]),
+                "abstained": extraction.status == "abstained",
+                "false_positive": false_positive,
+                "latency_ms": elapsed_ms,
+                "model_latency_ms": model_latencies[0] if model_latencies else None,
+                "prompt_chars": 0,
+                "model_agreement_vs_heuristic": False,
+                "validation_errors": extraction.validation_errors,
+                "validator_confidence": extraction.validator_confidence,
+                "validator_reasons": extraction.decision.get("validator_reasons", []),
+                "validator_penalties": extraction.decision.get("validator_penalties", []),
+                "hard_disqualifiers": extraction.decision.get("hard_disqualifiers", []),
+                "failure_reason": _policy_failure_reason(extraction, expected_present, candidate_present, correct, model_error),
+                "trace": extraction.trace,
+                "heuristic_accepted": heuristic_accepted,
+                "heuristic_abstained": heuristic_abstained,
+                "model_called": model_called,
+                "model_recovered": model_recovered,
+                "model_validated_recovery": bool(model_recovered and correct),
+                "model_false_positive": bool(extraction.source == "model_recovery" and false_positive),
+                "model_error": model_error,
+            }
+            rows.append(row)
+            if row["failure_reason"] and failures_dir is not None:
+                failures_dir.mkdir(parents=True, exist_ok=True)
+                stem = f"{Path(input_ref).parent.name}_{Path(input_ref).stem}_{field.name}_{model}".replace(":", "_")
+                (failures_dir / f"{stem}.result.json").write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
+    return rows
+
+
+def _policy_failure_reason(extraction, expected_present: bool, candidate_present: bool, correct: bool, model_error: bool) -> str | None:
+    if expected_present and not candidate_present:
+        return "candidate_generation_failed"
+    if model_error:
+        return "model_error"
+    if extraction.status == "abstained":
+        return extraction.decision.get("reason") or "abstained"
+    if not expected_present and extraction.ok:
+        return "false_positive_missing_field"
+    if extraction.ok and not correct:
+        return "model_chose_wrong_candidate" if extraction.source == "model_recovery" else "heuristic_chose_wrong_candidate"
+    return None
+
+
+def _apply_policy_defaults(args: argparse.Namespace) -> None:
+    policy = getattr(args, "policy", None)
+    if policy is None:
+        if getattr(args, "model", None) is None:
+            args.model = "qwen3:1.7b"
+        return
+    defaults = POLICY_DEFAULTS.get(policy)
+    if defaults is None:
+        raise ValueError(f"Unknown policy {policy!r}; expected one of {', '.join(sorted(POLICY_DEFAULTS))}")
+    args.policy = policy
+    if policy in {"safe-local", "aggressive"}:
+        args.model = getattr(args, "model", None) or "qwen3:1.7b"
+    if not getattr(args, "_strict_explicit", False):
+        args.strict = bool(defaults["strict"])
+    if not getattr(args, "_use_llm_explicit", False):
+        args.no_llm = not bool(defaults["use_llm"])
+    if not getattr(args, "_model_on_abstain_only_explicit", False):
+        args.model_on_abstain_only = bool(defaults["model_on_abstain_only"])
+    if not getattr(args, "_min_confidence_explicit", False):
+        args.min_confidence = float(defaults["min_confidence"])
+    if not getattr(args, "_min_margin_explicit", False):
+        args.min_margin = float(defaults["min_margin"])
+    if not getattr(args, "_min_validator_confidence_explicit", False):
+        args.min_validator_confidence = float(defaults["min_validator_confidence"])
+
+
+class ExplicitDefaultsParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        raw_args = list(sys.argv[1:] if args is None else args)
+        parsed = super().parse_args(args, namespace)
+        parsed._strict_explicit = "--strict" in raw_args
+        parsed._use_llm_explicit = "--no-llm" in raw_args
+        parsed._model_on_abstain_only_explicit = "--model-on-abstain-only" in raw_args
+        parsed._min_confidence_explicit = "--min-confidence" in raw_args
+        parsed._min_margin_explicit = "--min-margin" in raw_args
+        parsed._min_validator_confidence_explicit = "--min-validator-confidence" in raw_args
+        return parsed
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
@@ -369,13 +539,15 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
     lines = ["# semscrape model evaluation", ""]
     lines.append("## Overall metrics")
     lines.append("")
-    lines.append("| model | coverage | false positive | validated accuracy | abstention | model error | latency ms |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| model | coverage | false positive | validated accuracy | abstention | model call | model recovery | model error | model p50 ms | e2e p95 ms |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for model, metrics in summary.items():
         lines.append(
             f"| {model} | {metrics['coverage_rate']:.3f} | {metrics['false_positive_rate']:.3f} | "
             f"{metrics['validated_accuracy']:.3f} | {metrics['abstention_rate']:.3f} | "
-            f"{metrics['model_error_rate']:.3f} | {metrics['latency_ms_per_field']:.1f} |"
+            f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('model_recovery_rate', 0.0):.3f} | "
+            f"{metrics['model_error_rate']:.3f} | {metrics.get('model_latency_p50', 0.0):.1f} | "
+            f"{metrics.get('end_to_end_latency_p95', metrics['latency_ms_per_field']):.1f} |"
         )
     lines.extend(["", "## Failure reasons", ""])
     for model, metrics in summary.items():
@@ -440,7 +612,7 @@ def cmd_cache_clear(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = ExplicitDefaultsParser(
         prog="semscrape",
         description="Local-first semantic scraper with deterministic selector repair and optional Ollama support.",
     )
@@ -450,10 +622,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("spec")
     extract.add_argument("input")
     extract.add_argument("--no-llm", action="store_true", help="Do not call the local Ollama model")
-    extract.add_argument("--model", default="qwen3:1.7b", help="Ollama model name")
+    extract.add_argument("--model", default=None, help="Ollama model name")
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
+    extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    extract.add_argument("--model-on-abstain-only", action="store_true", help="Call the local model only after strict heuristic abstention")
     extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
     extract.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
     extract.add_argument("--min-validator-confidence", type=float, default=0.70, help="Strict-mode minimum validator confidence")
@@ -477,10 +651,12 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("spec")
     bench.add_argument("inputs", nargs="+")
     bench.add_argument("--no-llm", action="store_true")
-    bench.add_argument("--model", default="qwen3:1.7b")
+    bench.add_argument("--model", default=None)
     bench.add_argument("--ollama-host", default=None)
     bench.add_argument("--top-k", type=int, default=40)
     bench.add_argument("--strict", action="store_true")
+    bench.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    bench.add_argument("--model-on-abstain-only", action="store_true")
     bench.add_argument("--min-confidence", type=float, default=0.75)
     bench.add_argument("--min-margin", type=float, default=0.15)
     bench.add_argument("--min-validator-confidence", type=float, default=0.70)
@@ -502,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model = sub.add_parser("eval-model", help="Evaluate local model candidate choice against benchmark labels")
     eval_model.add_argument("paths", nargs="+", help="YAML specs and optional HTML inputs. Globs are expanded by semscrape.")
     eval_model.add_argument("--models", nargs="+", required=True, help="Ollama model names, or 'heuristic' for a no-LLM baseline")
+    eval_model.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
     eval_model.add_argument("--top-k", type=int, default=40)
     eval_model.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
     eval_model.add_argument("--min-confidence", type=float, default=0.75)

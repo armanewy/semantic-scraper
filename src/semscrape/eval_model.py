@@ -278,6 +278,12 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         extracted_rows = [row for row in model_rows if not row["abstained"]]
         ambiguous_abstentions = [row for row in model_rows if row["abstained"] and row["failure_reason"] == "ambiguous_candidates"]
         model_error_rows = [row for row in model_rows if row["failure_reason"] == "model_error"]
+        heuristic_accepted = [row for row in model_rows if row.get("heuristic_accepted")]
+        heuristic_abstained = [row for row in model_rows if row.get("heuristic_abstained")]
+        model_called = [row for row in model_rows if row.get("model_called")]
+        model_validated_recovery = [row for row in model_rows if row.get("model_validated_recovery")]
+        model_false_positive = [row for row in model_rows if row.get("model_false_positive")]
+        model_latencies = [row["model_latency_ms"] for row in model_rows if row.get("model_latency_ms") is not None]
         summary[model] = {
             "rows": len(model_rows),
             "expected_present_rows": len(expected_rows),
@@ -291,7 +297,17 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "miss_rate": _rate(sum(row["expected_present"] and not row["correct"] for row in model_rows), len(expected_rows)),
             "false_positive_rate": _rate(sum(row["false_positive"] for row in model_rows), len(model_rows)),
             "model_error_rate": _rate(len(model_error_rows), len(model_rows)),
+            "heuristic_accept_rate": _rate(len(heuristic_accepted), len(model_rows)),
+            "heuristic_abstention_rate": _rate(len(heuristic_abstained), len(model_rows)),
+            "model_call_rate": _rate(len(model_called), len(model_rows)),
+            "model_recovery_rate": _rate(len(model_validated_recovery), len(heuristic_abstained)),
+            "model_validated_recovery_rate": _rate(len(model_validated_recovery), len(model_called)),
+            "model_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
             "latency_ms_per_field": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+            "end_to_end_latency_p50": _percentile(latencies, 50),
+            "end_to_end_latency_p95": _percentile(latencies, 95),
+            "model_latency_p50": _percentile(model_latencies, 50),
+            "model_latency_p95": _percentile(model_latencies, 95),
             "prompt_chars_per_field": round(sum(prompt_chars) / len(prompt_chars), 2) if prompt_chars else 0.0,
             "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in model_rows), len(model_rows)),
             "failure_reasons": dict(_counts(row["failure_reason"] for row in model_rows if row["failure_reason"])),
@@ -428,6 +444,14 @@ def _counts(values) -> dict[str, int]:
     for value in values:
         counts[str(value)] += 1
     return dict(sorted(counts.items()))
+
+
+def _percentile(values: list[float | int], percentile: int) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    index = round((len(ordered) - 1) * percentile / 100)
+    return round(ordered[index], 2)
 
 
 def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

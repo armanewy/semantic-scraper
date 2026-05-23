@@ -127,6 +127,42 @@ Exit criteria:
 
 Status: calibration/report tooling complete; first local bakeoff complete. qwen3:1.7b is the only promising model from the initial matrix.
 
+## M5C: Safe local extraction policy
+
+**Question:** Can semscrape run deterministically when confidence is high, call a local model only when needed, and abstain instead of guessing?
+
+Deliverables:
+
+- `--policy safe-local`.
+- Conservative strict heuristic first.
+- qwen3:1.7b model recovery only after heuristic abstention.
+- Extraction trace output.
+- Recovery metrics in eval/report output.
+- Selector learning only after accepted decisions.
+- Mocked locator tests for safe runtime behavior.
+
+Exit criteria:
+
+- safe-local coverage >= 60%.
+- safe-local false_positive_rate <= 2%.
+- model_call_rate < 75%.
+- model errors never crash extraction.
+- no selector is learned from an abstained or invalid result.
+
+Status: complete on the fixture corpus.
+
+Latest fixture result:
+
+```text
+coverage_rate: 0.606557
+false_positive_rate: 0.000000
+heuristic_accept_rate: 0.295082
+heuristic_abstention_rate: 0.704918
+model_call_rate: 0.704918
+model_recovery_rate: 0.441860
+model_error_rate: 0.032787
+```
+
 ## M6: Rendered pages
 
 **Question:** Can we run this against modern JavaScript pages?

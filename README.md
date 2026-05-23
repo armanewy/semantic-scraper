@@ -124,6 +124,16 @@ semscrape eval-model fixtures/**/*.yml \
 
 Strict mode abstains unless the selected candidate clears confidence, margin, validator-confidence, and hard-disqualifier gates.
 
+Run the safe local production policy:
+
+```bash
+semscrape extract SPEC INPUT \
+  --policy safe-local \
+  --learn
+```
+
+`safe-local` uses cached selectors first, then conservative strict heuristics, and only calls `qwen3:1.7b` after heuristic abstention. Model choices still have to pass validation and strict gates before they can be learned.
+
 Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
 
 ```bash

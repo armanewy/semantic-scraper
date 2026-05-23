@@ -82,3 +82,34 @@ otherwise -> abstain
 ```
 
 The next useful implementation step is a strict-plus-model extraction flow that calls the model only after strict heuristic abstention. The next research step is to inspect the qwen3:1.7b failure artifacts and reduce model errors/no-candidate abstentions.
+
+## Safe-Local Runtime Policy Result
+
+After adding the production policy flow:
+
+```text
+cache -> conservative strict heuristic -> qwen3:1.7b recovery on abstention -> strict gate -> learn accepted only
+```
+
+The fixture result was:
+
+```text
+coverage_rate: 0.606557
+false_positive_rate: 0.000000
+validated_accuracy: 0.616667
+heuristic_accept_rate: 0.295082
+heuristic_abstention_rate: 0.704918
+model_call_rate: 0.704918
+model_recovery_rate: 0.441860
+model_validated_recovery_rate: 0.441860
+model_false_positive_rate: 0.000000
+model_error_rate: 0.032787
+```
+
+This meets the first safe-local gate:
+
+```text
+coverage >= 60%
+false_positive_rate <= 2%
+model_call_rate < 75%
+```

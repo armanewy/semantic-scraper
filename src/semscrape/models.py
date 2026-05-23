@@ -108,6 +108,10 @@ class FieldExtraction:
     candidate_id: str | None = None
     reasons: list[str] = field(default_factory=list)
     status: str = "extracted"
+    model: str | None = None
+    validator_confidence: float = 0.0
+    decision: dict[str, Any] = field(default_factory=dict)
+    trace: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -117,10 +121,14 @@ class FieldExtraction:
             "selector": self.selector,
             "source": self.source,
             "status": self.status,
+            "model": self.model,
             "confidence": round(float(self.confidence), 4),
+            "validator_confidence": round(float(self.validator_confidence), 4),
             "candidate_id": self.candidate_id,
             "validation_errors": self.validation_errors,
             "reasons": self.reasons,
+            "decision": self.decision,
+            "trace": self.trace,
         }
 
 
