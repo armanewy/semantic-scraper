@@ -227,6 +227,48 @@ Exit criteria:
 
 Status: implemented for the minimized replay corpus; real third-party page captures should stay local under `corpus/real_local/` unless reduced to repo-safe repro cases.
 
+## M6D: Selector memory hardening
+
+**Question:** Can learned selectors generalize enough to reduce model calls without increasing false positives?
+
+Deliverables:
+
+- Multi-selector cache per field with structured selector records.
+- Selector strategy labels and quality scoring.
+- Cache validation/rejection reason codes.
+- Selector strategy breakdown in canary/report output.
+- Pass-to-pass replay comparison.
+- Strict current cache format; malformed selector entries fail instead of being migrated.
+
+Exit criteria:
+
+- candidate_recall@40 >= 95%.
+- safe-local coverage >= 60%.
+- false_positive_rate <= 2%.
+- selector_reuse_rate >= 40%.
+- model_call_rate <= 60%.
+- cache_false_positive_rate = 0%.
+- every rejected cached selector has a reason code.
+
+Status: complete on the minimized replay corpus.
+
+Latest minimized replay result:
+
+```text
+pass1:
+  coverage_rate: 0.700000
+  false_positive_rate: 0.000000
+  model_call_rate: 0.600000
+
+pass2:
+  candidate_recall_at_k: 0.985507
+  coverage_rate: 0.700000
+  false_positive_rate: 0.000000
+  selector_reuse_rate: 0.700000
+  model_call_rate: 0.300000
+  cache_false_positive_rate: 0.000000
+```
+
 ## M7: Specialized local ranker
 
 **Question:** Is a tiny specialized model better than generic local LLMs for this task?

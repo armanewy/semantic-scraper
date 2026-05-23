@@ -6,7 +6,7 @@ from typing import Protocol
 
 from .cache import SelectorCache
 from .decision import candidate_confidence, strict_decision
-from .dom import candidate_from_selector, generate_candidates, parse_html
+from .dom import element_to_candidate, generate_candidates, parse_html
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
@@ -53,17 +53,67 @@ class ModelAttempt:
     latency_ms: int
 
 
-def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> RankedCandidate | None:
+@dataclass(slots=True)
+class CacheLookup:
+    candidate: RankedCandidate | None
+    attempted: bool
+    selector_count: int
+    accepted_selector: str | None = None
+    accepted_strategy: str | None = None
+    rejection_reason: str | None = None
+    rejection_selector: str | None = None
+    rejection_strategy: str | None = None
+
+
+def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> CacheLookup:
     soup = parse_html(html)
-    for selector in cache.selectors_for(field):
-        candidate = candidate_from_selector(soup, selector)
-        if candidate is None:
+    entries = cache.selector_entries_for(field)
+    last_reason = None
+    last_selector = None
+    last_strategy = None
+    for entry in entries:
+        selector = str(entry["selector"])
+        strategy = str(entry.get("strategy") or "unknown")
+        last_selector = selector
+        last_strategy = strategy
+        try:
+            matches = soup.select(selector)
+        except Exception:
+            last_reason = "selector_invalid"
+            cache.record_selector_result(field, selector, success=False, reason=last_reason)
             continue
+        if not matches:
+            last_reason = "selector_no_match"
+            cache.record_selector_result(field, selector, success=False, reason=last_reason)
+            continue
+        if len(matches) > 1:
+            last_reason = "selector_many_matches"
+            cache.record_selector_result(field, selector, success=False, reason=last_reason)
+            continue
+        candidate = element_to_candidate(soup, matches[0], 1)
         value = extract_value(field, candidate)
         validation = validate_value(field, value)
+        if candidate.hidden:
+            last_reason = "hidden_candidate"
+            cache.record_selector_result(field, selector, success=False, reason=last_reason)
+            continue
         if validation.passed:
-            return RankedCandidate(candidate, value, score=1.0 + validation.score, validation=validation, reasons=["cache selector validated"])
-    return None
+            cache.record_selector_result(field, selector, success=True)
+            return CacheLookup(
+                RankedCandidate(candidate, value, score=1.0 + validation.score, validation=validation, reasons=["cache selector validated"]),
+                attempted=True,
+                selector_count=len(entries),
+                accepted_selector=selector,
+                accepted_strategy=strategy,
+            )
+        if validation.hard_disqualifiers:
+            last_reason = "value_hard_disqualified"
+        elif validation.errors:
+            last_reason = "value_failed_validator"
+        else:
+            last_reason = "value_low_confidence"
+        cache.record_selector_result(field, selector, success=False, reason=last_reason)
+    return CacheLookup(None, attempted=bool(entries), selector_count=len(entries), rejection_reason=last_reason, rejection_selector=last_selector, rejection_strategy=last_strategy)
 
 
 def _field_extraction(
@@ -202,12 +252,20 @@ def extract_field(
 ) -> FieldExtraction:
     trace: list[dict] = []
     if cache is not None:
-        selectors = cache.selectors_for(field)
-        if selectors:
-            trace.append({"stage": "cache", "status": "attempted", "selector_count": len(selectors)})
-        cached = _cached_candidate(field, html, cache)
+        lookup = _cached_candidate(field, html, cache)
+        if lookup.attempted:
+            trace.append({"stage": "cache", "status": "attempted", "selector_count": lookup.selector_count})
+        cached = lookup.candidate
         if cached is not None:
-            trace.append({"stage": "cache", "status": "hit", "candidate_id": cached.candidate.id})
+            trace.append(
+                {
+                    "stage": "cache",
+                    "status": "hit",
+                    "candidate_id": cached.candidate.id,
+                    "selector": lookup.accepted_selector,
+                    "strategy": lookup.accepted_strategy,
+                }
+            )
             if strict:
                 decision = _evaluate_strict(
                     cached,
@@ -218,10 +276,18 @@ def extract_field(
                     enforce_margin=False,
                 )
                 if not decision.ok:
-                    trace.append({"stage": "cache", "status": "abstained", "reason": decision.reason})
+                    trace.append({"stage": "cache", "status": "abstained", "reason": decision.reason, "selector": lookup.accepted_selector, "strategy": lookup.accepted_strategy})
                     return _abstention(field, source="cache", reason=decision.reason or "cache_rejected", chosen=cached, trace=trace)
             return _field_extraction(field, cached, source="cache", trace=trace)
-        trace.append({"stage": "cache", "status": "miss", "reason": "selector_not_validated" if selectors else "empty"})
+        trace.append(
+            {
+                "stage": "cache",
+                "status": "miss",
+                "reason": lookup.rejection_reason or ("selector_not_validated" if lookup.attempted else "empty"),
+                "selector": lookup.rejection_selector,
+                "strategy": lookup.rejection_strategy,
+            }
+        )
 
     ranked = rank_candidates(field, candidates, top=max(1, top_k))
     heuristic = next((item for item in ranked if item.validation.passed), ranked[0] if ranked else None)

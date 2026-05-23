@@ -370,6 +370,7 @@ def _run_policy_eval_rows(
                 item.get("stage") == "cache" and item.get("status") in {"miss", "abstained"} and item.get("reason") != "empty"
                 for item in extraction.trace
             )
+            cache_event = next((item for item in extraction.trace if item.get("stage") == "cache" and item.get("status") in {"hit", "miss", "abstained"}), {})
             chosen = next((item for item in ranked if item.candidate.id == extraction.candidate_id), None)
             hidden_candidate = bool(chosen and chosen.candidate.hidden)
             base_failure_reason = _policy_failure_reason(extraction, expected_present, candidate_present, correct, model_error)
@@ -429,6 +430,9 @@ def _run_policy_eval_rows(
                 "cache_hit": cache_hit,
                 "cache_validated_hit": bool(extraction.source == "cache" and extraction.ok),
                 "cache_rejected": cache_rejected,
+                "cache_rejection_reason": cache_event.get("reason") if cache_rejected else None,
+                "selector_strategy": cache_event.get("strategy"),
+                "cache_false_positive": bool(extraction.source == "cache" and false_positive),
                 "learned_selector": bool(getattr(args, "learn", False) and extraction.ok and extraction.source in {"heuristic", "model_recovery", "llm"}),
                 "model_call_avoided": bool(cache_hit or heuristic_accepted),
                 "hidden_candidate_chosen": hidden_candidate,
@@ -589,21 +593,64 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    left_rows = read_jsonl(args.left)
+    right_rows = read_jsonl(args.right)
+    text = _compare_report(args.left_label, left_rows, args.right_label, right_rows)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(text, encoding="utf-8")
+    print(f"wrote {args.out}")
+    return 0
+
+
+def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_label: str, right_rows: list[dict[str, Any]]) -> str:
+    def first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        summary = summarize_rows(rows)
+        return next(iter(summary.values())) if summary else {}
+
+    rows = [(left_label, first_metrics(left_rows)), (right_label, first_metrics(right_rows))]
+    lines = ["# semscrape pass comparison", ""]
+    lines.append("| pass | coverage | false positive | selector reuse | model call | cache rejected | cache fp | latency p95 ms |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for label, metrics in rows:
+        lines.append(
+            f"| {label} | {metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
+            f"{metrics.get('selector_reuse_rate', 0.0):.3f} | {metrics.get('model_call_rate', 0.0):.3f} | "
+            f"{metrics.get('cache_rejected_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
+            f"{metrics.get('end_to_end_latency_p95', 0.0):.1f} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _eval_report(rows: list[dict[str, Any]]) -> str:
     summary = summarize_rows(rows)
     lines = ["# semscrape model evaluation", ""]
     lines.append("## Overall metrics")
     lines.append("")
-    lines.append("| model | coverage | false positive | validated accuracy | abstention | model call | model recovery | model error | model p50 ms | e2e p95 ms |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| model | coverage | false positive | validated accuracy | abstention | model call | model recovery | selector reuse | cache fp | model error | model p50 ms | e2e p95 ms |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for model, metrics in summary.items():
         lines.append(
             f"| {model} | {metrics['coverage_rate']:.3f} | {metrics['false_positive_rate']:.3f} | "
             f"{metrics['validated_accuracy']:.3f} | {metrics['abstention_rate']:.3f} | "
             f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('model_recovery_rate', 0.0):.3f} | "
+            f"{metrics.get('selector_reuse_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
             f"{metrics['model_error_rate']:.3f} | {metrics.get('model_latency_p50', 0.0):.1f} | "
             f"{metrics.get('end_to_end_latency_p95', metrics['latency_ms_per_field']):.1f} |"
         )
+    lines.extend(["", "## Selector strategies", ""])
+    lines.append("| model | strategy | attempts | accepted | rejected | false pos | reuse rate |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    wrote_strategy = False
+    for model, metrics in summary.items():
+        for strategy, values in metrics.get("selector_strategy_breakdown", {}).items():
+            wrote_strategy = True
+            lines.append(
+                f"| {model} | {strategy} | {values['attempts']} | {values['accepted']} | "
+                f"{values['rejected']} | {values['false_pos']} | {values['reuse_rate']:.3f} |"
+            )
+    if not wrote_strategy:
+        lines.append("| n/a | n/a | 0 | 0 | 0 | 0 | 0.000 |")
     lines.extend(["", "## Failure reasons", ""])
     for model, metrics in summary.items():
         lines.append(f"### {model}")
@@ -953,6 +1000,14 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("input")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    compare = sub.add_parser("compare", help="Generate a Markdown comparison for two canary/eval passes")
+    compare.add_argument("left")
+    compare.add_argument("right")
+    compare.add_argument("--left-label", default="pass1")
+    compare.add_argument("--right-label", default="pass2")
+    compare.add_argument("--out", required=True)
+    compare.set_defaults(func=cmd_compare)
 
     mutate = sub.add_parser("mutate", help="Generate mutated HTML fixtures to test drift robustness")
     mutate.add_argument("input")

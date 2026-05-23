@@ -288,6 +288,7 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         cache_hits = [row for row in model_rows if row.get("cache_hit")]
         cache_validated_hits = [row for row in model_rows if row.get("cache_validated_hit")]
         cache_rejections = [row for row in model_rows if row.get("cache_rejected")]
+        cache_false_positives = [row for row in model_rows if row.get("cache_false_positive")]
         hidden_candidate_rejections = [row for row in model_rows if row.get("hidden_candidate_rejected")]
         visible_candidate_accepts = [row for row in model_rows if row.get("visible_candidate_accepted")]
         summary[model] = {
@@ -313,7 +314,9 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "cache_hit_rate": _rate(len(cache_hits), len(cache_attempts)),
             "cache_validated_hit_rate": _rate(len(cache_validated_hits), len(model_rows)),
             "cache_rejected_rate": _rate(len(cache_rejections), len(cache_attempts)),
+            "cache_false_positive_rate": _rate(len(cache_false_positives), len(cache_hits)),
             "selector_reuse_rate": _rate(len(cache_validated_hits), len(model_rows)),
+            "selector_strategy_breakdown": _selector_strategy_breakdown(model_rows),
             "learned_selector_count": sum(int(bool(row.get("learned_selector"))) for row in model_rows),
             "model_calls_avoided": sum(int(bool(row.get("model_call_avoided"))) for row in model_rows),
             "hidden_candidate_rejection_rate": _rate(len(hidden_candidate_rejections), len(model_rows)),
@@ -459,6 +462,24 @@ def _counts(values) -> dict[str, int]:
     for value in values:
         counts[str(value)] += 1
     return dict(sorted(counts.items()))
+
+
+def _selector_strategy_breakdown(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        strategy = row.get("selector_strategy")
+        if strategy:
+            by_strategy[str(strategy)].append(row)
+    return {
+        strategy: {
+            "attempts": len(items),
+            "accepted": sum(bool(row.get("cache_validated_hit")) for row in items),
+            "rejected": sum(bool(row.get("cache_rejected")) for row in items),
+            "false_pos": sum(bool(row.get("cache_false_positive")) for row in items),
+            "reuse_rate": _rate(sum(bool(row.get("cache_validated_hit")) for row in items), len(items)),
+        }
+        for strategy, items in sorted(by_strategy.items())
+    }
 
 
 def _percentile(values: list[float | int], percentile: int) -> float:

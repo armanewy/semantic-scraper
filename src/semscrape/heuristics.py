@@ -170,8 +170,18 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score += 0.3
         if len(value) >= 40:
             score += 0.5
+        if candidate.tag == "p" and any(term in attr_ctx for term in {"summary", "dek", "subtitle"}):
+            score += 0.45
+            reasons.append("summary paragraph cue")
         if len(value) > 700:
             score -= 0.8
+
+    if "author" in name or "author" in f_tokens:
+        if any(term in attr_ctx for term in {"author", "byline", "reporter", "writer"}):
+            score += 0.65
+            reasons.append("author/byline cue")
+        if candidate.tag in {"address", "span", "p"}:
+            score += 0.2
 
     if "rating" in name:
         if re.search(r"\b[0-5](?:\.\d)?\b", value):
@@ -191,11 +201,29 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
         score += 0.6
 
     if field.kind == "date" or "date" in name or "published" in name:
+        if candidate.tag == "time":
+            score += 0.55
+            reasons.append("time tag")
+        if any(term in attr_ctx for term in {"published", "datepublished", "publication", "pubdate"}):
+            score += 0.45
+            reasons.append("publication date cue")
         if any(term in ctx for term in DATE_NEGATIVE_TERMS):
             if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in DATE_NEGATIVE_TERMS):
                 score -= 1.0
                 validation.penalties.append("non-publication date cue")
                 reasons.append("penalized non-publication date cue")
+
+    if "install" in name or "command" in name:
+        if candidate.tag in {"code", "pre"}:
+            score += 0.7
+            reasons.append("code/install command cue")
+        if "install" in attr_ctx or "install" in ctx:
+            score += 0.35
+
+    if "python" in name or "version" in name:
+        if "python" in ctx or "requires" in ctx:
+            score += 0.45
+            reasons.append("runtime/version cue")
 
     # Prefer leaf-ish elements. Huge containers often validate accidentally.
     child_text_ratio = len(candidate.own_text) / max(1, len(candidate.text))

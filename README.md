@@ -189,6 +189,28 @@ semscrape failures summarize runs/failures-real-canary
 semscrape failures summarize runs/real-canary.jsonl
 ```
 
+Run the selector-memory hardening benchmark:
+
+```bash
+semscrape canary corpus/repro_minimized/manifest.yml \
+  --policy safe-local \
+  --learn \
+  --cache-dir runs/m6d-cache \
+  --out runs/m6d-pass1.jsonl
+
+semscrape canary corpus/repro_minimized/manifest.yml \
+  --policy safe-local \
+  --cache-dir runs/m6d-cache \
+  --out runs/m6d-pass2.jsonl
+
+semscrape compare runs/m6d-pass1.jsonl runs/m6d-pass2.jsonl \
+  --left-label pass1 \
+  --right-label pass2 \
+  --out runs/m6d-compare.md
+```
+
+Selector cache entries are structured records with strategy labels, quality scores, success/failure counters, and rejection reasons. The cache format is intentionally strict because the project is still pre-release.
+
 Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
 
 ```bash

@@ -61,6 +61,12 @@ def extract_value(field: FieldSpec, candidate: Candidate) -> str:
     if kind == "bool":
         return text.lower()
 
+    name = field.name.lower()
+    if "author" in name:
+        return re.sub(r"^(?:by|author|reporter)\s*[:\-]?\s+", "", text, flags=re.I).strip()
+    if "python" in name or "version" in name:
+        return re.sub(r"^(?:requires?|requirement)\s+", "", text, flags=re.I).strip()
+
     return text
 
 

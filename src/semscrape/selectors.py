@@ -19,6 +19,11 @@ STABLE_ATTRS = (
     "alt",
 )
 
+BEST_ATTRS = {"data-testid", "data-test", "data-qa", "data-cy"}
+SEMANTIC_ATTRS = {"itemprop", "property", "role", "name"}
+ARIA_ATTRS = {"aria-label", "title", "alt"}
+RANDOMISH_RE = re.compile(r"(^|[-_])[a-f0-9]{6,}($|[-_])|css-[a-z0-9]{5,}|__[a-z0-9]{5,}")
+
 IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
 
 
@@ -145,6 +150,45 @@ def unique_selector(soup: BeautifulSoup, element: Tag) -> str:
         parts.append(f"{current.name}:nth-of-type({nth_of_type(current)})")
         current = current.parent if isinstance(current.parent, Tag) else None
     return " > ".join(reversed(parts))
+
+
+def selector_strategy(selector: str) -> str:
+    if any(f"[{attr}=" in selector for attr in BEST_ATTRS):
+        return "stable_attribute"
+    if any(f"[{attr}=" in selector for attr in SEMANTIC_ATTRS):
+        return "semantic_attribute"
+    if any(f"[{attr}=" in selector for attr in ARIA_ATTRS):
+        return "aria_attribute"
+    if selector.startswith("#"):
+        return "semantic_id" if not RANDOMISH_RE.search(selector.lower()) else "risky_id"
+    if "." in selector and ":nth-of-type" not in selector:
+        return "class_semantic" if not RANDOMISH_RE.search(selector.lower()) else "generated_class"
+    if ":nth-of-type" in selector or ":nth-child" in selector:
+        return "position_path"
+    if ">" in selector:
+        return "structural_path"
+    return "tag"
+
+
+def selector_quality(selector: str) -> float:
+    strategy = selector_strategy(selector)
+    base = {
+        "stable_attribute": 0.95,
+        "semantic_attribute": 0.88,
+        "aria_attribute": 0.82,
+        "semantic_id": 0.78,
+        "class_semantic": 0.68,
+        "tag": 0.38,
+        "structural_path": 0.32,
+        "risky_id": 0.26,
+        "generated_class": 0.22,
+        "position_path": 0.16,
+    }.get(strategy, 0.25)
+    if selector.count(">") >= 4:
+        base -= 0.12
+    if selector.count(":nth-of-type") >= 2:
+        base -= 0.10
+    return max(0.0, min(1.0, base))
 
 
 def element_path(element: Tag) -> str:
