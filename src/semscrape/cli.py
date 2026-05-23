@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
+import platform
 import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from . import __version__
+from .assets import DEFAULT_RANKER_NAME, default_ranker_path, load_default_ranker_data
 from .cache import SelectorCache
 from .dataset import (
     build_candidate_dataset_rows,
@@ -59,6 +63,12 @@ def _print_json(data: Any) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+class CliError(RuntimeError):
+    def __init__(self, message: str, code: int = 2):
+        super().__init__(message)
+        self.code = code
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
     html = _load_input(args.input, render=args.render, wait_for=args.wait_for)
@@ -90,10 +100,34 @@ def cmd_extract(args: argparse.Namespace) -> int:
         max_ranker_penalties=args.max_ranker_penalties,
         llm_fallback_policy=args.llm_fallback_policy,
     )
+    _ensure_known_required_fields(report, args)
     if args.values_only:
         _print_json(report.values())
     else:
         _print_json(report.as_dict())
+    return _extract_exit_code(report, args)
+
+
+def _ensure_known_required_fields(report, args: argparse.Namespace) -> None:
+    required = list(getattr(args, "require_fields", []) or [])
+    unknown = [name for name in required if name not in report.fields]
+    if unknown:
+        raise CliError(f"Unknown required field(s): {', '.join(unknown)}", 2)
+
+
+def _extract_exit_code(report, args: argparse.Namespace) -> int:
+    required = list(getattr(args, "require_fields", []) or [])
+    missing_required = [name for name in required if not report.fields[name].ok]
+    extracted = sum(1 for item in report.fields.values() if item.ok)
+    coverage = extracted / len(report.fields) if report.fields else 0.0
+    min_coverage = getattr(args, "min_coverage", None)
+
+    if min_coverage is not None and coverage < min_coverage:
+        print(f"coverage {coverage:.3f} below required minimum {min_coverage:.3f}", file=sys.stderr)
+        return 1
+    if getattr(args, "fail_on_abstain", False) and missing_required:
+        print(f"required field(s) not extracted: {', '.join(missing_required)}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -577,6 +611,15 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.min_margin = float(defaults["min_margin"])
     if not getattr(args, "_min_validator_confidence_explicit", False):
         args.min_validator_confidence = float(defaults["min_validator_confidence"])
+    if not getattr(args, "_max_ranker_penalties_explicit", False) and "max_ranker_penalties" in defaults:
+        args.max_ranker_penalties = int(defaults["max_ranker_penalties"])
+    if policy in {"ranker-local", "ranker-plus-llm"} and not getattr(args, "ranker", None):
+        try:
+            args.ranker = default_ranker_path()
+        except FileNotFoundError as exc:
+            raise CliError(str(exc), 4) from exc
+    if policy in {"ranker-local", "ranker-plus-llm"} and getattr(args, "ranker", None) and not Path(args.ranker).exists():
+        raise CliError(f"Ranker file not found: {args.ranker}", 4)
 
 
 class ExplicitDefaultsParser(argparse.ArgumentParser):
@@ -590,6 +633,7 @@ class ExplicitDefaultsParser(argparse.ArgumentParser):
         parsed._min_confidence_explicit = "--min-confidence" in raw_args
         parsed._min_margin_explicit = "--min-margin" in raw_args
         parsed._min_validator_confidence_explicit = "--min-validator-confidence" in raw_args
+        parsed._max_ranker_penalties_explicit = "--max-ranker-penalties" in raw_args
         return parsed
 
 
@@ -1308,6 +1352,179 @@ def _best_ranker_configs(rows: list[dict[str, Any]], max_false_positive_rate: fl
     return viable[:limit]
 
 
+def cmd_ranker_info(args: argparse.Namespace) -> int:
+    try:
+        model_path = args.model or default_ranker_path()
+        ranker = CandidateRanker.load(model_path)
+        raw = load_default_ranker_data() if args.model is None else json.loads(Path(model_path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CliError(f"Ranker unavailable: {exc}", 4) from exc
+    _print_json(
+        {
+            "default_ranker": args.model is None,
+            "name": DEFAULT_RANKER_NAME if args.model is None else Path(model_path).name,
+            "path": model_path,
+            "schema_version": raw.get("schema_version"),
+            "feature_schema_version": raw.get("feature_schema_version"),
+            "type": raw.get("type"),
+            "feature_count": len(ranker.weights),
+            "threshold": ranker.threshold,
+            "margin": ranker.margin,
+            "recommended_policy": "ranker-local",
+            "metadata": ranker.metadata or {},
+            "metrics": raw.get("metrics", {}),
+        }
+    )
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, *, required: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": ok, "required": required, "detail": detail})
+
+    py_ok = sys.version_info >= (3, 10)
+    add("python", py_ok, required=True, detail=platform.python_version())
+
+    try:
+        ranker_path = default_ranker_path()
+        ranker = CandidateRanker.load(ranker_path)
+        add("default_ranker", True, required=True, detail=f"{DEFAULT_RANKER_NAME} ({len(ranker.weights)} features)")
+    except Exception as exc:
+        add("default_ranker", False, required=True, detail=str(exc))
+
+    examples_ok = Path("examples/product.yml").exists() and Path("examples/product_v2.html").exists()
+    add("examples", examples_ok, required=True, detail="examples/product.yml and examples/product_v2.html")
+
+    playwright_available = importlib.util.find_spec("playwright") is not None
+    add("playwright", playwright_available, required=False, detail="available" if playwright_available else "not installed")
+
+    ollama_host = args.ollama_host or "http://localhost:11434"
+    try:
+        import requests
+
+        response = requests.get(f"{ollama_host.rstrip('/')}/api/tags", timeout=2)
+        response.raise_for_status()
+        models = [item.get("name") for item in response.json().get("models", []) if isinstance(item, dict)]
+        add("ollama", True, required=False, detail=f"reachable at {ollama_host}")
+        add("qwen3:1.7b", any(name == "qwen3:1.7b" for name in models), required=False, detail="installed" if "qwen3:1.7b" in models else "not listed")
+    except Exception as exc:
+        add("ollama", False, required=False, detail=f"not reachable at {ollama_host}: {exc}")
+
+    required_ok = all(item["ok"] for item in checks if item["required"])
+    _print_json({"ok": required_ok, "version": __version__, "checks": checks})
+    return 0 if required_ok else 2
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    root = Path(args.path)
+    if root.exists() and not root.is_dir():
+        raise CliError(f"Target exists and is not a directory: {root}", 2)
+    if root.exists() and any(root.iterdir()) and not args.force:
+        raise CliError(f"Target directory is not empty: {root}", 2)
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    (root / "runs").mkdir(parents=True, exist_ok=True)
+
+    files = {
+        root / "spec.yml": _template_spec(),
+        root / "manifest.yml": _template_manifest(),
+        root / "inputs" / "example.html": _template_html(),
+        root / "runs" / ".gitkeep": "",
+        root / "README.md": _template_readme(root.name),
+    }
+    for path, content in files.items():
+        if path.exists() and not args.force:
+            raise CliError(f"Refusing to overwrite existing file: {path}", 2)
+        path.write_text(content, encoding="utf-8", newline="\n")
+    _print_json({"created": str(root), "files": [str(path) for path in files]})
+    return 0
+
+
+def _template_spec() -> str:
+    return """name: product_scraper
+fields:
+  - name: title
+    type: text
+    description: Main product title, not breadcrumb or recommendation text.
+    hints: [product title, h1]
+    validators:
+      min_length: 3
+      max_length: 120
+  - name: price
+    type: price
+    description: Current purchase price, not list price, shipping, or discount amount.
+    hints: [current price, sale price, buy box]
+    validators:
+      require_currency: true
+  - name: availability
+    type: text
+    description: Current stock or shipping availability for the main product.
+    hints: [availability, stock, shipping]
+    validators:
+      min_length: 3
+      max_length: 80
+benchmarks:
+  example.html:
+    title: Example Trail Mug
+    price: $24.00
+    availability: In stock
+"""
+
+
+def _template_manifest() -> str:
+    return """name: product_scraper_canary
+cases:
+  - id: example_product
+    bucket: local
+    category: product
+    group: example_product
+    version: v1
+    path: spec.yml
+    input: inputs/example.html
+"""
+
+
+def _template_html() -> str:
+    return """<!doctype html>
+<html>
+  <body>
+    <main class="product">
+      <nav>Home / Drinkware</nav>
+      <h1>Example Trail Mug</h1>
+      <p class="list-price">Was $32.00</p>
+      <p class="current-price">Current price <strong>$24.00</strong></p>
+      <p class="shipping">In stock</p>
+      <aside>Recommended: Summit Flask $18.00</aside>
+    </main>
+  </body>
+</html>
+"""
+
+
+def _template_readme(name: str) -> str:
+    return f"""# {name}
+
+Inspect candidates:
+
+```bash
+semscrape inspect spec.yml inputs/example.html price
+```
+
+Extract with the packaged offline ranker:
+
+```bash
+semscrape extract spec.yml inputs/example.html --policy ranker-local --values-only
+```
+
+Run a replay canary:
+
+```bash
+semscrape canary manifest.yml --policy ranker-local --out runs/canary.jsonl
+```
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = ExplicitDefaultsParser(
         prog="semscrape",
@@ -1324,7 +1541,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
-    extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local")
     extract.add_argument("--model-on-abstain-only", action="store_true", help="Call the local model only after strict heuristic abstention")
     extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
     extract.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
@@ -1336,9 +1553,21 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
     extract.add_argument("--values-only", action="store_true", help="Print only extracted values")
+    extract.add_argument("--require-fields", nargs="+", default=[], help="Field names that must extract successfully when --fail-on-abstain is set")
+    extract.add_argument("--fail-on-abstain", action="store_true", help="Return exit code 1 when any required field abstains or fails")
+    extract.add_argument("--min-coverage", type=float, default=None, help="Return exit code 1 when extracted field coverage is below this threshold")
     extract.add_argument("--render", action="store_true", help="Render URL with Playwright before extraction")
     extract.add_argument("--wait-for", default=None, help="CSS selector to wait for when --render is used")
     extract.set_defaults(func=cmd_extract)
+
+    doctor = sub.add_parser("doctor", help="Check local semscrape alpha prerequisites")
+    doctor.add_argument("--ollama-host", default=None)
+    doctor.set_defaults(func=cmd_doctor)
+
+    init = sub.add_parser("init", help="Create a small semscrape project template")
+    init.add_argument("path")
+    init.add_argument("--force", action="store_true", help="Overwrite template files if they already exist")
+    init.set_defaults(func=cmd_init)
 
     inspect = sub.add_parser("inspect", help="Show ranked candidates for one field")
     inspect.add_argument("spec")
@@ -1522,6 +1751,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     ranker = sub.add_parser("ranker", help="Train/evaluate a tiny offline candidate ranker")
     ranker_sub = ranker.add_subparsers(dest="ranker_cmd", required=True)
+    ranker_info = ranker_sub.add_parser("info", help="Show metadata for the packaged or supplied ranker")
+    ranker_info.add_argument("--model", default=None, help="Optional ranker JSON path; defaults to the packaged ranker")
+    ranker_info.set_defaults(func=cmd_ranker_info)
+
     ranker_train = ranker_sub.add_parser("train", help="Train a tiny centroid-delta ranker")
     ranker_train.add_argument("input", help="Candidate-ranking train JSONL")
     ranker_train.add_argument("--out", required=True)
@@ -1568,6 +1801,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
+    except CliError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.code
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130

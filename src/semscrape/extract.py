@@ -43,6 +43,7 @@ POLICY_DEFAULTS = {
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
+        "max_ranker_penalties": 1,
     },
     "ranker-plus-llm": {
         "strict": True,
@@ -52,6 +53,7 @@ POLICY_DEFAULTS = {
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
+        "max_ranker_penalties": 1,
     },
     "aggressive": {
         "strict": False,

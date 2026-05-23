@@ -33,7 +33,7 @@ Then it should regenerate a deterministic selector once it finds the right eleme
 
 ## Current status
 
-This repo is a working milestone-1/milestone-2 project:
+This repo is a developer-alpha semantic scraper CLI:
 
 - Static HTML extraction works.
 - Deterministic candidate ranking works.
@@ -46,6 +46,7 @@ This repo is a working milestone-1/milestone-2 project:
 - Optional Playwright rendering is included for JavaScript pages.
 - Replayable rendered-page snapshots and real-page canary evaluation are included.
 - Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
+- A packaged default ranker is included, so `ranker-local` works without Ollama or an explicit `--ranker` path.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -73,11 +74,17 @@ playwright install chromium
 
 ## Quick demo
 
-Extract from two structurally different product pages without an LLM:
+Check the local install:
 
 ```bash
-semscrape extract examples/product.yml examples/product_v1.html --no-llm --values-only
-semscrape extract examples/product.yml examples/product_v2.html --no-llm --values-only
+semscrape doctor
+semscrape ranker info
+```
+
+Extract with the packaged offline ranker:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html --values-only
 ```
 
 Expected output for `product_v2.html`:
@@ -95,6 +102,33 @@ Run the benchmark:
 
 ```bash
 semscrape benchmark examples/product.yml examples/product_v1.html examples/product_v2.html --no-llm
+```
+
+Use script-friendly required-field gates:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html \
+  --require-fields title price availability \
+  --fail-on-abstain \
+  --min-coverage 0.75
+```
+
+Create a small starter project:
+
+```bash
+semscrape init product-scraper
+cd product-scraper
+semscrape extract spec.yml inputs/example.html --policy ranker-local --values-only
+```
+
+Exit codes for alpha scripting:
+
+```text
+0 = extraction/check succeeded
+1 = extraction completed, but required fields or minimum coverage failed
+2 = config/spec/runtime error
+3 = reserved for render/network errors
+4 = model or ranker unavailable
 ```
 
 Evaluate the model locator against the fixture corpus:

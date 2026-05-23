@@ -10,8 +10,8 @@ lint:
 	ruff check src tests
 
 demo:
-	semscrape extract examples/product.yml examples/product_v1.html --no-llm --values-only
-	semscrape extract examples/product.yml examples/product_v2.html --no-llm --values-only
+	semscrape extract examples/product.yml examples/product_v1.html --policy ranker-local --values-only
+	semscrape extract examples/product.yml examples/product_v2.html --policy ranker-local --values-only
 
 mutate:
 	rm -rf mutations

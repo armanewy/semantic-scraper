@@ -540,3 +540,33 @@ Exit criteria:
 - Hybrid improves holdout coverage with qwen_call_rate <= 10%.
 
 Status: ranker-local gate passed on OOD dev and sealed holdout; hybrid safety passed, but hybrid coverage lift is pending.
+
+## M8B: Developer alpha packaging
+
+**Question:** Can another developer install semscrape and use it safely as a CLI tool?
+
+Deliverables:
+
+- Packaged default ranker artifact at `src/semscrape/assets/candidate-ranker-v2.json`.
+- `ranker-local` works without explicit `--ranker`.
+- `semscrape ranker info`.
+- `semscrape doctor`.
+- `semscrape init`.
+- Required-field flags:
+  - `--require-fields`
+  - `--fail-on-abstain`
+  - `--min-coverage`
+- Deterministic alpha exit codes.
+- GitHub Actions CI for ruff, pytest, doctor, ranker info, offline extract, and OOD holdout canary smoke.
+- Alpha quickstart docs.
+- Versioned ranker artifact metadata and release checklist.
+
+Exit criteria:
+
+- Fresh clone can run tests and demos.
+- Offline ranker-local demo works without Ollama.
+- OOD holdout canary works without Ollama.
+- Required-field workflows return deterministic exit codes.
+- Optional qwen fallback is documented but not required.
+
+Status: passed for developer-alpha packaging.
