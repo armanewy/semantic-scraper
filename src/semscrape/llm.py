@@ -17,7 +17,7 @@ class LLMError(RuntimeError):
 
 @dataclass(slots=True)
 class LLMChoice:
-    candidate_id: str
+    candidate_id: str | None
     confidence: float
     reason: str = ""
     raw: dict[str, Any] | None = None
@@ -41,6 +41,7 @@ class OllamaLocator:
             "type": "object",
             "properties": {
                 "candidate_id": {"type": "string", "description": "ID of the chosen candidate, e.g. c0042"},
+                "abstain": {"type": "boolean", "description": "True when no candidate safely matches the field."},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reason": {"type": "string"},
             },
@@ -64,7 +65,8 @@ class OllamaLocator:
         schema = self.response_schema()
         system = (
             "You are a DOM semantic locator. Choose exactly one candidate that best contains the requested field. "
-            "Return only JSON matching the schema. Do not invent candidate IDs. Prefer candidates whose extracted_value is the scalar field value, not a broad container."
+            "Return only JSON matching the schema. Do not invent candidate IDs. Prefer candidates whose extracted_value is the scalar field value, not a broad container. "
+            "If no candidate safely matches, set candidate_id to an empty string, abstain to true, and explain why."
         )
         user = {
             "field": {
@@ -109,6 +111,8 @@ class OllamaLocator:
         except (TypeError, ValueError):
             confidence = 0.0
         reason = str(parsed.get("reason", ""))
+        if not candidate_id or parsed.get("abstain") is True:
+            return LLMChoice(candidate_id=None, confidence=max(0.0, min(1.0, confidence)), reason=reason, raw=data)
         valid_ids = {item.candidate.id for item in ranked}
         if candidate_id not in valid_ids:
             raise LLMError(f"Model chose unknown candidate ID {candidate_id!r}")

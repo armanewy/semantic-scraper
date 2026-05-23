@@ -38,6 +38,8 @@ def _choose_with_llm(
         return None, str(exc)
 
     by_id = {item.candidate.id: item for item in ranked}
+    if choice.candidate_id is None:
+        return None, f"LLM abstained: {choice.reason}"
     chosen = by_id.get(choice.candidate_id)
     if chosen is None:
         return None, f"LLM chose missing candidate {choice.candidate_id}"

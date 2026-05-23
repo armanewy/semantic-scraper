@@ -48,14 +48,25 @@ Deliverables:
 - JSON schema response format.
 - Confidence threshold.
 - Validation fallback.
-- Model bakeoff script/command.
+- `eval-model` bakeoff command.
+- Per-field JSONL rows.
+- Failure corpus artifacts.
+- Hard fixture corpus with distractors, changed layouts, missing fields, articles, listings, and tables.
 
 Exit criteria:
 
 - qwen3:1.7b or similar small model achieves acceptable choice accuracy on candidate lists.
 - Failed model choices are logged into a failure corpus.
 
-Status: implemented, not locally evaluated in this sandbox.
+Acceptance gates:
+
+- candidate_recall@40 >= 95%.
+- model_choice_accuracy_when_candidate_present >= 90%.
+- validated_accuracy >= 90%.
+- false_positive_rate <= 2%.
+- Abstention on ambiguous or missing fields is allowed.
+
+Status: evaluation harness complete; local model bakeoff still needs to run against Ollama.
 
 ## M4: Persistent extraction memory
 

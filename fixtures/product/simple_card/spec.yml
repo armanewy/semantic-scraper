@@ -1,0 +1,57 @@
+name: fixture_product_simple_card
+fields:
+  - name: title
+    type: text
+    description: Main product title, not breadcrumb, recommendation, or page title.
+    hints: [product name, main title, h1]
+    validators:
+      min_length: 6
+      max_length: 80
+      not_contains: [Home, Sponsored]
+  - name: price
+    type: price
+    description: Current sale price for the main product, not list price, shipping, coupon savings, or sponsored item price.
+    hints: [current price, sale price, now, buy box]
+    validators:
+      require_currency: true
+      regex_not: ["129\\.99", "9\\.99", "74\\.99"]
+  - name: rating
+    type: number
+    description: Star rating for the main product, not review count or comment count.
+    hints: [rating, stars, review score]
+    validators:
+      regex: ["^4\\.7$"]
+  - name: availability
+    type: text
+    description: Stock or shipping availability for the main product.
+    hints: [availability, stock, ships]
+    validators:
+      min_length: 4
+      max_length: 40
+
+benchmarks:
+  v1.html:
+    title: Acme Trail Runner 2
+    price: $89.99
+    rating: "4.7"
+    availability: In stock
+  v2_changed_classes.html:
+    title: Acme Trail Runner 2
+    price: $89.99
+    rating: "4.7"
+    availability: In stock
+  v3_changed_layout.html:
+    title: Acme Trail Runner 2
+    price: $89.99
+    rating: "4.7"
+    availability: In stock
+  v4_price_near_discount.html:
+    title: Acme Trail Runner 2
+    price: $89.99
+    rating: "4.7"
+    availability: In stock
+  v5_multiple_prices.html:
+    title: Acme Trail Runner 2
+    price: $89.99
+    rating: "4.7"
+    availability: In stock

@@ -1,0 +1,50 @@
+name: fixture_article_news_article
+fields:
+  - name: title
+    type: text
+    description: Main article headline, not site name, breadcrumb, or related article title.
+    hints: [headline, article title, h1]
+    validators:
+      min_length: 8
+      max_length: 120
+  - name: author
+    type: text
+    description: Article byline author, not author bio text or editor name.
+    hints: [byline, author, reporter]
+    validators:
+      min_length: 4
+      max_length: 60
+      regex_not: ["Editor"]
+  - name: published_at
+    type: date
+    description: Original publication date for the article, not updated date or author bio date.
+    hints: [published, publication date, datePublished]
+  - name: summary
+    type: text
+    description: Short article dek or summary.
+    hints: [summary, dek, subtitle]
+    validators:
+      min_length: 20
+      max_length: 180
+
+benchmarks:
+  v1.html:
+    title: Chipmakers Rally as Orders Recover
+    author: Maya Chen
+    published_at: May 7, 2026
+    summary: Semiconductor suppliers rose after new order data pointed to a recovery.
+  v2_author_moved.html:
+    title: Chipmakers Rally as Orders Recover
+    author: Maya Chen
+    published_at: May 7, 2026
+    summary: Semiconductor suppliers rose after new order data pointed to a recovery.
+  v3_date_in_meta.html:
+    title: Chipmakers Rally as Orders Recover
+    author: Maya Chen
+    published_at: May 7, 2026
+    summary: Semiconductor suppliers rose after new order data pointed to a recovery.
+  v4_title_changed_tag.html:
+    title: Chipmakers Rally as Orders Recover
+    author: Maya Chen
+    published_at: May 7, 2026
+    summary: Semiconductor suppliers rose after new order data pointed to a recovery.

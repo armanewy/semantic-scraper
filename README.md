@@ -41,6 +41,7 @@ This repo is a working milestone-1/milestone-2 project:
 - Selector repair cache is included.
 - Mutation testing is included.
 - Candidate recall testing is included.
+- Local model evaluation with JSONL output and failure artifacts is included.
 - Optional local Ollama candidate chooser is included.
 - Optional Playwright rendering is included for JavaScript pages.
 
@@ -93,6 +94,23 @@ Run the benchmark:
 ```bash
 semscrape benchmark examples/product.yml examples/product_v1.html examples/product_v2.html --no-llm
 ```
+
+Evaluate the model locator against the fixture corpus:
+
+```bash
+semscrape eval-model fixtures/**/*.yml \
+  --models qwen3:1.7b gemma3:1b \
+  --top-k 40 \
+  --out runs/model-eval.jsonl
+```
+
+Use the no-LLM baseline to validate the harness without Ollama:
+
+```bash
+semscrape eval-model fixtures/**/*.yml --models heuristic --top-k 40
+```
+
+The eval command writes one JSONL row per field, page, and model. When a row fails, it writes debug artifacts under `runs/failures/`: the HTML, prompt metadata, ranked candidates, and model result.
 
 Generate mutated pages and test candidate recall:
 
@@ -167,6 +185,7 @@ semscrape extract SPEC INPUT [--no-llm] [--learn] [--model MODEL]
 semscrape inspect SPEC INPUT FIELD --top-k 20
 semscrape benchmark SPEC INPUT... [--expect-like BASENAME]
 semscrape recall SPEC INPUT... --top-k 40 [--expect-like BASENAME]
+semscrape eval-model SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40
 semscrape mutate INPUT --out DIR --n 20 --seed 7
 semscrape cache-clear CACHE_PATH
 ```
@@ -184,6 +203,7 @@ src/semscrape/
   cache.py       selector memory / lock files
   cli.py         command line entrypoint
   dom.py         HTML -> compact candidate elements
+  eval_model.py  local model evaluation harness
   extract.py     extraction and repair loop
   heuristics.py  deterministic ranking
   llm.py         local Ollama candidate chooser
@@ -202,9 +222,16 @@ examples/
 
 tests/
   test_candidate_generation.py
+  test_eval_model.py
   test_extract_no_llm.py
   test_selectors.py
   test_validators.py
+
+fixtures/
+  product/simple_card/
+  article/news_article/
+  listings/search_results/
+  tables/pricing_table/
 ```
 
 ## Milestones
@@ -252,7 +279,7 @@ If recall is poor, no LLM can reliably fix the scraper.
 
 ### Milestone 3 — Local model chooser
 
-Status: implemented, needs local-machine evaluation.
+Status: evaluation harness implemented, needs local model bakeoff.
 
 Goal: Let a small local model choose from top-K candidates when deterministic confidence is weak or cached selectors fail.
 
@@ -262,12 +289,24 @@ Implemented:
 - JSON-schema response format.
 - Confidence threshold.
 - Validation fallback.
+- `eval-model` command.
+- Per-field JSONL rows.
+- Failure corpus artifacts.
+- Hard fixture corpus with distractors, changed layouts, missing fields, listings, articles, and tables.
+
+Acceptance criteria:
+
+```text
+candidate_recall@40 >= 95%
+model_choice_accuracy_when_candidate_present >= 90%
+validated_accuracy >= 90%
+false_positive_rate <= 2%
+```
 
 Next work:
 
 - Run model bakeoff: `qwen3:1.7b`, `gemma3:1b`, `llama3.2:1b`.
-- Store model mistakes in a failure corpus.
-- Add a CLI command that compares model choices against expected candidates.
+- Compare failure artifacts to classify candidate misses, model mistakes, validator leaks, and ambiguous specs.
 
 ### Milestone 4 — Selector repair cache
 
