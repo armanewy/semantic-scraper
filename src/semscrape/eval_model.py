@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .decision import candidate_confidence, strict_decision
+from .decision import candidate_confidence, candidate_margin, strict_decision
 from .dom import generate_candidates
 from .heuristics import rank_candidates
 from .llm import LLMError, OllamaLocator
@@ -185,6 +185,8 @@ def evaluate_field(
     extracted = proposed if gate is None or gate.ok else None
     proposed_value = proposed.value if proposed else None
     proposed_id = proposed.candidate.id if proposed else None
+    proposed_confidence = candidate_confidence(proposed)
+    proposed_margin = candidate_margin(proposed, ranked) if proposed else None
     selected_value = extracted.value if extracted else None
     selected_id = extracted.candidate.id if extracted else None
     validated = bool(extracted and extracted.validation.passed)
@@ -225,6 +227,8 @@ def evaluate_field(
         "proposed_candidate_id": proposed_id,
         "proposed_value": proposed_value,
         "proposed_selector": proposed.candidate.selector if proposed else None,
+        "proposed_confidence": proposed_confidence,
+        "proposed_margin": proposed_margin,
         "model_candidate_id": selected_id,
         "model_value": selected_value,
         "model_selector": extracted.candidate.selector if extracted else None,
@@ -233,8 +237,8 @@ def evaluate_field(
         "strict": strict,
         "status": "abstained" if abstained else "extracted",
         "abstention_reason": failure_reason if abstained else None,
-        "decision_confidence": gate.confidence if gate else candidate_confidence(proposed),
-        "decision_margin": gate.margin if gate else None,
+        "decision_confidence": gate.confidence if gate else proposed_confidence,
+        "decision_margin": gate.margin if gate else proposed_margin,
         "validated": validated,
         "correct": correct,
         "model_choice_correct": model_choice_correct,
@@ -293,6 +297,126 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "failure_reasons": dict(_counts(row["failure_reason"] for row in model_rows if row["failure_reason"])),
         }
     return summary
+
+
+def summarize_flat_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    expected_rows = [row for row in rows if row["expected_present"]]
+    candidate_rows = [row for row in expected_rows if row["candidate_present"]]
+    absent_rows = [row for row in rows if not row["expected_present"]]
+    extracted_rows = [row for row in rows if not row["abstained"]]
+    ambiguous_abstentions = [row for row in rows if row["abstained"] and row["failure_reason"] == "ambiguous_candidates"]
+    model_error_rows = [row for row in rows if row["failure_reason"] == "model_error"]
+    latencies = [row["latency_ms"] for row in rows]
+    prompt_chars = [row["prompt_chars"] for row in rows]
+    return {
+        "rows": len(rows),
+        "expected_present_rows": len(expected_rows),
+        "expected_absent_rows": len(absent_rows),
+        "candidate_recall_at_k": _rate(sum(row["candidate_present"] for row in expected_rows), len(expected_rows)),
+        "coverage_rate": _rate(len(extracted_rows), len(rows)),
+        "model_choice_accuracy_when_candidate_present": _rate(sum(row["model_choice_correct"] for row in candidate_rows), len(candidate_rows)),
+        "validated_accuracy": _rate(sum(row["validated"] and row["correct"] for row in expected_rows), len(expected_rows)),
+        "abstention_rate": _rate(sum(row["abstained"] for row in rows), len(rows)),
+        "ambiguous_abstention_rate": _rate(len(ambiguous_abstentions), len(rows)),
+        "miss_rate": _rate(sum(row["expected_present"] and not row["correct"] for row in rows), len(expected_rows)),
+        "false_positive_rate": _rate(sum(row["false_positive"] for row in rows), len(rows)),
+        "model_error_rate": _rate(len(model_error_rows), len(rows)),
+        "latency_ms_per_field": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+        "prompt_chars_per_field": round(sum(prompt_chars) / len(prompt_chars), 2) if prompt_chars else 0.0,
+        "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in rows), len(rows)),
+        "failure_reasons": dict(_counts(row["failure_reason"] for row in rows if row["failure_reason"])),
+    }
+
+
+def apply_thresholds(
+    rows: list[dict[str, Any]],
+    *,
+    min_confidence: float,
+    min_margin: float,
+    min_validator_confidence: float,
+    enforce_margin: bool = True,
+) -> list[dict[str, Any]]:
+    calibrated: list[dict[str, Any]] = []
+    for row in rows:
+        out = dict(row)
+        proposed_id = row.get("proposed_candidate_id")
+        proposed_value = row.get("proposed_value")
+        hard_disqualifiers = row.get("hard_disqualifiers") or []
+        validator_confidence = float(row.get("validator_confidence") or 0.0)
+        confidence = float(row.get("proposed_confidence") or 0.0)
+        margin = row.get("proposed_margin")
+        margin_value = float(margin) if margin is not None else 0.0
+        reason = None
+
+        if row.get("failure_reason") == "model_error":
+            reason = "model_error"
+        elif not proposed_id:
+            reason = "model_abstained"
+        elif hard_disqualifiers:
+            reason = "validator_disqualified"
+        elif validator_confidence < min_validator_confidence:
+            reason = "low_validator_confidence"
+        elif confidence < min_confidence:
+            reason = "low_confidence"
+        elif enforce_margin and margin_value < min_margin:
+            reason = "ambiguous_candidates"
+
+        abstained = reason is not None
+        correct = values_match(row.get("expected"), proposed_value) if not abstained else False
+        validated = bool(not abstained and row.get("validation_errors") == [])
+        out.update(
+            {
+                "strict": True,
+                "status": "abstained" if abstained else "extracted",
+                "abstained": abstained,
+                "abstention_reason": reason if abstained else None,
+                "failure_reason": _calibrated_failure_reason(row, reason, correct, validated),
+                "model_candidate_id": None if abstained else proposed_id,
+                "model_value": None if abstained else proposed_value,
+                "model_selector": None if abstained else row.get("proposed_selector"),
+                "validated": validated,
+                "correct": correct,
+                "false_positive": bool(validated and not correct),
+                "decision_confidence": confidence,
+                "decision_margin": margin,
+                "min_confidence": min_confidence,
+                "min_margin": min_margin,
+                "min_validator_confidence": min_validator_confidence,
+            }
+        )
+        calibrated.append(out)
+    return calibrated
+
+
+def _calibrated_failure_reason(row: dict[str, Any], abstention_reason: str | None, correct: bool, validated: bool) -> str | None:
+    if row.get("expected_present") and not row.get("candidate_present"):
+        return "candidate_generation_failed"
+    if abstention_reason:
+        return abstention_reason
+    if not row.get("expected_present") and validated:
+        return "false_positive_missing_field"
+    if not validated:
+        return "validator_rejected_choice"
+    if row.get("expected_present") and not correct:
+        return "model_chose_wrong_candidate"
+    return None
+
+
+def append_calibration_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    rows = []
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
 
 
 def _rate(num: int, den: int) -> float:

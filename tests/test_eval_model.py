@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from semscrape.eval_model import evaluate_field, summarize_rows
+from semscrape.eval_model import (
+    apply_thresholds,
+    evaluate_field,
+    summarize_flat_rows,
+    summarize_rows,
+)
 from semscrape.spec import load_spec
 
 
@@ -93,3 +98,33 @@ def test_strict_eval_abstains_on_missing_optional_field(tmp_path):
     assert row["abstained"] is True
     assert row["false_positive"] is False
     assert row["failure_reason"] in {"low_confidence", "ambiguous_candidates", "low_validator_confidence"}
+
+
+def test_threshold_sweep_can_recover_metrics_from_loose_rows(tmp_path):
+    spec = load_spec("fixtures/product/simple_card/spec.yml")
+    html_path = Path("fixtures/product/simple_card/v1.html")
+    html = html_path.read_text(encoding="utf-8")
+    field = next(item for item in spec.fields if item.name == "price")
+    row = evaluate_field(
+        spec=spec,
+        fixture=str(html_path),
+        html=html,
+        field=field,
+        expected=spec.benchmarks["v1.html"]["price"],
+        model="heuristic",
+        top_k=40,
+        ollama_host=None,
+        failures_dir=tmp_path,
+    )
+
+    calibrated = apply_thresholds(
+        [row],
+        min_confidence=0.5,
+        min_margin=0.0,
+        min_validator_confidence=0.5,
+    )
+    summary = summarize_flat_rows(calibrated)
+
+    assert len(calibrated) == 1
+    assert summary["coverage_rate"] == 1.0
+    assert summary["false_positive_rate"] == 0.0

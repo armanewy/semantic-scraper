@@ -124,6 +124,21 @@ semscrape eval-model fixtures/**/*.yml \
 
 Strict mode abstains unless the selected candidate clears confidence, margin, validator-confidence, and hard-disqualifier gates.
 
+Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
+
+```bash
+semscrape calibrate fixtures/**/*.yml \
+  --models heuristic \
+  --top-k 40 \
+  --out runs/calibration.jsonl
+```
+
+Generate a Markdown report from eval or calibration output:
+
+```bash
+semscrape report runs/calibration.jsonl --out runs/calibration.md
+```
+
 Generate mutated pages and test candidate recall:
 
 ```bash
@@ -210,6 +225,8 @@ semscrape inspect SPEC INPUT FIELD --top-k 20
 semscrape benchmark SPEC INPUT... [--expect-like BASENAME]
 semscrape recall SPEC INPUT... --top-k 40 [--expect-like BASENAME]
 semscrape eval-model SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40 [--strict]
+semscrape calibrate SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40
+semscrape report RUN_JSONL --out REPORT.md
 semscrape mutate INPUT --out DIR --n 20 --seed 7
 semscrape cache-clear CACHE_PATH
 ```
@@ -359,6 +376,8 @@ Implemented:
 - Strict decision gate with `--strict`, `--min-confidence`, `--min-margin`, and `--min-validator-confidence`.
 - `status: abstained` extraction results with reason codes.
 - Eval summaries split coverage, misses, abstentions, model errors, and false positives.
+- Threshold calibration sweep.
+- Markdown reports for eval and calibration runs.
 
 Target:
 
@@ -368,7 +387,28 @@ LLM strict false_positive_rate <= heuristic strict
 LLM strict coverage >= heuristic strict
 ```
 
-### Milestone 5 — Rendered pages
+### Milestone 5 — Local model bakeoff and threshold calibration
+
+Status: calibration/report tooling implemented, needs local Ollama models.
+
+Goal: Determine whether local models recover coverage from strict-mode abstentions without reintroducing false positives.
+
+Implemented:
+
+- `eval-model --strict` for local model bakeoffs.
+- `calibrate` threshold sweeps for confidence, margin, and validator gates.
+- `calibrate --from-jsonl` to reuse existing model eval output without calling models again.
+- `report` for Markdown summaries.
+
+Targets:
+
+```text
+Good: coverage >= 45% with false_positive_rate <= 2%
+Great: coverage >= 60% with false_positive_rate <= 2%
+Excellent: coverage >= 70% with false_positive_rate <= 2%
+```
+
+### Milestone 6 — Rendered pages
 
 Status: first pass implemented.
 
@@ -387,7 +427,7 @@ Next work:
 - Support iframes.
 - Add login/session storage.
 
-### Milestone 6 — Tiny model or classifier
+### Milestone 7 — Tiny model or classifier
 
 Status: not started.
 

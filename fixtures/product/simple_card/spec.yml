@@ -14,7 +14,7 @@ fields:
     hints: [current price, sale price, now, buy box]
     validators:
       require_currency: true
-      regex_not: ["129\\.99", "9\\.99", "74\\.99"]
+      regex_not: ["\\$129\\.99", "\\$9\\.99", "\\$74\\.99"]
   - name: rating
     type: number
     description: Star rating for the main product, not review count or comment count.

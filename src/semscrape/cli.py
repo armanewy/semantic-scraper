@@ -9,7 +9,15 @@ from typing import Any
 
 from .cache import SelectorCache
 from .dom import generate_candidates
-from .eval_model import append_jsonl, evaluate_field, summarize_rows
+from .eval_model import (
+    append_calibration_jsonl,
+    append_jsonl,
+    apply_thresholds,
+    evaluate_field,
+    read_jsonl,
+    summarize_flat_rows,
+    summarize_rows,
+)
 from .extract import extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
@@ -226,14 +234,36 @@ def _eval_targets(paths: list[str]) -> list[tuple[str, list[str]]]:
 
 
 def cmd_eval_model(args: argparse.Namespace) -> int:
+    rows, targets = _run_eval_rows(args)
+
+    out_path = Path(args.out)
+    append_jsonl(out_path, rows)
+    summary = {
+        "out": str(out_path),
+        "failures_dir": args.failures_dir,
+        "targets": [{"spec": spec, "inputs": inputs} for spec, inputs in targets],
+        "summary": summarize_rows(rows),
+        "acceptance_criteria": {
+            "candidate_recall_at_k": ">= 0.95",
+            "model_choice_accuracy_when_candidate_present": ">= 0.90",
+            "validated_accuracy": ">= 0.90",
+            "false_positive_rate": "<= 0.02",
+            "strict_heuristic_false_positive_rate": "<= 0.05",
+        },
+    }
+    _print_json(summary)
+    return 0
+
+
+def _run_eval_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[tuple[str, list[str]]]]:
     try:
         targets = _eval_targets(args.paths)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return 2
+        raise SystemExit(2) from exc
     if not targets:
         print("No eval inputs found. Provide HTML inputs or specs with benchmark entries.", file=sys.stderr)
-        return 2
+        raise SystemExit(2)
 
     rows = []
     failures_dir = Path(args.failures_dir) if args.failures_dir else None
@@ -264,24 +294,136 @@ def cmd_eval_model(args: argparse.Namespace) -> int:
                             min_validator_confidence=args.min_validator_confidence,
                         )
                     )
+    return rows, targets
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    if args.from_jsonl:
+        base_rows = read_jsonl(args.from_jsonl)
+        targets = []
+    else:
+        eval_args = argparse.Namespace(**vars(args))
+        eval_args.strict = False
+        eval_args.failures_dir = None
+        base_rows, targets = _run_eval_rows(eval_args)
+
+    calibration_rows = []
+    by_model: dict[str, list[dict[str, Any]]] = {}
+    for row in base_rows:
+        by_model.setdefault(row["model"], []).append(row)
+
+    for model, rows in sorted(by_model.items()):
+        for min_confidence in args.min_confidence:
+            for min_margin in args.min_margin:
+                for min_validator_confidence in args.min_validator_confidence:
+                    calibrated = apply_thresholds(
+                        rows,
+                        min_confidence=min_confidence,
+                        min_margin=min_margin,
+                        min_validator_confidence=min_validator_confidence,
+                        enforce_margin=not args.no_margin_gate,
+                    )
+                    metrics = summarize_flat_rows(calibrated)
+                    calibration_rows.append(
+                        {
+                            "model": model,
+                            "min_confidence": min_confidence,
+                            "min_margin": min_margin,
+                            "min_validator_confidence": min_validator_confidence,
+                            **metrics,
+                        }
+                    )
 
     out_path = Path(args.out)
-    append_jsonl(out_path, rows)
-    summary = {
-        "out": str(out_path),
-        "failures_dir": str(failures_dir) if failures_dir else None,
-        "targets": [{"spec": spec, "inputs": inputs} for spec, inputs in targets],
-        "summary": summarize_rows(rows),
-        "acceptance_criteria": {
-            "candidate_recall_at_k": ">= 0.95",
-            "model_choice_accuracy_when_candidate_present": ">= 0.90",
-            "validated_accuracy": ">= 0.90",
-            "false_positive_rate": "<= 0.02",
-            "strict_heuristic_false_positive_rate": "<= 0.05",
-        },
-    }
-    _print_json(summary)
+    append_calibration_jsonl(out_path, calibration_rows)
+    viable = [row for row in calibration_rows if row["false_positive_rate"] <= args.max_false_positive_rate]
+    viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
+    _print_json(
+        {
+            "out": str(out_path),
+            "source_jsonl": args.from_jsonl,
+            "targets": [{"spec": spec, "inputs": inputs} for spec, inputs in targets],
+            "rows": len(calibration_rows),
+            "max_false_positive_rate": args.max_false_positive_rate,
+            "best_under_fpr": viable[:10],
+        }
+    )
     return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    rows = read_jsonl(args.input)
+    if not rows:
+        print("No rows to report", file=sys.stderr)
+        return 2
+    is_calibration = "min_confidence" in rows[0] and "coverage_rate" in rows[0]
+    text = _calibration_report(rows) if is_calibration else _eval_report(rows)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(text, encoding="utf-8")
+    print(f"wrote {args.out}")
+    return 0
+
+
+def _eval_report(rows: list[dict[str, Any]]) -> str:
+    summary = summarize_rows(rows)
+    lines = ["# semscrape model evaluation", ""]
+    lines.append("## Overall metrics")
+    lines.append("")
+    lines.append("| model | coverage | false positive | validated accuracy | abstention | model error | latency ms |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for model, metrics in summary.items():
+        lines.append(
+            f"| {model} | {metrics['coverage_rate']:.3f} | {metrics['false_positive_rate']:.3f} | "
+            f"{metrics['validated_accuracy']:.3f} | {metrics['abstention_rate']:.3f} | "
+            f"{metrics['model_error_rate']:.3f} | {metrics['latency_ms_per_field']:.1f} |"
+        )
+    lines.extend(["", "## Failure reasons", ""])
+    for model, metrics in summary.items():
+        lines.append(f"### {model}")
+        if metrics["failure_reasons"]:
+            for reason, count in metrics["failure_reasons"].items():
+                lines.append(f"- {reason}: {count}")
+        else:
+            lines.append("- none")
+    false_positives = [row for row in rows if row.get("false_positive")]
+    lines.extend(["", "## Worst false positives", ""])
+    if false_positives:
+        for row in false_positives[:20]:
+            lines.append(f"- `{row['model']}` `{row['fixture']}` `{row['field']}` expected `{row['expected']}` got `{row['model_value']}`")
+    else:
+        lines.append("None.")
+    return "\n".join(lines) + "\n"
+
+
+def _calibration_report(rows: list[dict[str, Any]]) -> str:
+    lines = ["# semscrape threshold calibration", ""]
+    rows_by_model: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_model.setdefault(row["model"], []).append(row)
+    lines.append("## Best coverage at false_positive_rate <= 0.02")
+    lines.append("")
+    lines.append("| model | coverage | false positive | validated accuracy | abstention | min_conf | min_margin | min_validator |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for model, model_rows in sorted(rows_by_model.items()):
+        viable = [row for row in model_rows if row["false_positive_rate"] <= 0.02]
+        viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
+        if not viable:
+            lines.append(f"| {model} | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+            continue
+        best = viable[0]
+        lines.append(
+            f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
+            f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
+            f"{best['min_confidence']:.2f} | {best['min_margin']:.2f} | {best['min_validator_confidence']:.2f} |"
+        )
+    lines.extend(["", "## Top configurations", ""])
+    top = sorted(rows, key=lambda row: (row["false_positive_rate"] <= 0.02, row["coverage_rate"], row["validated_accuracy"]), reverse=True)[:20]
+    for row in top:
+        lines.append(
+            f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
+            f"conf={row['min_confidence']:.2f}, margin={row['min_margin']:.2f}, validator={row['min_validator_confidence']:.2f}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def cmd_mutate(args: argparse.Namespace) -> int:
@@ -372,6 +514,28 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--render", action="store_true")
     eval_model.add_argument("--wait-for", default=None)
     eval_model.set_defaults(func=cmd_eval_model)
+
+    calibrate = sub.add_parser("calibrate", help="Sweep strict thresholds and find coverage/FPR tradeoffs")
+    calibrate.add_argument("paths", nargs="*", help="YAML specs and optional HTML inputs. Omit when --from-jsonl is used.")
+    calibrate.add_argument("--from-jsonl", default=None, help="Reuse eval-model JSONL rows without calling models again")
+    calibrate.add_argument("--models", nargs="+", default=["heuristic"], help="Models to evaluate when --from-jsonl is not used")
+    calibrate.add_argument("--top-k", type=int, default=40)
+    calibrate.add_argument("--min-confidence", nargs="+", type=float, default=[0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90])
+    calibrate.add_argument("--min-margin", nargs="+", type=float, default=[0.00, 0.05, 0.10, 0.15, 0.20])
+    calibrate.add_argument("--min-validator-confidence", nargs="+", type=float, default=[0.50, 0.60, 0.70, 0.80, 0.90])
+    calibrate.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    calibrate.add_argument("--no-margin-gate", action="store_true")
+    calibrate.add_argument("--out", default="runs/calibration.jsonl")
+    calibrate.add_argument("--ollama-host", default=None)
+    calibrate.add_argument("--expect-like", default=None)
+    calibrate.add_argument("--render", action="store_true")
+    calibrate.add_argument("--wait-for", default=None)
+    calibrate.set_defaults(func=cmd_calibrate)
+
+    report = sub.add_parser("report", help="Generate a Markdown report from eval or calibration JSONL")
+    report.add_argument("input")
+    report.add_argument("--out", required=True)
+    report.set_defaults(func=cmd_report)
 
     mutate = sub.add_parser("mutate", help="Generate mutated HTML fixtures to test drift robustness")
     mutate.add_argument("input")

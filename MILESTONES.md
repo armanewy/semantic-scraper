@@ -108,7 +108,26 @@ Exit criteria:
 
 Status: complete; local LLM strict comparison still needs Ollama.
 
-## M5: Rendered pages
+## M5: Local model bakeoff and threshold calibration
+
+**Question:** Can a local model recover coverage from strict-mode abstentions without reintroducing false positives?
+
+Deliverables:
+
+- `eval-model --strict` local model bakeoff for qwen3:1.7b, gemma3:1b, and qwen3:4b.
+- `calibrate` command for confidence/margin/validator threshold sweeps.
+- `calibrate --from-jsonl` mode so threshold sweeps can reuse model calls.
+- `report` command for Markdown summaries of eval and calibration JSONL.
+
+Exit criteria:
+
+- Good: coverage >= 45% with false_positive_rate <= 2%.
+- Great: coverage >= 60% with false_positive_rate <= 2%.
+- Excellent: coverage >= 70% with false_positive_rate <= 2%.
+
+Status: calibration/report tooling complete; first local bakeoff complete. qwen3:1.7b is the only promising model from the initial matrix.
+
+## M6: Rendered pages
 
 **Question:** Can we run this against modern JavaScript pages?
 
@@ -125,7 +144,7 @@ Exit criteria:
 
 Status: first pass complete.
 
-## M6: Specialized local ranker
+## M7: Specialized local ranker
 
 **Question:** Is a tiny specialized model better than generic local LLMs for this task?
 
