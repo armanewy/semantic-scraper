@@ -1,0 +1,51 @@
+name: base_dev_v1
+description: M10 development corpus. Allowed for threshold/gate hardening, but not sealed evaluation.
+cases:
+  - id: dev_product_holdout_001
+    bucket: base_dev
+    category: ecommerce
+    group: ood_product_holdout_001
+    version: rendered
+    path: ../ood/in_domain_holdout/product_holdout_001/spec.yml
+  - id: dev_pricing_holdout_001
+    bucket: base_dev
+    category: pricing_tables
+    group: ood_pricing_holdout_001
+    version: rendered
+    path: ../ood/in_domain_holdout/pricing_holdout_001/spec.yml
+  - id: dev_product_near_001
+    bucket: base_dev
+    category: ecommerce
+    group: ood_product_near_001
+    version: rendered
+    path: ../ood/near_domain/product_storefront_001/spec.yml
+  - id: dev_article_near_001
+    bucket: base_dev
+    category: articles
+    group: ood_article_near_001
+    version: rendered
+    path: ../ood/near_domain/article_blog_001/spec.yml
+  - id: dev_listing_near_001
+    bucket: base_dev
+    category: listings
+    group: ood_listing_near_001
+    version: rendered
+    path: ../ood/near_domain/listing_market_001/spec.yml
+  - id: dev_event_far_001
+    bucket: base_dev
+    category: events
+    group: ood_event_far_001
+    version: rendered
+    path: ../ood/far_domain/event_page_001/spec.yml
+  - id: dev_product_adversarial_001
+    bucket: base_dev_adversarial
+    category: ecommerce
+    group: ood_product_adversarial_001
+    version: rendered
+    path: ../ood/adversarial/product_traps_001/spec.yml
+  - id: dev_article_adversarial_001
+    bucket: base_dev_adversarial
+    category: articles
+    group: ood_article_adversarial_001
+    version: rendered
+    path: ../ood/adversarial/article_traps_001/spec.yml

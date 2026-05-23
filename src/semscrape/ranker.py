@@ -590,6 +590,8 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
 
     if "storage" in prompt and "$" in value:
         return "ranker_mixed_table_value"
+    if "storage" in prompt and any(term in context for term in {"sponsored", "recommended", "related", "archive", "add-on"}):
+        return "ranker_storage_non_primary_region"
     if any(term in prompt for term in {"availability", "stock"}):
         if "$" in value or "shipping from" in value_lower:
             return "ranker_availability_price_candidate"

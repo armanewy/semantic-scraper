@@ -1,0 +1,136 @@
+name: base_train_v1
+description: M10 base ranker training corpus. These cases may be used for fitting the base ranker.
+cases:
+  - id: train_product_001_v1
+    group: product_001
+    version: v1
+    bucket: base_train
+    category: ecommerce
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v1.html
+  - id: train_article_001_v1
+    group: article_001
+    version: v1
+    bucket: base_train
+    category: articles
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v1.html
+  - id: train_listing_001_v1
+    group: listing_001
+    version: v1
+    bucket: base_train
+    category: listings
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v1.html
+  - id: train_pricing_001_v1
+    group: pricing_001
+    version: v1
+    bucket: base_train
+    category: pricing_tables
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v1.html
+  - id: train_docs_001_v1
+    group: docs_001
+    version: v1
+    bucket: base_train
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v1.html
+  - id: train_product_001_v2_changed_classes
+    group: product_001
+    version: v2_changed_classes
+    bucket: base_train
+    category: ecommerce
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v2_changed_classes.html
+  - id: train_product_001_v3_changed_layout
+    group: product_001
+    version: v3_changed_layout
+    bucket: base_train
+    category: ecommerce
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v3_changed_layout.html
+  - id: train_product_001_v4_price_near_discount
+    group: product_001
+    version: v4_price_near_discount
+    bucket: base_train
+    category: ecommerce
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v4_price_near_discount.html
+  - id: train_product_001_v5_multiple_prices
+    group: product_001
+    version: v5_multiple_prices
+    bucket: base_train
+    category: ecommerce
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v5_multiple_prices.html
+  - id: train_article_001_v2_author_moved
+    group: article_001
+    version: v2_author_moved
+    bucket: base_train
+    category: articles
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v2_author_moved.html
+  - id: train_article_001_v3_date_in_meta
+    group: article_001
+    version: v3_date_in_meta
+    bucket: base_train
+    category: articles
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v3_date_in_meta.html
+  - id: train_article_001_v4_title_changed_tag
+    group: article_001
+    version: v4_title_changed_tag
+    bucket: base_train
+    category: articles
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v4_title_changed_tag.html
+  - id: train_listing_001_v2_cards_reordered
+    group: listing_001
+    version: v2_cards_reordered
+    bucket: base_train
+    category: listings
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v2_cards_reordered.html
+  - id: train_listing_001_v3_sponsored_results
+    group: listing_001
+    version: v3_sponsored_results
+    bucket: base_train
+    category: listings
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v3_sponsored_results.html
+  - id: train_listing_001_v4_missing_field
+    group: listing_001
+    version: v4_missing_field
+    bucket: base_train
+    category: listings
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v4_missing_field.html
+  - id: train_pricing_001_v2_columns_reordered
+    group: pricing_001
+    version: v2_columns_reordered
+    bucket: base_train
+    category: pricing_tables
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v2_columns_reordered.html
+  - id: train_pricing_001_v3_nested_table
+    group: pricing_001
+    version: v3_nested_table
+    bucket: base_train
+    category: pricing_tables
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v3_nested_table.html
+  - id: train_docs_001_v2_sidebar_duplicate
+    group: docs_001
+    version: v2_sidebar_duplicate
+    bucket: base_train
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v2_sidebar_duplicate.html
+  - id: train_docs_001_v3_legacy_command
+    group: docs_001
+    version: v3_legacy_command
+    bucket: base_train
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v3_legacy_command.html

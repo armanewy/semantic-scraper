@@ -547,7 +547,7 @@ Status: ranker-local gate passed on OOD dev and sealed holdout; hybrid safety pa
 
 Deliverables:
 
-- Packaged default ranker artifact at `src/semscrape/assets/candidate-ranker-v2.json`.
+- Packaged default ranker artifact. M8B shipped `candidate-ranker-v2`; M10 promoted `candidate-ranker-v3`.
 - `ranker-local` works without explicit `--ranker`.
 - `semscrape ranker info`.
 - `semscrape doctor`.
@@ -607,4 +607,46 @@ Exit criteria:
 - Dataset build can consume evidence exports.
 - Existing M8B alpha CLI workflows still pass.
 
-Status: implemented; ranker-v3 training/evaluation from accumulated evidence remains the next validation step.
+Status: implemented; M10 now uses the evidence/corpus workflow to train and gate ranker release candidates.
+
+## M10: Base Ranker Expansion and Release Candidate
+
+**Question:** Can we train a broader base ranker from trusted structural evidence and prove it on sealed holdouts without increasing false positives?
+
+Deliverables:
+
+- Structured M10 corpus manifests:
+  - `corpus/base_train/manifest.yml`
+  - `corpus/base_dev/manifest.yml`
+  - `corpus/base_holdout/manifest.yml`
+  - `corpus/adversarial_holdout/manifest.yml`
+- Sealed-corpus rules documented in `corpus/README.md`.
+- Safer hard-negative feature matching so short trap terms like `ad` do not match substrings such as `heading`.
+- Additional ranker gate for storage candidates in related/recommended/archive regions.
+- Candidate-ranker-v3 trained from base train/dev cases.
+- Candidate-ranker-v3 model card with training-data and sealed-eval summaries.
+- `semscrape ranker release-check` for promotion gates.
+- Packaged default ranker promoted to `candidate-ranker-v3`.
+
+Release-candidate result:
+
+```text
+base_holdout candidate_recall@40: 1.000000
+base_holdout ranker-local coverage: 1.000000
+base_holdout false_positive_rate: 0.000000
+base_holdout model_call_rate: 0.000000
+adversarial_holdout false_positive_rate: 0.000000
+release_check: passed
+```
+
+Exit criteria:
+
+- base holdout candidate_recall@40 >= 95%.
+- base holdout ranker-local coverage >= 75%.
+- base holdout false_positive_rate <= 2%.
+- adversarial holdout false_positive_rate = 0%.
+- v3 does not regress v2 false-positive safety.
+- unverified production outputs are excluded from positive training labels.
+- if v3 passes, package it as default; otherwise keep v2.
+
+Status: passed for the initial replay release-candidate suite. The corpus is still intentionally small, so the model card treats the domain envelope as replay-validated rather than universal web robustness.

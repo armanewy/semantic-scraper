@@ -1,0 +1,39 @@
+name: base_holdout_v1
+description: M10 sealed non-adversarial holdout. Do not use for training or tuning.
+cases:
+  - id: holdout_product_002
+    bucket: base_holdout
+    category: ecommerce
+    group: holdout_product_002
+    version: rendered
+    path: ../ood_holdout/in_domain_holdout/product_holdout_002/spec.yml
+  - id: holdout_article_002
+    bucket: base_holdout
+    category: articles
+    group: holdout_article_002
+    version: rendered
+    path: ../ood_holdout/in_domain_holdout/article_holdout_002/spec.yml
+  - id: holdout_docs_near_001
+    bucket: base_holdout
+    category: docs
+    group: holdout_docs_near_001
+    version: rendered
+    path: ../ood_holdout/near_domain/docs_quickstart_001/spec.yml
+  - id: holdout_pricing_near_001
+    bucket: base_holdout
+    category: pricing_tables
+    group: holdout_pricing_near_001
+    version: rendered
+    path: ../ood_holdout/near_domain/pricing_cards_001/spec.yml
+  - id: holdout_recipe_far_001
+    bucket: base_holdout
+    category: recipes
+    group: holdout_recipe_far_001
+    version: rendered
+    path: ../ood_holdout/far_domain/recipe_page_001/spec.yml
+  - id: holdout_job_far_001
+    bucket: base_holdout
+    category: jobs
+    group: holdout_job_far_001
+    version: rendered
+    path: ../ood_holdout/far_domain/job_posting_001/spec.yml

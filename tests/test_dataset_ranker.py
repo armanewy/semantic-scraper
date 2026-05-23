@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from semscrape.dataset import build_candidate_dataset_rows, split_dataset_rows
+from semscrape.dataset import _term_hits, build_candidate_dataset_rows, split_dataset_rows
 from semscrape.dom import generate_candidates
 from semscrape.heuristics import rank_candidates
 from semscrape.models import FieldSpec, ScrapeSpec
@@ -252,3 +252,24 @@ def test_ranker_title_gate_blocks_recommended_region_title() -> None:
     }
 
     assert _field_specific_gate_reason(row) == "ranker_title_non_primary_region"
+
+
+def test_negative_term_hits_do_not_match_substrings() -> None:
+    assert "ad" not in _term_hits('role="heading" aria-level="1"', {"ad"})
+    assert "ad" in _term_hits("sponsored ad slot", {"ad"})
+
+
+def test_ranker_storage_gate_blocks_related_archive_addon() -> None:
+    row = {
+        "field": "pro_storage",
+        "field_type": "text",
+        "field_description": "Storage limit for the Pro plan.",
+        "field_hints": ["Pro", "storage"],
+        "candidate_value": "3 TB archive add-on",
+        "candidate_selector": "p:nth-of-type(2)",
+        "candidate_tag": "p",
+        "candidate_context": "recommended plans starter annual 3 tb archive add-on",
+        "own_negative_terms": [],
+    }
+
+    assert _field_specific_gate_reason(row) == "ranker_storage_non_primary_region"

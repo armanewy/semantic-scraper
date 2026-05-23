@@ -395,8 +395,8 @@ semscrape dataset build \
   --from-evidence data/evidence-labeled.jsonl \
   --out data/candidate-ranking-v3.jsonl
 
-semscrape ranker model-card models/candidate-ranker-v2.json \
-  --out models/candidate-ranker-v2.md
+semscrape ranker model-card models/candidate-ranker-v3.json \
+  --out models/candidate-ranker-v3.md
 ```
 
 Privacy modes:
@@ -406,6 +406,40 @@ full          keeps candidate values/text/context for local debugging
 redacted      keeps candidate values and ML features, replaces long text/context with hashes
 features-only keeps labels and ML features, omits raw values/text/context/selectors
 ```
+
+Run the M10 base-ranker release-candidate workflow:
+
+```bash
+semscrape dataset build corpus/base_train/manifest.yml corpus/base_dev/manifest.yml \
+  --top-k 40 \
+  --out data/candidate-ranking-v3.jsonl
+
+semscrape ranker train data/candidate-ranking-v3.jsonl \
+  --out models/candidate-ranker-v3.json
+
+semscrape canary corpus/base_holdout/manifest.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker-v2.json \
+  --out runs/m10/base-holdout-v2.jsonl
+
+semscrape canary corpus/base_holdout/manifest.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker-v3.json \
+  --out runs/m10/base-holdout-v3.jsonl
+
+semscrape canary corpus/adversarial_holdout/manifest.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker-v3.json \
+  --out runs/m10/adversarial-holdout-v3.jsonl
+
+semscrape ranker release-check \
+  --baseline runs/m10/base-holdout-v2.jsonl \
+  --candidate runs/m10/base-holdout-v3.jsonl \
+  --adversarial runs/m10/adversarial-holdout-v3.jsonl \
+  --out runs/m10/release-check.json
+```
+
+`corpus/base_holdout/` and `corpus/adversarial_holdout/` are sealed release-candidate suites. Do not include them in dataset builds, evidence-derived training exports, or ranker tuning. `candidate-ranker-v3` is the current packaged default because it passed the M10 release check; keep `candidate-ranker-v2` for regression comparisons.
 
 Run the M8C OOD hardening workflow:
 

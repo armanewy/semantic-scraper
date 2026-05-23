@@ -5,7 +5,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-DEFAULT_RANKER_NAME = "candidate-ranker-v2.json"
+DEFAULT_RANKER_NAME = "candidate-ranker-v3.json"
 
 
 def default_ranker_path() -> str:

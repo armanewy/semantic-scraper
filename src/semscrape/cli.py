@@ -1332,6 +1332,8 @@ def cmd_ranker_model_card(args: argparse.Namespace) -> int:
         raw = json.loads(Path(args.model).read_text(encoding="utf-8"))
     except Exception as exc:
         raise CliError(f"Ranker unavailable: {exc}", 4) from exc
+    training_summary = _ranker_training_summary(args.training_data) if args.training_data else None
+    metric_runs = [_named_metric_summary(item) for item in args.metric_run]
     lines = [
         f"# {Path(args.model).name}",
         "",
@@ -1349,16 +1351,44 @@ def cmd_ranker_model_card(args: argparse.Namespace) -> int:
     ]
     for key, value in sorted((ranker.metadata or {}).items()):
         lines.append(f"- {key}: `{value}`")
+    if training_summary:
+        lines.extend(["", "## Training Data", ""])
+        for key, value in training_summary.items():
+            lines.append(f"- {key}: `{value}`")
     metrics = raw.get("metrics") or {}
     if metrics:
         lines.extend(["", "## Metrics", ""])
         for key, value in sorted(metrics.items()):
             lines.append(f"- {key}: `{value}`")
+    if metric_runs:
+        lines.extend(
+            [
+                "",
+                "## Evaluation Runs",
+                "",
+                "| run | rows | candidate recall | coverage | false positive | model call |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for item in metric_runs:
+            metrics = item["metrics"]
+            lines.append(
+                f"| {item['label']} | {metrics.get('rows', 0)} | {metrics.get('candidate_recall_at_k', 0.0):.3f} | "
+                f"{metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
+                f"{metrics.get('model_call_rate', 0.0):.3f} |"
+            )
+    if args.privacy or args.excluded_data:
+        lines.extend(["", "## Evidence Policy", ""])
+        if args.privacy:
+            lines.append(f"- privacy_mode: `{args.privacy}`")
+        for item in args.excluded_data:
+            lines.append(f"- excluded: {item}")
     lines.extend(
         [
             "",
             "## Known Limits",
             "",
+            *(f"- {item}" for item in args.known_limit),
             "- Metrics describe the replay suites recorded in this repo, not arbitrary web pages.",
             "- Abstention is an intended safety behavior outside the demonstrated domain envelope.",
             "- Untrusted production evidence should not be used as positive training data.",
@@ -1369,6 +1399,70 @@ def cmd_ranker_model_card(args: argparse.Namespace) -> int:
     Path(args.out).write_text("\n".join(lines), encoding="utf-8", newline="\n")
     _print_json({"out": args.out})
     return 0
+
+
+def cmd_ranker_release_check(args: argparse.Namespace) -> int:
+    baseline = _first_metrics(read_jsonl(args.baseline))
+    candidate = _first_metrics(read_jsonl(args.candidate))
+    adversarial = _first_metrics(read_jsonl(args.adversarial))
+    gates = {
+        "base_candidate_recall": float(candidate.get("candidate_recall_at_k", 0.0)) >= args.min_candidate_recall,
+        "base_coverage": float(candidate.get("coverage_rate", 0.0)) >= args.min_coverage,
+        "base_false_positive_rate": float(candidate.get("false_positive_rate", 1.0)) <= args.max_false_positive_rate,
+        "base_model_call_rate": float(candidate.get("model_call_rate", 1.0)) <= args.max_model_call_rate,
+        "adversarial_false_positive_rate": float(adversarial.get("false_positive_rate", 1.0)) <= args.max_adversarial_false_positive_rate,
+        "fpr_not_regressed": float(candidate.get("false_positive_rate", 1.0)) <= float(baseline.get("false_positive_rate", 0.0)) + args.max_fpr_regression,
+        "coverage_not_regressed": float(candidate.get("coverage_rate", 0.0)) + 1e-9 >= float(baseline.get("coverage_rate", 0.0)),
+    }
+    result = {
+        "passed": all(gates.values()),
+        "baseline": baseline,
+        "candidate": candidate,
+        "adversarial": adversarial,
+        "thresholds": {
+            "min_candidate_recall": args.min_candidate_recall,
+            "min_coverage": args.min_coverage,
+            "max_false_positive_rate": args.max_false_positive_rate,
+            "max_model_call_rate": args.max_model_call_rate,
+            "max_adversarial_false_positive_rate": args.max_adversarial_false_positive_rate,
+            "max_fpr_regression": args.max_fpr_regression,
+        },
+        "gates": gates,
+        "promotion": "promote_candidate" if all(gates.values()) else "keep_baseline",
+    }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    _print_json(result)
+    return 0
+
+
+def _ranker_training_summary(path: str) -> dict[str, Any]:
+    rows = read_dataset_jsonl(path)
+    categories = sorted({str(row.get("category") or "unknown") for row in rows})
+    field_types = sorted({str(row.get("field_type") or "unknown") for row in rows})
+    return {
+        "path": path,
+        "rows": len(rows),
+        "positives": sum(int(bool(row.get("label"))) for row in rows),
+        "hard_negatives": sum(int(bool(row.get("hard_negative"))) for row in rows),
+        "categories": ", ".join(categories),
+        "field_types": ", ".join(field_types),
+    }
+
+
+def _named_metric_summary(value: str) -> dict[str, Any]:
+    if "=" in value:
+        label, path = value.split("=", 1)
+    else:
+        path = value
+        label = Path(path).stem
+    return {"label": label, "path": path, "metrics": _first_metrics(read_jsonl(path))}
+
+
+def _first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    field_rows = [row for row in rows if row.get("field") is not None]
+    summary = summarize_rows(field_rows)
+    return next(iter(summary.values())) if summary else {}
 
 
 def _load_failure_rows(path: str) -> list[dict[str, Any]]:
@@ -1929,7 +2023,25 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_model_card = ranker_sub.add_parser("model-card", help="Generate a Markdown model card for a ranker")
     ranker_model_card.add_argument("model")
     ranker_model_card.add_argument("--out", required=True)
+    ranker_model_card.add_argument("--training-data", default=None, help="Candidate-ranking JSONL used for training")
+    ranker_model_card.add_argument("--metric-run", action="append", default=[], help="Named eval JSONL as label=path")
+    ranker_model_card.add_argument("--privacy", default=None, help="Evidence privacy mode used for training data")
+    ranker_model_card.add_argument("--excluded-data", action="append", default=[], help="Data excluded from training")
+    ranker_model_card.add_argument("--known-limit", action="append", default=[], help="Known limitation to include")
     ranker_model_card.set_defaults(func=cmd_ranker_model_card)
+
+    ranker_release = ranker_sub.add_parser("release-check", help="Evaluate ranker release-candidate promotion gates")
+    ranker_release.add_argument("--baseline", required=True, help="Baseline ranker-local canary JSONL")
+    ranker_release.add_argument("--candidate", required=True, help="Candidate ranker-local canary JSONL")
+    ranker_release.add_argument("--adversarial", required=True, help="Candidate adversarial canary JSONL")
+    ranker_release.add_argument("--out", required=True)
+    ranker_release.add_argument("--min-candidate-recall", type=float, default=0.95)
+    ranker_release.add_argument("--min-coverage", type=float, default=0.75)
+    ranker_release.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    ranker_release.add_argument("--max-model-call-rate", type=float, default=0.0)
+    ranker_release.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    ranker_release.add_argument("--max-fpr-regression", type=float, default=0.0)
+    ranker_release.set_defaults(func=cmd_ranker_release_check)
 
     failures = sub.add_parser("failures", help="Inspect failure artifacts")
     failure_sub = failures.add_subparsers(dest="failure_cmd", required=True)

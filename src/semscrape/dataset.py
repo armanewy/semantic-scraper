@@ -277,12 +277,19 @@ def _sample_weight(*, label: int, hard_negative: bool) -> float:
 
 def _matches_any(haystack: str, needles: set[str]) -> bool:
     compact = haystack.lower()
-    return any(needle and needle in compact for needle in needles)
+    return any(_contains_term(compact, needle) for needle in needles if needle)
 
 
 def _term_hits(haystack: str, terms: set[str]) -> list[str]:
     compact = haystack.lower()
-    return sorted(term for term in terms if term and term in compact)[:12]
+    return sorted(term for term in terms if _contains_term(compact, term))[:12]
+
+
+def _contains_term(haystack: str, term: str) -> bool:
+    needle = term.lower().strip()
+    if not needle:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack))
 
 
 def _tokens(value: str) -> list[str]:

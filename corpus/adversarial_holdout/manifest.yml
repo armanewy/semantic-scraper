@@ -1,0 +1,15 @@
+name: adversarial_holdout_v1
+description: M10 sealed adversarial holdout. Abstention is preferred over false positives.
+cases:
+  - id: holdout_pricing_adversarial_001
+    bucket: adversarial_holdout
+    category: pricing_tables
+    group: holdout_pricing_adversarial_001
+    version: rendered
+    path: ../ood_holdout/adversarial/pricing_traps_001/spec.yml
+  - id: holdout_docs_adversarial_001
+    bucket: adversarial_holdout
+    category: docs
+    group: holdout_docs_adversarial_001
+    version: rendered
+    path: ../ood_holdout/adversarial/docs_traps_001/spec.yml
