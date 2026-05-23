@@ -16,3 +16,4 @@ pilots/**/evidence.db-*
 pilots/**/*.zip
 pilots_external/
 pilots_external_holdout/
+pilots_external_alpha2/

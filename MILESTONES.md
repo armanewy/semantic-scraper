@@ -889,3 +889,75 @@ Exit criteria:
 - No unverified production positives are used for training.
 
 Status: passed for the current external-alpha replay set and mini-holdout. No ranker artifact was promoted; M13R recovered safety through deterministic gates and validators while keeping pilot evidence local.
+
+## M14: Alpha.2 Revalidation and Release Readiness
+
+**Question:** Does the M13R-remediated alpha pass a fresh external-style field trial without regressing false-positive safety?
+
+Deliverables:
+
+- `v0.1.0-alpha.2` tag.
+- Alpha.1 vs Alpha.2 remediation report:
+  - `runs/m14/alpha1-vs-alpha2-remediation.md`
+- Original external-alpha regression rerun.
+- Fresh alpha.2 pilot run.
+- Alpha.2 evidence intake and gap report.
+- Release decision memo:
+  - `runs/m14/release-decision.md`
+- Validation summary:
+  - `docs/m14_alpha2_validation_report.md`
+
+Original external-alpha regression suite:
+
+```text
+pilots: 5
+domains: 4
+fields: 15
+coverage_rate: 0.933333
+false_positive_rate: 0.000000
+abstention_rate: 0.066667
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Fresh alpha.2 pilots:
+
+```text
+pilots: 6
+domains: 5
+fields: 18
+coverage_rate: 0.722223
+false_positive_rate: 0.222222
+abstention_rate: 0.277778
+candidate_recall_at_40: 0.888889
+bundle_audit_pass_rate: 1.000000
+```
+
+Holdout checks:
+
+```text
+base_holdout_coverage: 0.950000
+base_holdout_false_positive_rate: 0.000000
+adversarial_false_positive_rate: 0.000000
+```
+
+Evidence intake:
+
+```text
+records: 18
+gold_labels: 18
+positive_candidate_rows: 35
+hard_negative_candidate_rows: 236
+```
+
+Exit criteria:
+
+- Original external-alpha FPR = 0.
+- Fresh alpha.2 pilot FPR <= 2%.
+- Fresh alpha.2 candidate_recall@40 >= 95%.
+- Fresh alpha.2 ranker-local coverage >= 60%.
+- Base/adversarial holdouts remain FPR = 0.
+- Every pilot bundle passes privacy audit.
+- No unverified positives are used for model/ranker training.
+
+Status: failed release-readiness. `v0.1.0-alpha.2` is a valid internal validation tag, but fresh alpha.2 pilots found new false positives and candidate-recall misses. Do not promote to public alpha before an M14R remediation pass.
