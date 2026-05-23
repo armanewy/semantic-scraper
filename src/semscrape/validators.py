@@ -67,7 +67,7 @@ def extract_value(field: FieldSpec, candidate: Candidate) -> str:
     if "python" in name or "version" in name:
         return re.sub(r"^(?:requires?|requirement)\s+", "", text, flags=re.I).strip()
 
-    return text
+    return _clean_text_value(text)
 
 
 def _regex_list(value: str | list[str] | None) -> list[str]:
@@ -79,7 +79,7 @@ def _regex_list(value: str | list[str] | None) -> list[str]:
 
 
 def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
-    normalized = normalize_ws(value or "")
+    normalized = _clean_text_value(normalize_ws(value or "")) if field.kind == "text" else normalize_ws(value or "")
     errors: list[str] = []
     reasons: list[str] = []
     penalties: list[str] = []
@@ -163,6 +163,17 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
         if len(normalized) >= max(2, min_length):
             score += 0.2
             reasons.append("text length in range")
+        availability_mode = str(v.get("availability_mode") or "").lower()
+        if availability_mode == "full_message":
+            lower = normalized.lower()
+            if lower in {"in stock", "out of stock", "available", "unavailable", "sold out", "backorder"}:
+                errors.append("generic availability status without detail")
+                hard_disqualifiers.append("generic availability status without detail")
+            elif not any(term in lower for term in {"stock", "available", "availability", "ship", "delivery", "sold out", "backorder"}):
+                errors.append("not availability-like")
+            else:
+                score += 0.1
+                reasons.append("full availability message")
 
     for pattern in _regex_list(v.get("regex")):
         if not re.search(pattern, normalized, re.I):
@@ -203,3 +214,11 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
         score += 0.2
 
     return ValidationResult(passed, min(1.0, score), errors, normalized, reasons, penalties, hard_disqualifiers)
+
+
+def _clean_text_value(value: str) -> str:
+    cleaned = normalize_ws(value)
+    # Sphinx and similar docs append visible permalink markers to headings.
+    cleaned = re.sub(r"\s*[¶#]\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s*\bpermalink\b\s*$", "", cleaned, flags=re.I).strip()
+    return cleaned

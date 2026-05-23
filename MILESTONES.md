@@ -819,4 +819,73 @@ Exit criteria for the actual external field-trial gate:
 - every pilot bundle passes privacy audit.
 - release-check blocks any candidate with false-positive regression.
 
-Status: reporting and gap-analysis infrastructure implemented. The external-field-trial gate is not marked passed until 5+ real external pilots are run.
+M13C execution result against frozen `v0.1.0-alpha.1`:
+
+```text
+pilots: 5
+domains: 4
+fields: 15
+coverage_rate: 1.000000
+false_positive_rate: 0.333333
+candidate_recall_at_40: 0.933333
+bundle_audit_pass_rate: 1.000000
+```
+
+Status: tooling complete and external-style execution complete. The field-trial safety gate failed on correctness because unseen page semantics produced too many false positives. Evidence capture, privacy bundle audit, intake, and pilot reporting passed.
+
+## M13R: External Alpha Safety Remediation
+
+**Question:** Can we eliminate the false positives found in the first external alpha trial without overfitting or sacrificing the evidence loop?
+
+Deliverables:
+
+- False-positive incident report:
+  - `docs/m13r_false_positive_incident_report.md`
+- Targeted safety gates for:
+  - published date vs updated/modified/revised date
+  - page/site title vs tag-cloud/category headings
+  - docs chapter prompts vs unrelated glossary/sidebar content
+  - tag prompts vs byline/long-text candidates
+  - author prompts vs CTA/navigation candidates
+  - full availability messages vs generic stock statuses
+- Heading-marker cleanup for Sphinx-style permalink markers.
+- Tests covering the observed external-alpha traps.
+- Original external-alpha remediation rerun.
+- New mini-holdout pilot rerun.
+
+Original external-alpha pilots after remediation:
+
+```text
+pilots: 5
+domains: 4
+fields: 15
+coverage_rate: 0.933333
+false_positive_rate: 0.000000
+abstention_rate: 0.066667
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Mini-holdout pilots after remediation:
+
+```text
+pilots: 4
+domains: 4
+fields: 11
+coverage_rate: 1.000000
+false_positive_rate: 0.000000
+abstention_rate: 0.000000
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Exit criteria:
+
+- Original external alpha false_positive_rate = 0.
+- Original external alpha candidate_recall@40 >= 95%.
+- New mini-holdout false_positive_rate <= 2%.
+- New mini-holdout candidate_recall@40 >= 95%.
+- Evidence/privacy flow remains intact.
+- No unverified production positives are used for training.
+
+Status: passed for the current external-alpha replay set and mini-holdout. No ranker artifact was promoted; M13R recovered safety through deterministic gates and validators while keeping pilot evidence local.

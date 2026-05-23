@@ -580,6 +580,8 @@ semscrape pack gaps runs/m13/pilot-intake.jsonl \
 
 The pilot playbook for external alpha users is in [docs/alpha_pilot_playbook.md](docs/alpha_pilot_playbook.md).
 
+The first external-style alpha execution intentionally used the frozen `v0.1.0-alpha.1` target. It proved that the evidence/privacy loop worked, but failed the field-trial safety gate because unseen page semantics produced false positives. M13R remediated those incidents with narrow deterministic gates and validators, then reran the original pilots and a new mini-holdout with zero observed false positives. The incident report is in [docs/m13r_false_positive_incident_report.md](docs/m13r_false_positive_incident_report.md).
+
 Run the M8C OOD hardening workflow:
 
 ```bash

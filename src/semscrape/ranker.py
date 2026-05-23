@@ -541,6 +541,8 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
             return "ranker_title_date_candidate"
         if any(term in context for term in {"sponsored", "recommended", "related", "also viewed", "advertisement"}):
             return "ranker_title_non_primary_region"
+        if _is_tag_or_category_title(value_lower, selector, context):
+            return "ranker_title_tag_cloud_candidate"
         if any(term in selector or term in value_lower for term in {"author", "byline", "bio", "stock", "available", "availability", "install", "price"}):
             return "ranker_title_context_required"
         if not (tag in {"h1", "h2", "h3", "title"} or any(term in selector for term in {"title", "headline", "heading"})):
@@ -549,10 +551,20 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if "author" in prompt:
         if any(term in selector or term in value_lower for term in {"section", "category", "topic", "tag", "kicker", "markets"}):
             return "ranker_author_section_label"
+        if not _looks_like_person_name(value):
+            return "ranker_author_not_person_name"
         if _word_count(value) > 4 or any(term in value_lower for term in {" joined ", " newsroom ", " edited "}):
             return "ranker_author_bio"
         if not any(term in selector or term in context for term in {"author", "byline", " by ", "edited by"}):
             return "ranker_author_context_required"
+
+    if _is_tag_prompt(prompt):
+        if value_lower.startswith("by ") or "(about)" in value_lower or _word_count(value) > 3:
+            return "ranker_tag_not_tag_shaped"
+        if tag != "a" and not any(term in selector for term in {"tag", "tags"}):
+            return "ranker_tag_context_required"
+        if not any(term in selector or term in context for term in {"tag", "tags"}):
+            return "ranker_tag_context_required"
 
     if "location" in prompt:
         if "company" in selector or "company" in context:
@@ -575,8 +587,15 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if field_type == "date" or "published" in prompt:
         if own_terms.intersection({"updated", "joined", "copyright", "commented", "related article"}):
             return "ranker_date_negative_context"
+        if _prompt_wants_published_date(prompt) and _has_negative_date_role(context, value_lower):
+            return "ranker_updated_date_candidate"
         if _is_broad_container(row, value):
             return "ranker_broad_container"
+
+    ordinal = _requested_ordinal(prompt)
+    if ordinal and any(term in prompt for term in {"chapter", "section", "tutorial"}):
+        if not _value_starts_with_ordinal(value, ordinal):
+            return "ranker_wrong_ordinal_candidate"
 
     if (
         field_type == "price"
@@ -610,13 +629,86 @@ def _looks_like_date(value: str) -> bool:
     return bool(value and any(month in value for month in {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}) and any(char.isdigit() for char in value))
 
 
+def _is_tag_or_category_title(value: str, selector: str, context: str) -> bool:
+    if any(_contains_term(value, term) for term in {"tag", "tags", "top tags", "top ten tags", "tag cloud", "categories"}):
+        return True
+    if any(_contains_term(selector, term) or _contains_term(context, term) for term in {"tags-box", "tag cloud", "top tags"}):
+        return True
+    return False
+
+
 def _looks_like_later_repeated_result(selector: str) -> bool:
     indexes = [int(match) for match in re.findall(r"(?:article|section|li):nth-of-type\((\d+)\)", selector)]
     return bool(indexes and max(indexes) >= 3)
 
 
+def _contains_term(haystack: str, term: str) -> bool:
+    needle = term.lower().strip()
+    if not needle:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack.lower()))
+
+
+def _prompt_wants_published_date(prompt: str) -> bool:
+    if any(term in prompt for term in {"updated", "modified", "revised", "last updated"}):
+        return any(term in prompt for term in {"not updated", "not modified", "not revised"})
+    return any(term in prompt for term in {"published", "publication", "posted", "original date", "article date"})
+
+
+def _has_negative_date_role(context: str, value: str) -> bool:
+    if not value:
+        return False
+    for term in ("updated", "modified", "revised", "last updated"):
+        if re.search(rf"{re.escape(term)}\W{{0,40}}{re.escape(value)}", context):
+            return True
+    return False
+
+
+def _requested_ordinal(prompt: str) -> int | None:
+    for word, ordinal in {
+        "first": 1,
+        "1st": 1,
+        "second": 2,
+        "2nd": 2,
+        "third": 3,
+        "3rd": 3,
+        "fourth": 4,
+        "4th": 4,
+        "fifth": 5,
+        "5th": 5,
+    }.items():
+        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", prompt):
+            return ordinal
+    return None
+
+
+def _value_starts_with_ordinal(value: str, ordinal: int) -> bool:
+    return bool(re.match(rf"^\s*{ordinal}(?:[.)]|\b)", value))
+
+
 def _word_count(value: str) -> int:
     return len([part for part in value.replace("/", " ").split() if part.strip()])
+
+
+def _is_tag_prompt(prompt: str) -> bool:
+    return any(_contains_term(prompt, term) for term in {"tag", "tags"})
+
+
+def _looks_like_person_name(value: str) -> bool:
+    compact = value.strip()
+    if not compact or any(char.isdigit() for char in compact):
+        return False
+    lowered = compact.lower()
+    if any(term in lowered for term in {"survey", "menu", "submit", "navigation", "release notes", "back to", "hosting by", "design by"}):
+        return False
+    parts = [part for part in re.split(r"\s+", compact) if part]
+    if not (2 <= len(parts) <= 4):
+        return False
+    cleaned = [re.sub(r"[^A-Za-z'-]", "", part) for part in parts]
+    if any(len(part) < 2 for part in cleaned):
+        return False
+    uppercase_like = sum(1 for part in cleaned if part[:1].isupper())
+    return uppercase_like >= 2
 
 
 def _is_broad_container(row: dict[str, Any], value: str) -> bool:
