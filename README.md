@@ -44,6 +44,7 @@ This repo is a working milestone-1/milestone-2 project:
 - Local model evaluation with JSONL output and failure artifacts is included.
 - Optional local Ollama candidate chooser is included.
 - Optional Playwright rendering is included for JavaScript pages.
+- Replayable rendered-page snapshots and real-page canary evaluation are included.
 
 The Ollama integration is implemented but should be validated on your machine because this sandbox does not run an Ollama daemon.
 
@@ -133,6 +134,30 @@ semscrape extract SPEC INPUT \
 ```
 
 `safe-local` uses cached selectors first, then conservative strict heuristics, and only calls `qwen3:1.7b` after heuristic abstention. Model choices still have to pass validation and strict gates before they can be learned.
+
+Capture a replayable rendered-page snapshot:
+
+```bash
+semscrape snapshot SPEC https://example.com/product \
+  --out corpus/real/product_001 \
+  --wait-for body \
+  --screenshot \
+  --candidates \
+  --accessibility
+```
+
+The snapshot command writes `spec.yml`, `url.txt`, `static.html`, `rendered.html`, `metadata.json`, optional `screenshot.png`, optional `accessibility.json`, `candidates.json`, and `extraction.json`. Candidate rows include rendered-page metadata such as visibility, bounding box, computed display/visibility, ARIA role/name, viewport presence, and z-index when the input is a live URL.
+
+Run a replayable real-page canary corpus:
+
+```bash
+semscrape canary corpus/real/**/spec.yml \
+  --policy safe-local \
+  --out runs/real-canary.jsonl \
+  --failures-dir runs/failures-real-canary
+```
+
+Canary specs can point to a live `url:` in the spec, but the preferred regression input is a stored sibling `rendered.html` so failures can be reproduced offline. The canary summary reports render failures, timeout rate, and the same safe-local extraction metrics used by model evaluation.
 
 Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
 

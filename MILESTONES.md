@@ -180,6 +180,30 @@ Exit criteria:
 
 Status: first pass complete.
 
+## M6B: Real-world rendered-page canary corpus
+
+**Question:** Can safe-local extraction survive real rendered browser DOMs while preserving low false positives?
+
+Deliverables:
+
+- `snapshot` command for rendered HTML, static HTML, screenshot, metadata, candidates, extraction output, and accessibility tree capture.
+- Rendered candidate enrichment: visibility, bounding boxes, computed styles, viewport presence, z-index, and accessibility role/name hints.
+- `canary` command for replayable real-page evaluation from stored `rendered.html` captures or live URLs.
+- Failure artifacts for render failures, candidate misses, validator rejects, model abstentions, and model errors.
+- First 15-30 page real corpus across product, article, listing, pricing, and docs pages.
+
+Exit criteria:
+
+- candidate_recall@40 >= 90% on the real corpus.
+- safe-local coverage >= 50% on the first real corpus.
+- false_positive_rate <= 2%.
+- model_call_rate <= 80%.
+- render_failure_rate <= 10%.
+- selector_reuse_rate >= 40% on a second run.
+- every failed extraction has a replayable artifact.
+
+Status: infrastructure implemented; real-page corpus collection pending.
+
 ## M7: Specialized local ranker
 
 **Question:** Is a tiny specialized model better than generic local LLMs for this task?

@@ -56,6 +56,7 @@ class Candidate:
     depth: int
     hidden: bool = False
     source_attr: str | None = None
+    rendered: dict[str, Any] = field(default_factory=dict)
 
     def compact(self, max_text: int = 220) -> dict[str, Any]:
         text = self.text if len(self.text) <= max_text else self.text[: max_text - 1] + "…"
@@ -73,6 +74,7 @@ class Candidate:
                 "after": self.after_text[:120],
                 "path": self.path,
             },
+            "rendered": self.rendered,
         }
 
 

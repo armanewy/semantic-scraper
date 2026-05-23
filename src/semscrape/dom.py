@@ -159,6 +159,16 @@ def generate_candidates(html: str | BeautifulSoup, *, max_candidates: int = 1200
     return candidates
 
 
+def apply_rendered_metadata(candidates: list[Candidate], metadata_by_selector: dict[str, dict]) -> list[Candidate]:
+    for candidate in candidates:
+        metadata = metadata_by_selector.get(candidate.selector)
+        if metadata:
+            candidate.rendered = metadata
+            if metadata.get("visible") is False:
+                candidate.hidden = True
+    return candidates
+
+
 def candidate_from_selector(soup: BeautifulSoup, selector: str, *, index: int = 1) -> Candidate | None:
     try:
         matches = soup.select(selector)

@@ -22,7 +22,8 @@ from .eval_model import (
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
-from .render import fetch_url, render_url
+from .render import enrich_candidates_from_rendered_page, fetch_url, render_url
+from .snapshot import create_snapshot
 from .spec import load_spec
 from .util import basename_key
 
@@ -84,6 +85,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"Unknown field {args.field!r}. Known fields: {', '.join(f.name for f in spec.fields)}", file=sys.stderr)
         return 2
     candidates = generate_candidates(html)
+    if args.render and _is_url(args.input):
+        candidates = enrich_candidates_from_rendered_page(args.input, candidates, wait_for=args.wait_for)
     ranked = rank_candidates(field, candidates, top=args.top_k)
     _print_json(
         [
@@ -95,6 +98,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 "selector": item.candidate.selector,
                 "tag": item.candidate.tag,
                 "text": item.candidate.text[:240],
+                "rendered": item.candidate.rendered,
                 "validation": {
                     "passed": item.validation.passed,
                     "score": round(item.validation.score, 4),
@@ -604,6 +608,100 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    _apply_policy_defaults(args)
+    result = create_snapshot(
+        spec_path=args.spec,
+        input_ref=args.input,
+        out_dir=args.out,
+        wait_for=args.wait_for,
+        screenshot=args.screenshot,
+        accessibility=args.accessibility,
+        include_candidates=args.candidates,
+        policy=args.policy,
+        model=args.model or "qwen3:1.7b",
+        ollama_host=args.ollama_host,
+        top_k=args.top_k,
+    )
+    _print_json(result)
+    return 0
+
+
+def cmd_canary(args: argparse.Namespace) -> int:
+    _apply_policy_defaults(args)
+    rows = []
+    render_failures = 0
+    total_specs = 0
+    failures_dir = Path(args.failures_dir) if args.failures_dir else None
+    for spec_path in _expand_paths(args.specs):
+        total_specs += 1
+        spec = load_spec(spec_path)
+        input_ref = _canary_input_for_spec(spec_path, spec, render=args.render)
+        try:
+            html = _load_input(input_ref, render=args.render and _is_url(input_ref), wait_for=args.wait_for)
+        except Exception as exc:
+            render_failures += 1
+            row = {
+                "spec": spec.name,
+                "fixture": input_ref,
+                "field": None,
+                "model": args.model or "qwen3:1.7b",
+                "policy": args.policy,
+                "render_failed": True,
+                "timeout": "timeout" in str(exc).lower(),
+                "failure_reason": "render_failed",
+                "error": str(exc),
+            }
+            rows.append(row)
+            if failures_dir:
+                failures_dir.mkdir(parents=True, exist_ok=True)
+                (failures_dir / f"{Path(spec_path).parent.name}_render_error.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+            continue
+
+        expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
+        model = args.model or ("qwen3:1.7b" if args.policy == "safe-local" else "heuristic")
+        eval_args = argparse.Namespace(
+            models=[model],
+            top_k=args.top_k,
+            ollama_host=args.ollama_host,
+            min_confidence=args.min_confidence,
+            min_margin=args.min_margin,
+            min_validator_confidence=args.min_validator_confidence,
+        )
+        rows.extend(_run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir))
+
+    out_path = Path(args.out)
+    append_jsonl(out_path, rows)
+    summary = summarize_rows([row for row in rows if row.get("field") is not None])
+    render_failure_rate = render_failures / total_specs if total_specs else 0.0
+    _print_json(
+        {
+            "out": str(out_path),
+            "render_failure_rate": render_failure_rate,
+            "timeout_rate": _timeout_rate(rows),
+            "summary": summary,
+        }
+    )
+    return 0
+
+
+def _canary_input_for_spec(spec_path: str, spec, *, render: bool) -> str:
+    if render and spec.metadata.get("url"):
+        return str(spec.metadata["url"])
+    rendered = Path(spec_path).parent / "rendered.html"
+    if rendered.exists():
+        return str(rendered)
+    if spec.metadata.get("url"):
+        return str(spec.metadata["url"])
+    raise ValueError(f"No url or rendered.html for canary spec {spec_path}")
+
+
+def _timeout_rate(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    return round(sum(bool(row.get("timeout")) for row in rows) / len(rows), 6)
+
+
 def cmd_cache_clear(args: argparse.Namespace) -> int:
     cache = SelectorCache(args.cache)
     cache.clear()
@@ -721,6 +819,35 @@ def build_parser() -> argparse.ArgumentParser:
     mutate.add_argument("--seed", type=int, default=0)
     mutate.add_argument("--intensity", type=float, default=0.45)
     mutate.set_defaults(func=cmd_mutate)
+
+    snapshot = sub.add_parser("snapshot", help="Capture a replayable rendered-page snapshot")
+    snapshot.add_argument("spec")
+    snapshot.add_argument("input", help="URL or local HTML file")
+    snapshot.add_argument("--out", required=True)
+    snapshot.add_argument("--wait-for", default="body")
+    snapshot.add_argument("--screenshot", action="store_true")
+    snapshot.add_argument("--candidates", action="store_true")
+    snapshot.add_argument("--accessibility", action="store_true")
+    snapshot.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
+    snapshot.add_argument("--model", default=None)
+    snapshot.add_argument("--ollama-host", default=None)
+    snapshot.add_argument("--top-k", type=int, default=40)
+    snapshot.set_defaults(func=cmd_snapshot)
+
+    canary = sub.add_parser("canary", help="Run safe-local extraction over replayable real-page specs")
+    canary.add_argument("specs", nargs="+")
+    canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
+    canary.add_argument("--model", default=None)
+    canary.add_argument("--render", action="store_true")
+    canary.add_argument("--wait-for", default="body")
+    canary.add_argument("--top-k", type=int, default=40)
+    canary.add_argument("--out", default="runs/real-canary.jsonl")
+    canary.add_argument("--failures-dir", default="runs/failures-real-canary")
+    canary.add_argument("--ollama-host", default=None)
+    canary.add_argument("--min-confidence", type=float, default=0.75)
+    canary.add_argument("--min-margin", type=float, default=0.15)
+    canary.add_argument("--min-validator-confidence", type=float, default=0.70)
+    canary.set_defaults(func=cmd_canary)
 
     cache = sub.add_parser("cache-clear", help="Delete a selector cache/lock file")
     cache.add_argument("cache")
