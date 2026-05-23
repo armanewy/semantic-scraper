@@ -1,0 +1,27 @@
+name: holdout_recipe_page_001
+fields:
+  - name: recipe_title
+    type: text
+    description: Main recipe title, not site name or related recipe.
+    hints: [recipe title, h1, dish name]
+    validators:
+      min_length: 6
+      max_length: 80
+      regex_not: ["Related"]
+  - name: prep_time
+    type: text
+    description: Recipe prep time.
+    hints: [prep time, preparation]
+    validators:
+      regex: ["20 min"]
+  - name: servings
+    type: number
+    description: Number of servings for the recipe.
+    hints: [servings, yields]
+    validators:
+      regex: ["^4$"]
+benchmarks:
+  rendered.html:
+    recipe_title: Lemon Herb Couscous
+    prep_time: 20 min
+    servings: "4"

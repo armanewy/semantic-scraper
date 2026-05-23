@@ -1,0 +1,36 @@
+name: holdout_product_002
+fields:
+  - name: title
+    type: text
+    description: Main product title, not breadcrumb, recommendation, or page title.
+    hints: [product name, main title, h1]
+    validators:
+      min_length: 6
+      max_length: 80
+      not_contains: [Sponsored, Recommended]
+  - name: price
+    type: price
+    description: Current sale price for the main product, not list price, shipping, coupon savings, or sponsored item price.
+    hints: [current price, sale price, buy box]
+    validators:
+      require_currency: true
+      regex_not: ["\\$18\\.00", "\\$10\\.00", "\\$96\\.00"]
+  - name: rating
+    type: number
+    description: Star rating for the main product, not review count or comment count.
+    hints: [rating, stars, review score]
+    validators:
+      regex: ["^4\\.4$"]
+  - name: availability
+    type: text
+    description: Stock or shipping availability for the main product.
+    hints: [availability, stock, ships]
+    validators:
+      min_length: 4
+      max_length: 40
+benchmarks:
+  rendered.html:
+    title: Harbor Rain Shell
+    price: $84.00
+    rating: "4.4"
+    availability: Available now

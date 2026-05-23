@@ -539,18 +539,28 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if _is_title_prompt(prompt):
         if _looks_like_date(value_lower):
             return "ranker_title_date_candidate"
+        if any(term in context for term in {"sponsored", "recommended", "related", "also viewed", "advertisement"}):
+            return "ranker_title_non_primary_region"
         if any(term in selector or term in value_lower for term in {"author", "byline", "bio", "stock", "available", "availability", "install", "price"}):
             return "ranker_title_context_required"
         if not (tag in {"h1", "h2", "h3", "title"} or any(term in selector for term in {"title", "headline", "heading"})):
             return "ranker_title_context_required"
 
     if "author" in prompt:
+        if any(term in selector or term in value_lower for term in {"section", "category", "topic", "tag", "kicker", "markets"}):
+            return "ranker_author_section_label"
         if _word_count(value) > 4 or any(term in value_lower for term in {" joined ", " newsroom ", " edited "}):
             return "ranker_author_bio"
         if not any(term in selector or term in context for term in {"author", "byline", " by ", "edited by"}):
             return "ranker_author_context_required"
 
-    if "coupon" in prompt or "promo" in prompt:
+    if "location" in prompt:
+        if "company" in selector or "company" in context:
+            return "ranker_location_company_candidate"
+        if not any(term in context or term in value_lower for term in {"location", "remote", "onsite", "hybrid", "workplace"}):
+            return "ranker_location_context_required"
+
+    if "coupon" in field or "promo" in field:
         if "no active coupon" in context or "no coupon" in context:
             return "ranker_coupon_absent_context"
         if not any(term in selector or term in context for term in {"coupon", "promo"}):
@@ -568,8 +578,15 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
         if _is_broad_container(row, value):
             return "ranker_broad_container"
 
-    if field_type == "price" and "monthly" in prompt and _looks_like_annual_price(value, context):
+    if (
+        field_type == "price"
+        and "monthly" in prompt
+        and not _looks_like_monthly_price(value, selector, context)
+        and _looks_like_annual_price(value, context)
+    ):
         return "ranker_monthly_annual_conflict"
+    if field_type == "price" and any(term in context for term in {"sponsored", "recommended", "training fee", "workshop"}):
+        return "ranker_price_ad_region"
 
     if "storage" in prompt and "$" in value:
         return "ranker_mixed_table_value"
@@ -609,6 +626,8 @@ def _is_broad_container(row: dict[str, Any], value: str) -> bool:
 
 
 def _looks_like_annual_price(value: str, context: str) -> bool:
+    if any(term in context for term in {"annual", "yearly", "per year"}):
+        return True
     amount = _money_amount(value)
     if amount is None or amount <= 0:
         return False
@@ -620,6 +639,23 @@ def _looks_like_annual_price(value: str, context: str) -> bool:
         if 9.0 <= ratio <= 13.0:
             return True
     return False
+
+
+def _looks_like_monthly_price(value: str, selector: str, context: str) -> bool:
+    value_lower = value.lower().strip()
+    if not value_lower:
+        return False
+    if "monthly" in selector or "per-month" in selector or "per_month" in selector:
+        return True
+    monthly_patterns = {
+        f"monthly {value_lower}",
+        f"{value_lower} monthly",
+        f"per month {value_lower}",
+        f"{value_lower} per month",
+        f"/mo {value_lower}",
+        f"{value_lower} /mo",
+    }
+    return any(pattern in context[:240] for pattern in monthly_patterns)
 
 
 def _money_amount(value: str) -> float | None:

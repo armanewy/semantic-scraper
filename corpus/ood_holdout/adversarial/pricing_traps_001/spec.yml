@@ -1,0 +1,30 @@
+name: holdout_pricing_traps_001
+fields:
+  - name: pro_monthly_price
+    type: price
+    description: Monthly price for the Pro plan. The Pro monthly price is absent in this snapshot.
+    required: false
+    hints: [Pro, monthly, price]
+    validators:
+      require_currency: true
+      regex: ["42"]
+  - name: pro_storage
+    type: text
+    description: Storage limit for the Pro plan. The Pro storage field is absent in this snapshot.
+    required: false
+    hints: [Pro, storage]
+    validators:
+      regex: ["3 TB"]
+  - name: enterprise_monthly_price
+    type: price
+    description: Monthly price for the Enterprise plan. The Enterprise monthly price is absent in this snapshot.
+    required: false
+    hints: [Enterprise, monthly, price]
+    validators:
+      require_currency: true
+      regex: ["129"]
+benchmarks:
+  rendered.html:
+    pro_monthly_price:
+    pro_storage:
+    enterprise_monthly_price:

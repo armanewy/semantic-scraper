@@ -1,0 +1,28 @@
+name: holdout_docs_quickstart_001
+fields:
+  - name: page_title
+    type: text
+    description: Main documentation page title, not sidebar navigation or related article text.
+    hints: [docs title, h1, reference title]
+    validators:
+      min_length: 8
+      max_length: 100
+      regex_not: ["Related", "Navigation"]
+  - name: install_command
+    type: text
+    description: Current recommended install command, not legacy or sidebar examples.
+    hints: [install, command, pip install]
+    validators:
+      regex: ["pip install semscrape"]
+      regex_not: ["legacy", "npm"]
+  - name: python_version
+    type: text
+    description: Supported Python version requirement for the package.
+    hints: [python version, requires python, requirement]
+    validators:
+      regex: [">=3.10"]
+benchmarks:
+  rendered.html:
+    page_title: semscrape Quickstart
+    install_command: pip install semscrape
+    python_version: Python >=3.10

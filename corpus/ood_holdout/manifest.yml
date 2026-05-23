@@ -1,0 +1,51 @@
+name: ood_holdout_v1
+description: Sealed OOD holdout corpus for M8C validation. Do not use these cases for ranker training.
+cases:
+  - id: holdout_product_002
+    bucket: in_domain_holdout
+    category: product
+    group: holdout_product_002
+    version: rendered
+    path: in_domain_holdout/product_holdout_002/spec.yml
+  - id: holdout_article_002
+    bucket: in_domain_holdout
+    category: article
+    group: holdout_article_002
+    version: rendered
+    path: in_domain_holdout/article_holdout_002/spec.yml
+  - id: holdout_docs_near_001
+    bucket: near_domain
+    category: docs
+    group: holdout_docs_near_001
+    version: rendered
+    path: near_domain/docs_quickstart_001/spec.yml
+  - id: holdout_pricing_near_001
+    bucket: near_domain
+    category: pricing
+    group: holdout_pricing_near_001
+    version: rendered
+    path: near_domain/pricing_cards_001/spec.yml
+  - id: holdout_recipe_far_001
+    bucket: far_domain
+    category: recipe
+    group: holdout_recipe_far_001
+    version: rendered
+    path: far_domain/recipe_page_001/spec.yml
+  - id: holdout_job_far_001
+    bucket: far_domain
+    category: job
+    group: holdout_job_far_001
+    version: rendered
+    path: far_domain/job_posting_001/spec.yml
+  - id: holdout_pricing_adversarial_001
+    bucket: adversarial
+    category: pricing
+    group: holdout_pricing_adversarial_001
+    version: rendered
+    path: adversarial/pricing_traps_001/spec.yml
+  - id: holdout_docs_adversarial_001
+    bucket: adversarial
+    category: docs
+    group: holdout_docs_adversarial_001
+    version: rendered
+    path: adversarial/docs_traps_001/spec.yml

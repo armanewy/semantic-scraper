@@ -1,0 +1,31 @@
+name: holdout_docs_traps_001
+fields:
+  - name: page_title
+    type: text
+    description: Main documentation page title. The current page title is absent in this snapshot.
+    required: false
+    hints: [docs title, h1, reference title]
+    validators:
+      min_length: 8
+      max_length: 100
+      regex_not: ["Related", "Navigation", "Legacy"]
+  - name: install_command
+    type: text
+    description: Current recommended install command. The current install command is absent in this snapshot.
+    required: false
+    hints: [install, command, pip install]
+    validators:
+      regex: ["pip install semscrape"]
+      regex_not: ["legacy", "npm"]
+  - name: python_version
+    type: text
+    description: Supported Python version requirement. The current Python requirement is absent in this snapshot.
+    required: false
+    hints: [python version, requires python, requirement]
+    validators:
+      regex: [">=3.10"]
+benchmarks:
+  rendered.html:
+    page_title:
+    install_command:
+    python_version:

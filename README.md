@@ -313,6 +313,45 @@ semscrape report-domain runs/ood-ranker-local.jsonl runs/ood-ranker-plus-llm.jso
 
 `ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
 
+Run the M8C OOD hardening workflow:
+
+```bash
+semscrape dataset build corpus/repro_minimized/manifest-drift-v1.yml \
+  corpus/repro_minimized/manifest-drift-v2.yml \
+  corpus/ood_dev/manifest.yml \
+  --top-k 40 \
+  --out data/candidate-ranking-v2.jsonl
+
+semscrape dataset split data/candidate-ranking-v2.jsonl \
+  --by group \
+  --train-out data/train-v2.jsonl \
+  --test-out data/test-v2.jsonl
+
+semscrape ranker train data/train-v2.jsonl \
+  --out models/candidate-ranker-v2.json
+
+semscrape canary corpus/ood_dev/manifest.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker-v2.json \
+  --max-ranker-penalties 1 \
+  --out runs/m8c-dev-ranker-local.jsonl
+
+semscrape canary corpus/ood_holdout/manifest.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker-v2.json \
+  --max-ranker-penalties 1 \
+  --out runs/m8c-holdout-ranker-local.jsonl
+
+semscrape canary corpus/ood_holdout/manifest.yml \
+  --policy ranker-plus-llm \
+  --ranker models/candidate-ranker-v2.json \
+  --max-ranker-penalties 1 \
+  --model qwen3:1.7b \
+  --out runs/m8c-holdout-ranker-plus-llm.jsonl
+```
+
+`corpus/ood_dev/` is allowed to influence ranker training and targeted gates. `corpus/ood_holdout/` is a sealed replay holdout; do not include it in dataset builds or ranker training.
+
 Generate mutated pages and test candidate recall:
 
 ```bash

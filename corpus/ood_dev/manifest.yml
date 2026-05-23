@@ -1,0 +1,51 @@
+name: ood_dev_v1
+description: OOD development corpus used for hardening and ranker-v2 training. Do not treat this as sealed holdout.
+cases:
+  - id: ood_product_holdout_001
+    bucket: in_domain_holdout
+    category: product
+    group: ood_product_holdout_001
+    version: rendered
+    path: ../ood/in_domain_holdout/product_holdout_001/spec.yml
+  - id: ood_pricing_holdout_001
+    bucket: in_domain_holdout
+    category: pricing
+    group: ood_pricing_holdout_001
+    version: rendered
+    path: ../ood/in_domain_holdout/pricing_holdout_001/spec.yml
+  - id: ood_product_near_001
+    bucket: near_domain
+    category: product
+    group: ood_product_near_001
+    version: rendered
+    path: ../ood/near_domain/product_storefront_001/spec.yml
+  - id: ood_article_near_001
+    bucket: near_domain
+    category: article
+    group: ood_article_near_001
+    version: rendered
+    path: ../ood/near_domain/article_blog_001/spec.yml
+  - id: ood_listing_near_001
+    bucket: near_domain
+    category: listing
+    group: ood_listing_near_001
+    version: rendered
+    path: ../ood/near_domain/listing_market_001/spec.yml
+  - id: ood_event_far_001
+    bucket: far_domain
+    category: event
+    group: ood_event_far_001
+    version: rendered
+    path: ../ood/far_domain/event_page_001/spec.yml
+  - id: ood_product_adversarial_001
+    bucket: adversarial
+    category: product
+    group: ood_product_adversarial_001
+    version: rendered
+    path: ../ood/adversarial/product_traps_001/spec.yml
+  - id: ood_article_adversarial_001
+    bucket: adversarial
+    category: article
+    group: ood_article_adversarial_001
+    version: rendered
+    path: ../ood/adversarial/article_traps_001/spec.yml

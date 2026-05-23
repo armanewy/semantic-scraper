@@ -7,6 +7,7 @@ from semscrape.models import FieldSpec, ScrapeSpec
 from semscrape.ranker import (
     CandidateRanker,
     RankerLocator,
+    _field_specific_gate_reason,
     calibrate_ranker_dataset,
     evaluate_ranker_dataset,
 )
@@ -203,3 +204,51 @@ def test_ranker_calibration_sweeps_safety_gates() -> None:
     assert len(calibration) == 8
     assert {row["max_ranker_penalties"] for row in calibration} == {0, 1}
     assert {row["min_validator_confidence"] for row in calibration} == {0.5, 0.8}
+
+
+def test_ranker_price_field_is_not_treated_as_coupon_field() -> None:
+    row = {
+        "field": "price",
+        "field_type": "price",
+        "field_description": "Current sale price, not coupon savings.",
+        "field_hints": ["current price", "sale price"],
+        "candidate_value": "$84.00",
+        "candidate_selector": "strong.current",
+        "candidate_tag": "strong",
+        "candidate_context": "sale price $84.00",
+        "own_negative_terms": [],
+    }
+
+    assert _field_specific_gate_reason(row) is None
+
+
+def test_ranker_monthly_gate_allows_monthly_value_near_annual_value() -> None:
+    row = {
+        "field": "pro_monthly_price",
+        "field_type": "price",
+        "field_description": "Monthly price for the Pro plan, not yearly price.",
+        "field_hints": ["Pro", "monthly", "price"],
+        "candidate_value": "$42",
+        "candidate_selector": "p.monthly",
+        "candidate_tag": "p",
+        "candidate_context": "monthly $42 pro 3 tb monthly $42 annual $420",
+        "own_negative_terms": [],
+    }
+
+    assert _field_specific_gate_reason(row) is None
+
+
+def test_ranker_title_gate_blocks_recommended_region_title() -> None:
+    row = {
+        "field": "title",
+        "field_type": "text",
+        "field_description": "Main product title, not recommendations.",
+        "field_hints": ["product title", "h1"],
+        "candidate_value": "Summit Flask",
+        "candidate_selector": "h2:nth-of-type(1)",
+        "candidate_tag": "h2",
+        "candidate_context": "recommended products summit flask",
+        "own_negative_terms": [],
+    }
+
+    assert _field_specific_gate_reason(row) == "ranker_title_non_primary_region"

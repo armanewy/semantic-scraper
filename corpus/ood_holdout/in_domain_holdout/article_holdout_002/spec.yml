@@ -1,0 +1,34 @@
+name: holdout_article_002
+fields:
+  - name: title
+    type: text
+    description: Main article headline, not site name, breadcrumb, or related article title.
+    hints: [headline, article title, h1]
+    validators:
+      min_length: 8
+      max_length: 120
+  - name: author
+    type: text
+    description: Article byline author, not author bio text or editor name.
+    hints: [byline, author, reporter]
+    validators:
+      min_length: 4
+      max_length: 60
+      regex_not: ["Editor"]
+  - name: published_at
+    type: date
+    description: Original publication date for the article, not updated date or author bio date.
+    hints: [published, publication date, datePublished]
+  - name: summary
+    type: text
+    description: Short article dek or summary.
+    hints: [summary, dek, subtitle]
+    validators:
+      min_length: 20
+      max_length: 180
+benchmarks:
+  rendered.html:
+    title: Advanced Packaging Capacity Tightens
+    author: Priya Raman
+    published_at: May 21, 2026
+    summary: Substrate suppliers warned that advanced packaging capacity is tightening again.

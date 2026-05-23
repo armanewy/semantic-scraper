@@ -1,0 +1,29 @@
+name: holdout_job_posting_001
+fields:
+  - name: job_title
+    type: text
+    description: Main job title, not company name or related role.
+    hints: [job title, role, h1]
+    validators:
+      min_length: 6
+      max_length: 100
+      regex_not: ["Related"]
+  - name: location
+    type: text
+    description: Job location.
+    hints: [location, workplace]
+    validators:
+      min_length: 4
+      max_length: 80
+  - name: salary_low
+    type: price
+    description: Lower bound of salary range, not signing bonus.
+    hints: [salary, compensation, range]
+    validators:
+      require_currency: true
+      regex: ["120"]
+benchmarks:
+  rendered.html:
+    job_title: Senior Data Engineer
+    location: Remote US
+    salary_low: $120,000

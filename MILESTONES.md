@@ -486,3 +486,57 @@ Exit criteria:
 - hybrid improves coverage over ranker-local without exceeding 15% qwen call rate.
 
 Status: passed on initial OOD canary corpus.
+
+## M8C: OOD hardening pass
+
+**Question:** Can we improve OOD coverage without increasing false positives?
+
+Deliverables:
+
+- `corpus/ood_dev/manifest.yml` for development hardening and ranker-v2 training.
+- `corpus/ood_holdout/manifest.yml` for a sealed replay holdout that is not used for training.
+- Expanded holdout replay cases across product, article, docs, pricing, recipe, job, and adversarial traps.
+- `models/candidate-ranker-v2.json`, trained from minimized drift plus OOD dev rows only.
+- Targeted safety gates for:
+  - product prices whose specs mention excluded coupon savings;
+  - monthly prices near annual prices;
+  - author section/category labels;
+  - titles inside sponsored, recommended, or related regions;
+  - qwen fallback on ad-region and monthly-vs-annual price traps.
+- Calibrated ranker-local canary run with `--max-ranker-penalties 1`.
+
+Current calibrated OOD result:
+
+```text
+OOD dev ranker-local:
+  coverage_rate:       0.777778
+  false_positive_rate: 0.000000
+  model_call_rate:     0.000000
+
+OOD holdout ranker-local:
+  coverage_rate:       0.730769
+  false_positive_rate: 0.000000
+  model_call_rate:     0.000000
+
+OOD holdout ranker-plus-llm qwen3:1.7b:
+  coverage_rate:       0.730769
+  false_positive_rate: 0.000000
+  model_call_rate:     0.000000
+```
+
+Notes:
+
+- The v2 ranker clears the OOD dev and sealed holdout ranker-local coverage/safety gates under the calibrated penalty setting.
+- The hybrid path is safe on this sealed holdout, but it does not improve coverage because the recoverability gate suppresses all candidate sets as ad-region, monthly-vs-annual, or not strictly eligible.
+- The next OOD suite should include positive fallback-recoverable holdout cases if hybrid coverage lift remains a release criterion.
+
+Exit criteria:
+
+- OOD dev ranker-local coverage >= 75%.
+- OOD dev false_positive_rate = 0%.
+- OOD holdout ranker-local coverage >= 65%.
+- OOD holdout false_positive_rate <= 2%.
+- Adversarial false_positive_rate = 0%.
+- Hybrid improves holdout coverage with qwen_call_rate <= 10%.
+
+Status: ranker-local gate passed on OOD dev and sealed holdout; hybrid safety passed, but hybrid coverage lift is pending.

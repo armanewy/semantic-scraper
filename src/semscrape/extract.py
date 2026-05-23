@@ -527,6 +527,11 @@ def _llm_fallback_decision(
 
 def _field_fallback_block_reason(field: FieldSpec, eligible: list[RankedCandidate]) -> str | None:
     field_key = " ".join([field.name, *field.hints]).lower()
+    if field.kind == "price":
+        if eligible and all(_candidate_in_ad_region(item) for item in eligible):
+            return "fallback_ad_region"
+        if "monthly" in field_key and eligible and all(_candidate_looks_annual_price(item) for item in eligible):
+            return "fallback_monthly_annual_conflict"
     if "coupon" in field_key or "promo" in field_key:
         for item in eligible:
             value = item.value.strip()
@@ -561,6 +566,60 @@ def _candidate_in_ad_region(item: RankedCandidate) -> bool:
         ]
     ).lower()
     return any(term in ctx for term in {"sponsored", "recommended", " ad ", ".ad", " advertisement"})
+
+
+def _candidate_looks_annual_price(item: RankedCandidate) -> bool:
+    ctx = _candidate_fallback_context(item)
+    value = item.value.strip().lower()
+    selector = item.candidate.selector.lower()
+    if not value:
+        return False
+    if _candidate_looks_monthly_price(item):
+        return False
+    if any(term in selector for term in {"annual", "yearly", "per-year", "per_year"}):
+        return True
+    annual_patterns = {
+        f"annual {value}",
+        f"{value} annual",
+        f"yearly {value}",
+        f"{value} yearly",
+        f"per year {value}",
+        f"{value} per year",
+    }
+    return any(pattern in ctx for pattern in annual_patterns)
+
+
+def _candidate_looks_monthly_price(item: RankedCandidate) -> bool:
+    ctx = _candidate_fallback_context(item)
+    value = item.value.strip().lower()
+    selector = item.candidate.selector.lower()
+    if not value:
+        return False
+    if any(term in selector for term in {"monthly", "per-month", "per_month"}):
+        return True
+    monthly_patterns = {
+        f"monthly {value}",
+        f"{value} monthly",
+        f"per month {value}",
+        f"{value} per month",
+        f"/mo {value}",
+        f"{value} /mo",
+    }
+    return any(pattern in ctx[:240] for pattern in monthly_patterns)
+
+
+def _candidate_fallback_context(item: RankedCandidate) -> str:
+    return " ".join(
+        [
+            item.value,
+            item.candidate.selector,
+            item.candidate.own_text,
+            item.candidate.attr_text,
+            item.candidate.parent_text,
+            item.candidate.before_text,
+            item.candidate.after_text,
+        ]
+    ).lower()
 
 
 def extract_field(
