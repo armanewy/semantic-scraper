@@ -284,6 +284,13 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         model_validated_recovery = [row for row in model_rows if row.get("model_validated_recovery")]
         model_false_positive = [row for row in model_rows if row.get("model_false_positive")]
         model_latencies = [row["model_latency_ms"] for row in model_rows if row.get("model_latency_ms") is not None]
+        llm_fallback_eligible = [row for row in model_rows if row.get("llm_fallback_eligible")]
+        llm_fallback_suppressed = [row for row in model_rows if row.get("llm_fallback_suppressed")]
+        llm_fallback_lost = [
+            row
+            for row in llm_fallback_suppressed
+            if row.get("expected_present") and row.get("candidate_present") and not row.get("correct")
+        ]
         ranker_called = [row for row in model_rows if row.get("ranker_called")]
         ranker_validated_recovery = [row for row in model_rows if row.get("ranker_validated_recovery")]
         ranker_false_positive = [row for row in model_rows if row.get("ranker_false_positive")]
@@ -315,6 +322,13 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "model_recovery_rate": _rate(len(model_validated_recovery), len(heuristic_abstained)),
             "model_validated_recovery_rate": _rate(len(model_validated_recovery), len(model_called)),
             "model_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "llm_fallback_eligible_rate": _rate(len(llm_fallback_eligible), len(model_rows)),
+            "llm_fallback_suppressed_rate": _rate(len(llm_fallback_suppressed), len(model_rows)),
+            "llm_fallback_call_rate": _rate(len(model_called), len(model_rows)),
+            "llm_fallback_yield": _rate(len(model_validated_recovery), len(model_called)),
+            "llm_fallback_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "llm_calls_avoided_by_recoverability_gate": sum(int(bool(row.get("llm_calls_avoided_by_recoverability_gate"))) for row in model_rows),
+            "coverage_lost_by_fallback_gate": _rate(len(llm_fallback_lost), len(model_rows)),
             "ranker_call_rate": _rate(len(ranker_called), len(model_rows)),
             "ranker_recovery_rate": _rate(len(ranker_validated_recovery), len(ranker_called)),
             "ranker_false_positive_rate": _rate(len(ranker_false_positive), len(ranker_called)),

@@ -403,4 +403,40 @@ Exit criteria:
 - ranker-plus-llm coverage >= M6E safe-local coverage.
 - ranker-plus-llm qwen3:1.7b call rate <= 15%.
 
-Status: ranker-local gate passed. Live `ranker-plus-llm` with `qwen3:1.7b` improved coverage with zero false positives, but still misses the qwen call-rate target, so the hybrid gate remains open.
+Status: ranker-local gate passed. Live `ranker-plus-llm` with `qwen3:1.7b` improved coverage with zero false positives, but missed the qwen call-rate target before fallback gating.
+
+## M7C: Fallback-call reduction
+
+**Question:** Can the hybrid ranker + qwen path keep coverage while suppressing unproductive local LLM calls?
+
+Deliverables:
+
+- `--llm-fallback-policy all|recoverable-only|budgeted`.
+- Default `ranker-plus-llm` fallback policy: `recoverable-only`.
+- Pre-LLM recoverability gate based on strict-eligible visible candidates and field-specific absent-coupon suppression.
+- `semscrape fallback audit` for productive, suppressed, abstained, and rejected qwen calls.
+- LLM fallback metrics in eval/canary/report summaries.
+- Tests proving recoverable-only suppresses unproductive qwen calls and `all` preserves the previous behavior.
+
+Current minimized drift result:
+
+```text
+ranker-plus-llm qwen3:1.7b recoverable-only:
+  coverage_rate:       0.846154
+  false_positive_rate: 0.000000
+  model_call_rate:     0.076923
+  fallback_yield:      1.000000
+  suppressed_calls:    7
+```
+
+Exit criteria:
+
+- ranker-local coverage >= 75%.
+- ranker-local false_positive_rate <= 2%.
+- ranker-local model_call_rate = 0%.
+- ranker-plus-llm coverage >= 0.846154, or >= 0.82 if exact coverage cannot hold.
+- ranker-plus-llm false_positive_rate <= 2%.
+- ranker-plus-llm qwen3:1.7b call rate <= 15%.
+- qwen fallback yield >= 55%.
+
+Status: passed on minimized drift canary.

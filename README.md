@@ -290,10 +290,14 @@ semscrape canary corpus/repro_minimized/manifest-drift-v2.yml \
   --policy ranker-plus-llm \
   --ranker models/candidate-ranker.json \
   --model qwen3:1.7b \
+  --llm-fallback-policy recoverable-only \
   --out runs/ranker-plus-llm.jsonl
+
+semscrape fallback audit runs/ranker-plus-llm.jsonl \
+  --out runs/fallback-audit.md
 ```
 
-`ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them.
+`ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
 
 Generate mutated pages and test candidate recall:
 

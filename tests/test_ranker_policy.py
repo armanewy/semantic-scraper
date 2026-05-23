@@ -35,6 +35,15 @@ def _price_field() -> FieldSpec:
     )
 
 
+def _title_field() -> FieldSpec:
+    return FieldSpec(
+        name="title",
+        kind="text",
+        description="Main product title.",
+        hints=["title"],
+    )
+
+
 def _html() -> str:
     return """
     <main>
@@ -88,3 +97,53 @@ def test_ranker_plus_llm_does_not_model_bless_unsafe_ranker_abstention() -> None
     assert extraction.source == "ranker_recovery"
     assert extraction.status == "abstained"
     assert extraction.decision["reason"] == "ranker_validator_disqualified"
+
+
+def test_recoverable_only_suppresses_unproductive_model_call() -> None:
+    html = "<main><p>Small sidebar note</p><span>Updated today</span></main>"
+    locator = ChoosingLocator("Small sidebar note")
+    extraction = extract_field(
+        _title_field(),
+        html,
+        generate_candidates(html),
+        use_llm=True,
+        strict=True,
+        policy="ranker-plus-llm",
+        model_on_abstain_only=True,
+        locator=locator,
+        ranker_locator=AbstainingRanker("low_ranker_confidence"),
+        min_confidence=0.99,
+        min_margin=0.99,
+        min_validator_confidence=0.50,
+        llm_fallback_policy="recoverable-only",
+    )
+
+    assert not locator.called
+    assert extraction.source == "model_recovery"
+    assert extraction.status == "abstained"
+    assert extraction.decision["reason"] == "no_strict_eligible_candidates"
+    assert any(item["stage"] == "llm_fallback_gate" and item["status"] == "suppressed" for item in extraction.trace)
+
+
+def test_all_fallback_policy_preserves_model_call() -> None:
+    html = "<main><p>Small sidebar note</p><span>Updated today</span></main>"
+    locator = ChoosingLocator("Small sidebar note")
+    extraction = extract_field(
+        _title_field(),
+        html,
+        generate_candidates(html),
+        use_llm=True,
+        strict=True,
+        policy="ranker-plus-llm",
+        model_on_abstain_only=True,
+        locator=locator,
+        ranker_locator=AbstainingRanker("low_ranker_confidence"),
+        min_confidence=0.99,
+        min_margin=0.99,
+        min_validator_confidence=0.50,
+        llm_fallback_policy="all",
+    )
+
+    assert locator.called
+    assert extraction.status == "abstained"
+    assert any(item["stage"] == "llm_fallback_gate" and item["status"] == "eligible" for item in extraction.trace)

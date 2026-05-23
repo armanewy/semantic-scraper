@@ -88,6 +88,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         min_ranker_confidence=args.min_ranker_confidence,
         min_ranker_margin=args.min_ranker_margin,
         max_ranker_penalties=args.max_ranker_penalties,
+        llm_fallback_policy=args.llm_fallback_policy,
     )
     if args.values_only:
         _print_json(report.values())
@@ -164,6 +165,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
+            llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
         )
         expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
         if not expected_for_file and getattr(args, "expect_like", None):
@@ -372,6 +374,7 @@ def _run_policy_eval_rows(
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
+            llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
         )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
@@ -382,6 +385,8 @@ def _run_policy_eval_rows(
             expected_present = expected is not None and str(expected).strip() != ""
             candidate_present = bool(matching)
             model_called = any(item.get("stage") == "local_model" for item in extraction.trace)
+            model_event = next((item for item in extraction.trace if item.get("stage") == "local_model" and item.get("status") in {"choose", "abstained", "error"}), {})
+            fallback_gate_event = next((item for item in extraction.trace if item.get("stage") == "llm_fallback_gate"), {})
             model_latencies = [item.get("latency_ms") for item in extraction.trace if item.get("stage") == "local_model" and item.get("latency_ms") is not None]
             model_recovered = extraction.source == "model_recovery" and extraction.ok
             correct = values_match(expected, extraction.value)
@@ -434,8 +439,15 @@ def _run_policy_eval_rows(
                 "ranker_confidence": ranker_event.get("confidence"),
                 "ranker_margin": ranker_event.get("margin"),
                 "ranker_reason": ranker_event.get("reason"),
-                "model_confidence": None,
-                "model_reason": None,
+                "model_confidence": model_event.get("confidence"),
+                "model_reason": model_event.get("reason"),
+                "llm_fallback_policy": getattr(args, "llm_fallback_policy", "all"),
+                "llm_fallback_eligible": fallback_gate_event.get("status") == "eligible",
+                "llm_fallback_suppressed": fallback_gate_event.get("status") == "suppressed",
+                "llm_fallback_suppression_reason": fallback_gate_event.get("reason") if fallback_gate_event.get("status") == "suppressed" else None,
+                "llm_fallback_eligible_count": fallback_gate_event.get("eligible_count"),
+                "llm_fallback_best_candidate_id": fallback_gate_event.get("best_candidate_id"),
+                "llm_calls_avoided_by_recoverability_gate": fallback_gate_event.get("status") == "suppressed",
                 "strict": True,
                 "status": extraction.status,
                 "abstention_reason": extraction.decision.get("reason") if extraction.status == "abstained" else None,
@@ -555,6 +567,8 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.no_llm = not bool(defaults["use_llm"])
     if not getattr(args, "_model_on_abstain_only_explicit", False):
         args.model_on_abstain_only = bool(defaults["model_on_abstain_only"])
+    if not getattr(args, "_llm_fallback_policy_explicit", False):
+        args.llm_fallback_policy = str(defaults.get("llm_fallback_policy", "all"))
     if not getattr(args, "_min_confidence_explicit", False):
         args.min_confidence = float(defaults["min_confidence"])
     if not getattr(args, "_min_margin_explicit", False):
@@ -570,6 +584,7 @@ class ExplicitDefaultsParser(argparse.ArgumentParser):
         parsed._strict_explicit = "--strict" in raw_args
         parsed._use_llm_explicit = "--no-llm" in raw_args
         parsed._model_on_abstain_only_explicit = "--model-on-abstain-only" in raw_args
+        parsed._llm_fallback_policy_explicit = "--llm-fallback-policy" in raw_args
         parsed._min_confidence_explicit = "--min-confidence" in raw_args
         parsed._min_margin_explicit = "--min-margin" in raw_args
         parsed._min_validator_confidence_explicit = "--min-validator-confidence" in raw_args
@@ -653,6 +668,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fallback_audit(args: argparse.Namespace) -> int:
+    rows = read_jsonl(args.input)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_fallback_audit_report(rows), encoding="utf-8")
+    print(f"wrote {args.out}")
+    return 0
+
+
 def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_label: str, right_rows: list[dict[str, Any]], *, cross_version: bool = False) -> str:
     def first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         summary = summarize_rows(rows)
@@ -697,6 +720,83 @@ def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_labe
     return "\n".join(lines) + "\n"
 
 
+def _fallback_audit_report(rows: list[dict[str, Any]]) -> str:
+    fallback_rows = [row for row in rows if row.get("model_called") or row.get("llm_fallback_suppressed")]
+    called_rows = [row for row in fallback_rows if row.get("model_called")]
+    productive = [row for row in called_rows if row.get("model_validated_recovery")]
+    suppressed = [row for row in fallback_rows if row.get("llm_fallback_suppressed")]
+    yield_rate = len(productive) / len(called_rows) if called_rows else 0.0
+    lines = ["# semscrape fallback audit", ""]
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            f"- fallback_rows: {len(fallback_rows)}",
+            f"- qwen_calls: {len(called_rows)}",
+            f"- productive_recoveries: {len(productive)}",
+            f"- suppressed: {len(suppressed)}",
+            f"- fallback_recovery_yield: {yield_rate:.3f}",
+            "",
+            "## Outcomes",
+            "",
+        ]
+    )
+    outcomes: dict[str, int] = {}
+    for row in fallback_rows:
+        outcome = _fallback_outcome(row)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    if outcomes:
+        for outcome, count in sorted(outcomes.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"- {outcome}: {count}")
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Fallback rows",
+            "",
+            "| case | field | ranker reason | ranker conf | validator conf | qwen outcome | recovered | value |",
+            "|---|---|---|---:|---:|---|---:|---|",
+        ]
+    )
+    for row in fallback_rows:
+        case = row.get("case_id") or Path(str(row.get("fixture") or "")).stem
+        value = row.get("model_value") or row.get("proposed_value") or ""
+        lines.append(
+            f"| {case} | {row.get('field')} | {row.get('ranker_reason') or ''} | "
+            f"{_fmt_float(row.get('ranker_confidence'))} | {_fmt_float(row.get('validator_confidence'))} | "
+            f"{_fallback_outcome(row)} | {str(bool(row.get('model_validated_recovery'))).lower()} | `{value}` |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _fallback_outcome(row: dict[str, Any]) -> str:
+    if row.get("llm_fallback_suppressed"):
+        return f"suppressed:{row.get('llm_fallback_suppression_reason') or 'unknown'}"
+    if not row.get("model_called"):
+        return "not_called"
+    if row.get("model_validated_recovery"):
+        return "productive_recovery"
+    if row.get("model_error"):
+        return "model_error"
+    if row.get("model_candidate_id") and row.get("abstained"):
+        return "model_chose_but_gate_rejected"
+    if row.get("failure_reason") == "model_abstained_too_often":
+        return "model_abstained"
+    if not row.get("candidate_present"):
+        return "candidate_missing"
+    return "ranker_abstention_unrecoverable"
+
+
+def _fmt_float(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _eval_report(rows: list[dict[str, Any]]) -> str:
     summary = summarize_rows(rows)
     lines = ["# semscrape model evaluation", ""]
@@ -727,6 +827,16 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
             )
     if not wrote_strategy:
         lines.append("| n/a | n/a | 0 | 0 | 0 | 0 | 0.000 |")
+    lines.extend(["", "## LLM fallback", ""])
+    lines.append("| model | eligible | suppressed | call rate | yield | calls avoided | potential lost coverage |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for model, metrics in summary.items():
+        lines.append(
+            f"| {model} | {metrics.get('llm_fallback_eligible_rate', 0.0):.3f} | "
+            f"{metrics.get('llm_fallback_suppressed_rate', 0.0):.3f} | {metrics.get('llm_fallback_call_rate', 0.0):.3f} | "
+            f"{metrics.get('llm_fallback_yield', 0.0):.3f} | {metrics.get('llm_calls_avoided_by_recoverability_gate', 0)} | "
+            f"{metrics.get('coverage_lost_by_fallback_gate', 0.0):.3f} |"
+        )
     lines.extend(["", "## Failure reasons", ""])
     for model, metrics in summary.items():
         lines.append(f"### {model}")
@@ -894,6 +1004,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
+            llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
             learn=args.learn,
         )
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
@@ -1144,6 +1255,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--min-ranker-confidence", type=float, default=0.70, help="Minimum ranker confidence before choosing")
     extract.add_argument("--min-ranker-margin", type=float, default=0.00, help="Minimum ranker confidence margin over runner-up")
     extract.add_argument("--max-ranker-penalties", type=int, default=0, help="Maximum validator penalties allowed for ranker choices")
+    extract.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all", help="When ranker-plus-llm should call the LLM after ranker abstention")
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
     extract.add_argument("--values-only", action="store_true", help="Print only extracted values")
@@ -1177,6 +1289,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--min-ranker-confidence", type=float, default=0.70)
     bench.add_argument("--min-ranker-margin", type=float, default=0.00)
     bench.add_argument("--max-ranker-penalties", type=int, default=0)
+    bench.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     bench.add_argument("--values-only", action="store_true")
     bench.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
     bench.add_argument("--render", action="store_true")
@@ -1205,6 +1318,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--min-ranker-confidence", type=float, default=0.70)
     eval_model.add_argument("--min-ranker-margin", type=float, default=0.00)
     eval_model.add_argument("--max-ranker-penalties", type=int, default=0)
+    eval_model.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     eval_model.add_argument("--out", default="runs/model-eval.jsonl", help="JSONL output path")
     eval_model.add_argument("--failures-dir", default="runs/failures", help="Directory for failure artifacts")
     eval_model.add_argument("--ollama-host", default=None)
@@ -1243,6 +1357,13 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--cross-version", action="store_true", help="Label right-side metrics as cross-version transfer metrics")
     compare.add_argument("--out", required=True)
     compare.set_defaults(func=cmd_compare)
+
+    fallback = sub.add_parser("fallback", help="Inspect LLM fallback calls")
+    fallback_sub = fallback.add_subparsers(dest="fallback_cmd", required=True)
+    fallback_audit = fallback_sub.add_parser("audit", help="Audit productive and suppressed LLM fallback calls")
+    fallback_audit.add_argument("input", help="Canary/eval JSONL output")
+    fallback_audit.add_argument("--out", required=True)
+    fallback_audit.set_defaults(func=cmd_fallback_audit)
 
     mutate = sub.add_parser("mutate", help="Generate mutated HTML fixtures to test drift robustness")
     mutate.add_argument("input")
@@ -1294,6 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--min-ranker-confidence", type=float, default=0.70)
     canary.add_argument("--min-ranker-margin", type=float, default=0.00)
     canary.add_argument("--max-ranker-penalties", type=int, default=0)
+    canary.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     canary.set_defaults(func=cmd_canary)
 
     dataset = sub.add_parser("dataset", help="Build and split labeled candidate-ranking datasets")

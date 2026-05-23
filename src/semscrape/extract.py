@@ -21,6 +21,7 @@ POLICY_DEFAULTS = {
         "strict": True,
         "use_llm": False,
         "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
@@ -29,6 +30,7 @@ POLICY_DEFAULTS = {
         "strict": True,
         "use_llm": True,
         "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
@@ -37,6 +39,7 @@ POLICY_DEFAULTS = {
         "strict": True,
         "use_llm": False,
         "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
@@ -45,6 +48,7 @@ POLICY_DEFAULTS = {
         "strict": True,
         "use_llm": True,
         "model_on_abstain_only": True,
+        "llm_fallback_policy": "recoverable-only",
         "min_confidence": 0.75,
         "min_margin": 0.15,
         "min_validator_confidence": 0.70,
@@ -53,6 +57,7 @@ POLICY_DEFAULTS = {
         "strict": False,
         "use_llm": True,
         "model_on_abstain_only": False,
+        "llm_fallback_policy": "all",
         "min_confidence": 0.50,
         "min_margin": 0.00,
         "min_validator_confidence": 0.50,
@@ -83,6 +88,29 @@ class CacheLookup:
     rejection_reason: str | None = None
     rejection_selector: str | None = None
     rejection_strategy: str | None = None
+
+
+@dataclass(slots=True)
+class FallbackDecision:
+    eligible: bool
+    reason: str
+    policy: str
+    eligible_count: int = 0
+    best_candidate_id: str | None = None
+    best_confidence: float = 0.0
+    best_validator_confidence: float = 0.0
+
+    def trace_event(self) -> dict:
+        return {
+            "stage": "llm_fallback_gate",
+            "status": "eligible" if self.eligible else "suppressed",
+            "policy": self.policy,
+            "reason": self.reason,
+            "eligible_count": self.eligible_count,
+            "best_candidate_id": self.best_candidate_id,
+            "best_confidence": round(self.best_confidence, 4),
+            "best_validator_confidence": round(self.best_validator_confidence, 4),
+        }
 
 
 def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> CacheLookup:
@@ -428,6 +456,96 @@ def _ranker_abstention_allows_model(reason: str | None) -> bool:
     }
 
 
+def _llm_fallback_decision(
+    field: FieldSpec,
+    ranked: list[RankedCandidate],
+    *,
+    policy: str,
+    ranker_reason: str | None,
+    min_confidence: float,
+    min_validator_confidence: float,
+) -> FallbackDecision:
+    if policy == "all":
+        return FallbackDecision(True, "policy_all", policy)
+    if policy not in {"recoverable-only", "budgeted"}:
+        return FallbackDecision(False, "unknown_fallback_policy", policy)
+    if not _ranker_abstention_allows_model(ranker_reason):
+        return FallbackDecision(False, "ranker_reason_not_recoverable", policy)
+
+    eligible: list[RankedCandidate] = []
+    for item in ranked:
+        if item.candidate.hidden:
+            continue
+        decision = _evaluate_strict(
+            item,
+            ranked,
+            min_confidence=min_confidence,
+            min_margin=0.0,
+            min_validator_confidence=min_validator_confidence,
+            enforce_margin=False,
+        )
+        if decision.ok:
+            eligible.append(item)
+
+    if not eligible:
+        return FallbackDecision(False, "no_strict_eligible_candidates", policy)
+
+    field_block = _field_fallback_block_reason(field, eligible)
+    best = max(eligible, key=candidate_confidence)
+    if field_block:
+        return FallbackDecision(
+            False,
+            field_block,
+            policy,
+            eligible_count=len(eligible),
+            best_candidate_id=best.candidate.id,
+            best_confidence=candidate_confidence(best),
+            best_validator_confidence=best.validation.score,
+        )
+
+    if policy == "budgeted" and field.kind == "text" and candidate_confidence(best) < 0.85:
+        return FallbackDecision(
+            False,
+            "fallback_budget_floor",
+            policy,
+            eligible_count=len(eligible),
+            best_candidate_id=best.candidate.id,
+            best_confidence=candidate_confidence(best),
+            best_validator_confidence=best.validation.score,
+        )
+
+    return FallbackDecision(
+        True,
+        "recoverable_candidate_available",
+        policy,
+        eligible_count=len(eligible),
+        best_candidate_id=best.candidate.id,
+        best_confidence=candidate_confidence(best),
+        best_validator_confidence=best.validation.score,
+    )
+
+
+def _field_fallback_block_reason(field: FieldSpec, eligible: list[RankedCandidate]) -> str | None:
+    field_key = " ".join([field.name, *field.hints]).lower()
+    if "coupon" in field_key or "promo" in field_key:
+        for item in eligible:
+            value = item.value.strip()
+            ctx = " ".join(
+                [
+                    value,
+                    item.candidate.own_text,
+                    item.candidate.attr_text,
+                    item.candidate.parent_text,
+                    item.candidate.before_text,
+                    item.candidate.after_text,
+                ]
+            ).lower()
+            if ("coupon" in ctx or "promo" in ctx) and "no active coupon" not in ctx and re.search(r"[A-Za-z]", value):
+                return None
+        return "coupon_absent_context"
+    return None
+
+
 def extract_field(
     field: FieldSpec,
     html: str,
@@ -452,6 +570,7 @@ def extract_field(
     min_ranker_confidence: float = 0.70,
     min_ranker_margin: float = 0.00,
     max_ranker_penalties: int = 0,
+    llm_fallback_policy: str = "all",
 ) -> FieldExtraction:
     trace: list[dict] = []
     if cache is not None:
@@ -514,6 +633,7 @@ def extract_field(
                 cache.remember(field, heuristic, source="heuristic")
             return _field_extraction(field, heuristic, source="heuristic", trace=trace)
         trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": decision.reason, "candidate_id": heuristic.candidate.id})
+        ranker_abstention_reason = None
         if policy in {"ranker-local", "ranker-plus-llm"}:
             ranker_attempt = _call_ranker(
                 field,
@@ -527,14 +647,16 @@ def extract_field(
             )
             if ranker_attempt.error:
                 trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
+                ranker_abstention_reason = "ranker_error"
                 if policy == "ranker-local":
                     return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
             elif ranker_attempt.chosen is None:
+                ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
                 trace.append(
                     {
                         "stage": "ranker",
                         "status": "abstained",
-                        "reason": ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice",
+                        "reason": ranker_abstention_reason,
                         "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
                         "margin": (ranker_attempt.choice.raw or {}).get("margin") if ranker_attempt.choice else None,
                         "latency_ms": ranker_attempt.latency_ms,
@@ -542,11 +664,11 @@ def extract_field(
                 )
                 if policy == "ranker-local":
                     return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
-                if not _ranker_abstention_allows_model(ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"):
+                if not _ranker_abstention_allows_model(ranker_abstention_reason):
                     return _abstention(
                         field,
                         source="ranker_recovery",
-                        reason=ranker_attempt.choice.reason if ranker_attempt.choice else "ranker_abstained",
+                        reason=ranker_abstention_reason,
                         chosen=heuristic,
                         model=ranker_path,
                         trace=trace,
@@ -590,6 +712,18 @@ def extract_field(
 
         should_call_model = use_llm and (model_on_abstain_only or policy in {"safe-local", "ranker-plus-llm"})
         if should_call_model:
+            if policy == "ranker-plus-llm":
+                fallback_decision = _llm_fallback_decision(
+                    field,
+                    ranked,
+                    policy=llm_fallback_policy,
+                    ranker_reason=ranker_abstention_reason,
+                    min_confidence=min_confidence,
+                    min_validator_confidence=min_validator_confidence,
+                )
+                trace.append(fallback_decision.trace_event())
+                if not fallback_decision.eligible:
+                    return _abstention(field, source="model_recovery", reason=fallback_decision.reason, chosen=heuristic, model=model, trace=trace)
             attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
             if attempt.error:
                 trace.append({"stage": "local_model", "status": "error", "reason": attempt.error, "latency_ms": attempt.latency_ms})
@@ -681,6 +815,7 @@ def extract_html(
     min_ranker_confidence: float = 0.70,
     min_ranker_margin: float = 0.00,
     max_ranker_penalties: int = 0,
+    llm_fallback_policy: str = "all",
 ):
     from .models import ExtractionReport
 
@@ -712,6 +847,7 @@ def extract_html(
             min_ranker_confidence=min_ranker_confidence,
             min_ranker_margin=min_ranker_margin,
             max_ranker_penalties=max_ranker_penalties,
+            llm_fallback_policy=llm_fallback_policy,
         )
 
     if cache is not None and learn:
