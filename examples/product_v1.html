@@ -1,18 +1,29 @@
 <!doctype html>
 <html>
-<head>
-  <title>Acme Noise-Canceling Headphones | Demo Shop</title>
-  <meta property="og:title" content="Acme Noise-Canceling Headphones" />
-</head>
+<head><title>Example Store</title></head>
 <body>
-  <main id="product-detail">
-    <section class="product-hero">
-      <h1 class="product-title">Acme Noise-Canceling Headphones</h1>
-      <div class="buy-box">
-        <span class="label">Today only</span>
-        <span class="price sale-price" data-testid="product-price">$129.99</span>
-        <div class="rating" aria-label="4.7 out of 5 stars">4.7 out of 5 stars</div>
+  <main id="product-page" class="layout product-detail">
+    <nav>Home / Coffee / Brewers</nav>
+    <section class="hero-card" data-testid="product-hero">
+      <div class="media"><img alt="AeroPress Go Travel Coffee Press" src="/images/aeropress-go.jpg"></div>
+      <div class="product-info">
+        <h1 class="product-title">AeroPress Go Travel Coffee Press</h1>
+        <p class="subtitle">Compact coffee maker for travel and small kitchens.</p>
+        <div class="pricing">
+          <span class="old-price" aria-label="Old price">Was $79.99</span>
+          <span class="current-price" aria-label="Current sale price">$59.99</span>
+        </div>
+        <div class="reviews" aria-label="Customer rating">
+          <span class="rating-value">4.7</span>
+          <span>out of 5 stars</span>
+        </div>
+        <p class="availability">In stock — ships tomorrow</p>
+        <button>Add to cart</button>
       </div>
+    </section>
+    <section class="recommendations">
+      <h2>Related products</h2>
+      <p>Sponsored price $999.99</p>
     </section>
   </main>
 </body>

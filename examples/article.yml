@@ -1,13 +1,27 @@
+name: article_page
 fields:
-  headline:
-    description: Main article headline
-    type: title
-    expected: "City Council Approves New Transit Plan"
-  author:
-    description: Article author byline
+  - name: title
     type: text
-    expected: "Maya Chen"
-  published_at:
-    description: Publication date for the article
+    description: Main article headline.
+    hints: [headline, article title, h1]
+    validators:
+      min_length: 8
+      max_length: 160
+  - name: author
+    type: text
+    description: The article author or byline.
+    hints: [author, byline, writer]
+    validators:
+      min_length: 3
+      max_length: 80
+      regex_not: ["subscribe|newsletter"]
+  - name: published_at
     type: date
-    expected: "2026-05-21"
+    description: Published date of the article.
+    hints: [published date, date, time]
+
+benchmarks:
+  article_v1.html:
+    title: "Small Models Are Getting Better at Web Automation"
+    author: "Maya Chen"
+    published_at: "May 12, 2026"

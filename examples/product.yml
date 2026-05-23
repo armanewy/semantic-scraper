@@ -1,13 +1,46 @@
+name: product_card
 fields:
-  title:
-    description: Product title or product name shown to the shopper
-    type: title
-    expected: "Acme Noise-Canceling Headphones"
-  price:
-    description: Current sale price shown to the shopper
+  - name: title
+    type: text
+    description: Main product title/name shown to the shopper.
+    hints: [product title, product name, headline, h1]
+    validators:
+      min_length: 5
+      max_length: 120
+      regex_not: ["cart|checkout|sponsored|related"]
+
+  - name: price
     type: price
-    expected: "$129.99"
-  rating:
-    description: Customer rating value for this product
-    type: rating
-    expected: "4.7 out of 5 stars"
+    description: Current sale price, not the old/list/strikethrough price.
+    hints: [current price, sale price, now, deal, offer]
+    validators:
+      require_currency: true
+      regex_not: ["999\\.99|129\\.99"]
+
+  - name: rating
+    type: number
+    description: Average customer rating out of five stars.
+    hints: [rating, stars, reviews, score]
+    validators:
+      regex: ["^[0-5](?:\\.\\d)?$"]
+
+  - name: availability
+    type: text
+    description: Whether the product is currently available or in stock.
+    hints: [availability, stock, ships, inventory]
+    validators:
+      min_length: 5
+      max_length: 80
+      regex: ["stock|available|ships"]
+
+benchmarks:
+  product_v1.html:
+    title: "AeroPress Go Travel Coffee Press"
+    price: "$59.99"
+    rating: "4.7"
+    availability: "In stock — ships tomorrow"
+  product_v2.html:
+    title: "AeroPress Go Travel Coffee Press"
+    price: "$59.99"
+    rating: "4.7"
+    availability: "Available now"

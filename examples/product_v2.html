@@ -1,28 +1,30 @@
 <!doctype html>
 <html>
-<head>
-  <title>Demo Shop</title>
-  <meta name="viewport" content="width=device-width" />
-</head>
+<head><title>Storefront</title></head>
 <body>
-  <main class="pdp rev-2026">
-    <div class="layout">
-      <aside class="recommendations">
-        <h2>Customers also viewed</h2>
-        <div class="card"><span class="money">$89.00</span></div>
-      </aside>
-      <article data-page="product">
-        <div class="headline-wrap">
-          <div class="eyebrow">Acme Audio</div>
-          <h1 data-testid="pdp-name">Acme Noise-Canceling Headphones</h1>
+  <div data-app="shop">
+    <main class="x9-root">
+      <article class="pdp-shell" data-page="item">
+        <div class="gallery"><img alt="portable coffee brewer" src="/assets/p1.jpg"></div>
+        <div class="buybox c71">
+          <div class="crumbs">Home / Gear / Coffee</div>
+          <h1 data-qa="name-primary">AeroPress Go Travel Coffee Press</h1>
+          <p class="blurb">Compact coffee maker for travel and small kitchens.</p>
+          <ul class="money-list">
+            <li class="muted compare">Usually $79.99</li>
+            <li class="offer" data-role="deal-price"><strong>Deal:</strong> $59.99</li>
+          </ul>
+          <div class="social-proof">
+            <span>Customer score</span>
+            <strong data-qa="stars">4.7</strong>
+            <span>from 1,294 reviews</span>
+          </div>
+          <div data-qa="fulfillment-message">Available now</div>
+          <button>Buy now</button>
         </div>
-        <section class="purchase-panel">
-          <div class="promo">Save 20% this week</div>
-          <strong itemprop="price" content="129.99" class="amount current">$129.99</strong>
-          <span class="stars" data-test="review-summary">4.7 out of 5 stars</span>
-        </section>
       </article>
-    </div>
-  </main>
+      <aside><p>Original list price $129.99 from another seller</p></aside>
+    </main>
+  </div>
 </body>
 </html>
