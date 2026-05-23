@@ -24,7 +24,7 @@ def extract_value(field: FieldSpec, candidate: Candidate) -> str:
     that element. It intentionally remains deterministic.
     """
 
-    text = normalize_ws(candidate.text or candidate.own_text)
+    text = _normalize_currency_text(normalize_ws(candidate.text or candidate.own_text))
     kind = field.kind
 
     if kind == "url":
@@ -43,8 +43,9 @@ def extract_value(field: FieldSpec, candidate: Candidate) -> str:
 
     if kind == "price":
         # Prefer a price in the candidate's own text; parent text often includes old/current prices.
-        own = normalize_ws(candidate.own_text)
-        for source in (own, text, candidate.attr_text):
+        own = _normalize_currency_text(normalize_ws(candidate.own_text))
+        attr_text = _normalize_currency_text(candidate.attr_text)
+        for source in (own, text, attr_text):
             match = PRICE_RE.search(source)
             if match:
                 return normalize_ws(match.group(0))
@@ -79,7 +80,7 @@ def _regex_list(value: str | list[str] | None) -> list[str]:
 
 
 def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
-    normalized = _clean_text_value(normalize_ws(value or "")) if field.kind == "text" else normalize_ws(value or "")
+    normalized = _clean_text_value(normalize_ws(value or "")) if field.kind == "text" else _normalize_currency_text(normalize_ws(value or ""))
     errors: list[str] = []
     reasons: list[str] = []
     penalties: list[str] = []
@@ -222,3 +223,7 @@ def _clean_text_value(value: str) -> str:
     cleaned = re.sub(r"\s*[¶#]\s*$", "", cleaned).strip()
     cleaned = re.sub(r"\s*\bpermalink\b\s*$", "", cleaned, flags=re.I).strip()
     return cleaned
+
+
+def _normalize_currency_text(value: str) -> str:
+    return normalize_ws(value).replace("Â£", "£").replace("Ł", "£")

@@ -582,7 +582,7 @@ The pilot playbook for external alpha users is in [docs/alpha_pilot_playbook.md]
 
 The first external-style alpha execution intentionally used the frozen `v0.1.0-alpha.1` target. It proved that the evidence/privacy loop worked, but failed the field-trial safety gate because unseen page semantics produced false positives. M13R remediated those incidents with narrow deterministic gates and validators, then reran the original pilots and a new mini-holdout with zero observed false positives. The incident report is in [docs/m13r_false_positive_incident_report.md](docs/m13r_false_positive_incident_report.md).
 
-`v0.1.0-alpha.2` is an internal validation tag for the M13R build. It passed the original external-alpha regression suite, but M14 fresh pilots found new false positives and candidate-recall misses, so it should not be promoted to public alpha. The validation report is in [docs/m14_alpha2_validation_report.md](docs/m14_alpha2_validation_report.md).
+`v0.1.0-alpha.2` is an internal validation tag for the M13R build. It passed the original external-alpha regression suite, but M14 fresh pilots found new false positives and candidate-recall misses, so it was not promoted to public alpha. M14R converted those failures into targeted normalization, region, listing-order, title, and plan-price gates. The remediated fresh-alpha rerun reached `false_positive_rate = 0.0` and `candidate_recall_at_40 = 1.0`; a separate final mini-holdout also stayed at `false_positive_rate = 0.0`. Reports are in [docs/m14_alpha2_validation_report.md](docs/m14_alpha2_validation_report.md) and [docs/m14r_fresh_alpha_incident_report.md](docs/m14r_fresh_alpha_incident_report.md).
 
 Run the M8C OOD hardening workflow:
 

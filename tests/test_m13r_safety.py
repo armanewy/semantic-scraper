@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from semscrape.dataset import candidate_dataset_row
 from semscrape.dom import generate_candidates
+from semscrape.eval_model import values_match
 from semscrape.heuristics import rank_candidates
 from semscrape.models import FieldSpec, ScrapeSpec
 from semscrape.ranker import CandidateRanker
@@ -151,3 +152,185 @@ def test_author_prompt_rejects_cta_candidate() -> None:
     assert prediction.action == "choose"
     assert prediction.row is not None
     assert prediction.row["candidate_value"] == "Sarah Boyce"
+
+
+def test_first_product_title_rejects_page_category_heading() -> None:
+    field = FieldSpec(
+        name="first_product_title",
+        kind="text",
+        description="Full title of the first product card in the listing.",
+        hints=["first product", "first book title"],
+    )
+    html = """
+    <main>
+      <h1>Travel</h1>
+      <ol>
+        <li><article class="product_pod"><h3><a title="It's Only the Himalayas">It's Only the Himalayas</a></h3></article></li>
+      </ol>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "It's Only the Himalayas"
+
+
+def test_first_product_title_rejects_later_listing_cards() -> None:
+    field = FieldSpec(
+        name="first_product_title",
+        kind="text",
+        description="Full title of the first product card in the listing.",
+        hints=["first product", "first book title"],
+    )
+    html = """
+    <main>
+      <ol>
+        <li><article class="product_pod"><h3><a title="It's Only the Himalayas">It's Only the Himalayas</a></h3></article></li>
+        <li><article class="product_pod"><h3><a title="Full Moon over Noah's Ark">Full Moon over Noah's ...</a></h3></article></li>
+      </ol>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "It's Only the Himalayas"
+
+
+def test_main_page_title_rejects_price_heading() -> None:
+    field = FieldSpec(
+        name="page_title",
+        kind="text",
+        description="Main pricing page title.",
+        hints=["pricing title", "h1"],
+    )
+    html = """
+    <header><h1>Pricing</h1></header>
+    <main><section class="card"><h1 class="pricing-card-title">$0<small>/mo</small></h1></section></main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Pricing"
+
+
+def test_main_page_title_allows_aria_heading() -> None:
+    field = FieldSpec(
+        name="page_title",
+        kind="text",
+        description="Main documentation page title.",
+        hints=["page title"],
+    )
+    html = """
+    <main>
+      <div role="heading" aria-level="1">semscrape Quickstart</div>
+      <h2>Install</h2>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "semscrape Quickstart"
+
+
+def test_plan_price_uses_matching_plan_region() -> None:
+    field = FieldSpec(
+        name="pro_plan_price",
+        kind="price",
+        description="Monthly price for the Pro plan.",
+        hints=["Pro plan", "pro price"],
+    )
+    html = """
+    <main>
+      <div class="card"><h4>Free</h4><h1 class="pricing-card-title">$0<small>/mo</small></h1></div>
+      <div class="card"><h4>Pro</h4><h1 class="pricing-card-title">$15<small>/mo</small></h1></div>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "$15"
+
+
+def test_first_section_prompt_allows_unnumbered_section_heading() -> None:
+    field = FieldSpec(
+        name="first_tutorial_section",
+        kind="text",
+        description="First main tutorial section heading after the page title.",
+        hints=["first tutorial section", "creating a project"],
+    )
+    html = """
+    <main>
+      <h1>Writing your first Django app, part 1</h1>
+      <h2>Creating a project</h2>
+      <h2>The development server</h2>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Creating a project"
+
+
+def test_section_prompt_rejects_paragraph_inside_matching_section() -> None:
+    field = FieldSpec(
+        name="first_tutorial_section",
+        kind="text",
+        description="First main tutorial section heading after the page title.",
+        hints=["first tutorial section", "creating a project"],
+    )
+    html = """
+    <main>
+      <h1>Writing your first Django app, part 1</h1>
+      <section id="creating-a-project">
+        <h2>Creating a project</h2>
+        <p>Then, run the following command to bootstrap a new Django project:</p>
+      </section>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Creating a project"
+
+
+def test_section_prompt_rejects_navigation_heading() -> None:
+    field = FieldSpec(
+        name="first_section",
+        kind="text",
+        description="First h2 section heading in the documentation body.",
+        hints=["first h2 section"],
+    )
+    html = """
+    <body>
+      <nav aria-label="main navigation"><h3>Navigation</h3></nav>
+      <main><section id="basic-usage"><h2>Basic Usage</h2></section></main>
+    </body>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Basic Usage"
+
+
+def test_mojibake_pound_currency_matches_expected_value() -> None:
+    field = FieldSpec(name="price", kind="price")
+    candidate = generate_candidates("<p class='price_color'>Â£45.17</p>")[0]
+
+    assert extract_value(field, candidate) == "£45.17"
+    assert values_match("£45.17", "Â£45.17")

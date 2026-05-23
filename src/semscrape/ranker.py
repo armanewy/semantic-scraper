@@ -43,6 +43,16 @@ NUMERIC_FEATURES = {
     "visible": 1.0,
     "in_viewport": 1.0,
     "bbox_area": 100000.0,
+    "region_main": 1.0,
+    "region_article": 1.0,
+    "region_product": 1.0,
+    "region_listing_card": 1.0,
+    "region_pricing": 1.0,
+    "region_nav": 1.0,
+    "region_sidebar": 1.0,
+    "region_footer": 1.0,
+    "region_tag_cloud": 1.0,
+    "region_related": 1.0,
 }
 
 CATEGORICAL_FEATURES = (
@@ -136,7 +146,9 @@ class CandidateRanker:
             return RankerPrediction("abstain", None, 0.0, 0.0, "no_candidates")
         threshold = self.threshold if min_confidence is None else min_confidence
         margin_threshold = self.margin if min_margin is None else min_margin
-        scored = sorted(((self.confidence_row(row), row) for row in rows), key=lambda item: item[0], reverse=True)
+        working_rows = [dict(row) for row in rows]
+        _annotate_first_listing_candidate(working_rows)
+        scored = sorted(((self.confidence_row(row), row) for row in working_rows), key=lambda item: item[0], reverse=True)
         first_blocked: RankerPrediction | None = None
         for index, (best_conf, best) in enumerate(scored):
             second_conf = max((score for other_index, (score, _) in enumerate(scored) if other_index != index), default=0.0)
@@ -530,13 +542,50 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     tag = str(row.get("candidate_tag") or "").lower()
     value = str(row.get("candidate_value") or "").strip()
     value_lower = value.lower()
+    candidate_text = str(row.get("candidate_text") or "").lower()
     context = str(row.get("candidate_context") or "").lower()
     own_terms = set(row.get("own_negative_terms") or [])
 
     if "first organic" in prompt and _looks_like_later_repeated_result(selector):
         return "ranker_non_first_organic_candidate"
 
-    if _is_title_prompt(prompt):
+    if _is_section_prompt(prompt, field):
+        if _is_non_content_section_region(selector, context, value_lower):
+            return "ranker_section_non_content_region"
+        if tag in {"h1", "title"}:
+            return "ranker_section_page_title_candidate"
+        if tag not in {"h2", "h3", "h4"}:
+            return "ranker_section_heading_required"
+        if _is_first_section_prompt(prompt, field) and _heading_index(selector) not in {0, 1}:
+            return "ranker_non_first_section_candidate"
+
+    if _is_title_prompt(prompt, field):
+        if _looks_like_price_value(value_lower):
+            return "ranker_title_price_candidate"
+        if _is_listing_item_prompt(prompt):
+            first_listing_position = row.get("_first_listing_position")
+            candidate_position = _listing_position(selector, context)
+            if (
+                first_listing_position is not None
+                and candidate_position is not None
+                and candidate_position > int(first_listing_position)
+            ):
+                return "ranker_non_first_listing_candidate"
+            first_listing_id = row.get("_first_listing_candidate_id")
+            candidate_index = _candidate_index(row.get("candidate_id"))
+            if (
+                first_listing_id is not None
+                and candidate_index is not None
+                and (candidate_position is None or candidate_position == first_listing_position)
+                and candidate_index > int(first_listing_id) + 5
+            ):
+                return "ranker_non_first_listing_candidate"
+            if _looks_like_later_repeated_result(selector):
+                return "ranker_non_first_listing_candidate"
+            if tag in {"h1", "title"} or not _candidate_in_listing_region(selector, context):
+                return "ranker_listing_item_context_required"
+        elif _is_main_page_title_prompt(prompt) and not _is_page_heading_candidate(row, tag, selector, context):
+            return "ranker_main_title_heading_required"
         if _looks_like_date(value_lower):
             return "ranker_title_date_candidate"
         if any(term in context for term in {"sponsored", "recommended", "related", "also viewed", "advertisement"}):
@@ -593,7 +642,7 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
             return "ranker_broad_container"
 
     ordinal = _requested_ordinal(prompt)
-    if ordinal and any(term in prompt for term in {"chapter", "section", "tutorial"}):
+    if ordinal and _requires_numeric_ordinal(prompt, ordinal):
         if not _value_starts_with_ordinal(value, ordinal):
             return "ranker_wrong_ordinal_candidate"
 
@@ -606,6 +655,10 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
         return "ranker_monthly_annual_conflict"
     if field_type == "price" and any(term in context for term in {"sponsored", "recommended", "training fee", "workshop"}):
         return "ranker_price_ad_region"
+    if field_type == "price":
+        plan_reason = _price_plan_gate_reason(prompt, value_lower, context, candidate_text)
+        if plan_reason:
+            return plan_reason
 
     if "storage" in prompt and "$" in value:
         return "ranker_mixed_table_value"
@@ -621,8 +674,148 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_title_prompt(prompt: str) -> bool:
-    return "title" in prompt or "headline" in prompt or "heading" in prompt
+def _is_title_prompt(prompt: str, field: str) -> bool:
+    if any(term in field for term in {"section", "chapter"}):
+        return False
+    return any(term in field for term in {"title", "headline"}) or any(
+        term in prompt
+        for term in {
+            "main title",
+            "page title",
+            "site title",
+            "article title",
+            "product title",
+            "product name",
+            "headline",
+        }
+    )
+
+
+def _is_section_prompt(prompt: str, field: str) -> bool:
+    return "section" in field or any(term in prompt for term in {"section heading", "tutorial section"})
+
+
+def _is_first_section_prompt(prompt: str, field: str) -> bool:
+    return "first" in prompt and _is_section_prompt(prompt, field)
+
+
+def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
+    region = f"{selector} {context}".lower()
+    if any(
+        term in region
+        for term in {
+            "main navigation",
+            "aria-label=\"related\"",
+            "aria-label='related'",
+            "toc",
+            "table of contents",
+            "sidebar",
+            "previous topic",
+            "next topic",
+            "this page",
+            "source link",
+        }
+    ):
+        return True
+    return value in {"navigation", "table of contents", "previous topic", "next topic", "this page"}
+
+
+def _heading_index(selector: str) -> int:
+    match = re.search(r"h[1-6]:nth-of-type\((\d+)\)", selector)
+    return int(match.group(1)) if match else 0
+
+
+def _is_main_page_title_prompt(prompt: str) -> bool:
+    return any(
+        term in prompt
+        for term in {
+            "main page title",
+            "page title",
+            "site title",
+            "main documentation page title",
+            "main pricing page title",
+            "main article title",
+            "article title",
+            "post title",
+        }
+    )
+
+
+def _is_page_heading_candidate(row: dict[str, Any], tag: str, selector: str, context: str) -> bool:
+    if tag in {"h1", "title"}:
+        return True
+    aria_role = str(row.get("aria_role") or "").lower()
+    region = f"{selector} {context}".lower()
+    return aria_role == "heading" or "role=\"heading\"" in region or "role='heading'" in region
+
+
+def _is_listing_item_prompt(prompt: str) -> bool:
+    return any(term in prompt for term in {"first product", "product card", "first result", "listing result", "first book", "first item"})
+
+
+def _candidate_in_listing_region(selector: str, context: str) -> bool:
+    return any(term in selector or term in context for term in {"article", "li:nth-of-type", "card", "product", "quote", "result"})
+
+
+def _annotate_first_listing_candidate(rows: list[dict[str, Any]]) -> None:
+    first_listing_position: int | None = None
+    first_candidate_id: int | None = None
+    for row in rows:
+        field = str(row.get("field") or "").lower()
+        field_type = str(row.get("field_type") or "").lower()
+        description = str(row.get("field_description") or "").lower()
+        hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+        prompt = " ".join([field, field_type, description, hints])
+        if not (_is_title_prompt(prompt, field) and _is_listing_item_prompt(prompt)):
+            continue
+        selector = str(row.get("candidate_selector") or "").lower()
+        context = str(row.get("candidate_context") or "").lower()
+        tag = str(row.get("candidate_tag") or "").lower()
+        value = str(row.get("candidate_value") or "").strip().lower()
+        candidate_id = _candidate_index(row.get("candidate_id"))
+        candidate_position = _listing_position(selector, context)
+        if candidate_position is None and candidate_id is None:
+            continue
+        if tag in {"h1", "title"} or not _candidate_in_listing_region(selector, context):
+            continue
+        if not row.get("validation_passed") or int(row.get("hard_disqualifier_count") or 0) > 0:
+            continue
+        if _looks_like_price_value(value) or _looks_like_date(value):
+            continue
+        if tag in {"a", "h2", "h3", "h4"} and candidate_id is not None:
+            first_candidate_id = candidate_id if first_candidate_id is None else min(first_candidate_id, candidate_id)
+        if candidate_position is not None:
+            first_listing_position = (
+                candidate_position if first_listing_position is None else min(first_listing_position, candidate_position)
+            )
+    if first_listing_position is None and first_candidate_id is None:
+        return
+    for row in rows:
+        field = str(row.get("field") or "").lower()
+        field_type = str(row.get("field_type") or "").lower()
+        description = str(row.get("field_description") or "").lower()
+        hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+        prompt = " ".join([field, field_type, description, hints])
+        if _is_title_prompt(prompt, field) and _is_listing_item_prompt(prompt):
+            if first_listing_position is not None:
+                row["_first_listing_position"] = first_listing_position
+            if first_candidate_id is not None:
+                row["_first_listing_candidate_id"] = first_candidate_id
+
+
+def _candidate_index(candidate_id: Any) -> int | None:
+    match = re.search(r"\d+", str(candidate_id or ""))
+    return int(match.group(0)) if match else None
+
+
+def _listing_position(selector: str, context: str) -> int | None:
+    haystack = f"{selector} {context}".lower()
+    matches = [int(match) for match in re.findall(r"(?:li|article|section):nth-of-type\((\d+)\)", haystack)]
+    return max(matches) if matches else None
+
+
+def _looks_like_price_value(value: str) -> bool:
+    return bool(re.search(r"[$€£¥]\s*\d|\b(?:usd|eur|gbp|cad|aud|jpy)\b|\d+\s*/\s*(?:mo|month|yr|year)", value))
 
 
 def _looks_like_date(value: str) -> bool:
@@ -682,8 +875,46 @@ def _requested_ordinal(prompt: str) -> int | None:
     return None
 
 
+def _requires_numeric_ordinal(prompt: str, ordinal: int) -> bool:
+    if ordinal > 1:
+        return any(term in prompt for term in {"chapter", "section", "tutorial", "heading"})
+    return any(term in prompt for term in {"numbered", "chapter"}) or bool(re.search(r"\b1st\b", prompt))
+
+
 def _value_starts_with_ordinal(value: str, ordinal: int) -> bool:
     return bool(re.match(rf"^\s*{ordinal}(?:[.)]|\b)", value))
+
+
+def _price_plan_gate_reason(prompt: str, value: str, context: str, candidate_text: str) -> str | None:
+    requested = _requested_plan(prompt)
+    if not requested:
+        return None
+    if requested not in context and requested not in candidate_text:
+        return "ranker_price_plan_context_required"
+    competing = [plan for plan in _PLAN_TERMS if plan != requested and (_contains_term(candidate_text, plan) or _plan_appears_before_value(context, value, plan))]
+    if competing and not _plan_appears_before_value(context, value, requested) and requested not in candidate_text:
+        return "ranker_price_wrong_plan_context"
+    return None
+
+
+_PLAN_TERMS = ("free", "starter", "basic", "standard", "pro", "premium", "plus", "team", "business", "enterprise")
+
+
+def _requested_plan(prompt: str) -> str | None:
+    for plan in _PLAN_TERMS:
+        if _contains_term(prompt, plan) and "plan" in prompt:
+            return plan
+    return None
+
+
+def _plan_appears_before_value(context: str, value: str, plan: str) -> bool:
+    value_index = context.find(value) if value else -1
+    plan_index = context.find(plan)
+    if plan_index < 0:
+        return False
+    if value_index < 0:
+        return plan_index <= 80
+    return plan_index <= value_index and value_index - plan_index <= 120
 
 
 def _word_count(value: str) -> int:

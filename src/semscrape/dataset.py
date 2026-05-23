@@ -141,6 +141,7 @@ def candidate_dataset_row(
     own_attr_ctx = " ".join([candidate.own_text, candidate.attr_text, candidate.selector or ""])
     own_negative_hits = _term_hits(own_attr_ctx, negative_terms)
     selector = candidate.selector or ""
+    regions = _region_flags(selector, ctx)
     hard_negative = bool(not label and _is_hard_negative(field, ranked, own_negative_hits))
     sample_weight = _sample_weight(label=int(label), hard_negative=hard_negative)
     row = {
@@ -202,6 +203,7 @@ def candidate_dataset_row(
         "bbox_area": _bbox_area(bbox),
         "aria_role": str(rendered.get("aria_role") or rendered.get("role") or candidate.attrs.get("role") or ""),
         "aria_name": str(rendered.get("aria_name") or candidate.attrs.get("aria-label") or "")[:200],
+        **regions,
     }
     return row
 
@@ -265,6 +267,26 @@ def _is_hard_negative(field: FieldSpec, ranked: RankedCandidate, negative_hits: 
     if field.kind == "price" and ranked.value and NUMBER_RE.search(ranked.value) and not CURRENCY_RE.search(ranked.value):
         return True
     return False
+
+
+def _region_flags(selector: str, context: str) -> dict[str, bool]:
+    haystack = f"{selector} {context}".lower()
+    return {
+        "region_main": _region_has_any(haystack, {"main", "article", "content", "body-content", "document"}),
+        "region_article": _region_has_any(haystack, {"article", "post", "entry-content", "blog"}),
+        "region_product": _region_has_any(haystack, {"product", "book", "sku", "availability", "price_color"}),
+        "region_listing_card": _region_has_any(haystack, {"article:nth-of-type", "li:nth-of-type", "card", "quote", "result", "product_pod"}),
+        "region_pricing": _region_has_any(haystack, {"pricing", "plan", "card-title", "price"}),
+        "region_nav": _region_has_any(haystack, {"nav", "navbar", "breadcrumb", "menu"}),
+        "region_sidebar": _region_has_any(haystack, {"sidebar", "toc", "table of contents", "browse", "you are here"}),
+        "region_footer": _region_has_any(haystack, {"footer"}),
+        "region_tag_cloud": _region_has_any(haystack, {"tag cloud", "top tags", "tags-box"}),
+        "region_related": _region_has_any(haystack, {"related", "recommended", "recently viewed", "also viewed", "sponsored"}),
+    }
+
+
+def _region_has_any(haystack: str, terms: set[str]) -> bool:
+    return any(term in haystack for term in terms)
 
 
 def _sample_weight(*, label: int, hard_negative: bool) -> float:

@@ -139,6 +139,13 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
         if PRICE_RE.search(value):
             score += 1.0
             reasons.append("price-like value")
+        plan_reason = _price_plan_gate_reason(field.prompt_text, value.lower(), ctx, candidate.text.lower())
+        if plan_reason:
+            score -= 2.0
+            validation.hard_disqualifiers.append(plan_reason)
+            validation.errors.append(plan_reason)
+            validation.passed = False
+            reasons.append(f"disqualified {plan_reason}")
         if any(term in attr_ctx or term in own for term in CURRENT_PRICE_TERMS):
             score += 0.8
             reasons.append("current/sale price cue")
@@ -165,10 +172,35 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             validation.penalties.append("broad price container")
             reasons.append("penalized broad price container")
 
-    if name in {"title", "headline", "product_title", "product_name"} or "title" in f_tokens:
+    if _is_title_field(field, name, f_tokens):
         if candidate.tag in {"h1", "h2"}:
             score += 1.4
             reasons.append("heading tag")
+        if _looks_like_price_value(value.lower()):
+            score -= 2.4
+            validation.hard_disqualifiers.append("price-shaped title candidate")
+            validation.errors.append("price-shaped title candidate")
+            validation.passed = False
+            reasons.append("disqualified price-shaped title candidate")
+        if _is_listing_item_prompt(field.prompt_text):
+            if _looks_like_later_repeated_result(candidate.selector.lower()):
+                score -= 2.0
+                validation.hard_disqualifiers.append("non-first listing item")
+                validation.errors.append("non-first listing item")
+                validation.passed = False
+                reasons.append("disqualified non-first listing item")
+            if candidate.tag in {"h1", "title"} or not _candidate_in_listing_region(candidate.selector.lower(), ctx):
+                score -= 2.0
+                validation.hard_disqualifiers.append("listing item outside card/result region")
+                validation.errors.append("listing item outside card/result region")
+                validation.passed = False
+                reasons.append("disqualified listing item outside card/result region")
+        elif _is_main_page_title_prompt(field.prompt_text) and not _is_page_heading_candidate(candidate):
+            score -= 1.6
+            validation.hard_disqualifiers.append("main title not page heading")
+            validation.errors.append("main title not page heading")
+            validation.passed = False
+            reasons.append("disqualified non-page-heading title")
         if any(_contains_context_term(attr_ctx, term) for term in TITLE_NEGATIVE_TERMS):
             score -= 1.2
             validation.penalties.append("non-primary title context")
@@ -185,6 +217,31 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score -= 1.0
             validation.penalties.append("title too long")
             reasons.append("title too long")
+
+    if _is_section_prompt(field, name) and _is_non_content_section_region(candidate.selector, ctx, value.lower()):
+        score -= 2.0
+        validation.hard_disqualifiers.append("section heading outside main content")
+        validation.errors.append("section heading outside main content")
+        validation.passed = False
+        reasons.append("disqualified section heading outside main content")
+    if _is_section_prompt(field, name) and candidate.tag in {"h1", "title"}:
+        score -= 2.0
+        validation.hard_disqualifiers.append("section prompt matched page title")
+        validation.errors.append("section prompt matched page title")
+        validation.passed = False
+        reasons.append("disqualified page title for section prompt")
+    if _is_section_prompt(field, name) and candidate.tag not in {"h2", "h3", "h4"}:
+        score -= 1.8
+        validation.hard_disqualifiers.append("section prompt matched non-heading")
+        validation.errors.append("section prompt matched non-heading")
+        validation.passed = False
+        reasons.append("disqualified non-heading for section prompt")
+    if _is_first_section_prompt(field, name) and _heading_index(candidate.selector) not in {0, 1}:
+        score -= 1.6
+        validation.hard_disqualifiers.append("not first section heading")
+        validation.errors.append("not first section heading")
+        validation.passed = False
+        reasons.append("disqualified non-first section heading")
 
     if "description" in name or "summary" in name:
         if candidate.tag in {"p", "section", "article", "div"}:
@@ -264,7 +321,7 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             reasons.append("disqualified updated/modified date cue")
 
     ordinal = _requested_ordinal(field.prompt_text)
-    if ordinal and any(term in field.prompt_text.lower() for term in {"chapter", "section", "tutorial"}):
+    if ordinal and _requires_numeric_ordinal(field.prompt_text, ordinal):
         if _value_starts_with_ordinal(value, ordinal):
             score += 1.1
             reasons.append(f"matched requested ordinal {ordinal}")
@@ -338,6 +395,101 @@ def _prompt_wants_published_date(field: FieldSpec) -> bool:
     return any(term in prompt for term in {"published", "publication", "posted", "original date", "article date"})
 
 
+def _is_title_field(field: FieldSpec, name: str, tokens: set[str]) -> bool:
+    if any(term in name for term in {"section", "chapter"}):
+        return False
+    prompt = field.prompt_text.lower()
+    return name in {"title", "headline", "product_title", "product_name"} or any(
+        term in prompt
+        for term in {
+            "main title",
+            "page title",
+            "site title",
+            "article title",
+            "product title",
+            "product name",
+            "headline",
+        }
+    ) or ("title" in tokens and "after page title" not in prompt)
+
+
+def _is_section_prompt(field: FieldSpec, name: str) -> bool:
+    prompt = field.prompt_text.lower()
+    return "section" in name or any(term in prompt for term in {"section heading", "tutorial section"})
+
+
+def _is_first_section_prompt(field: FieldSpec, name: str) -> bool:
+    return "first" in field.prompt_text.lower() and _is_section_prompt(field, name)
+
+
+def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
+    region = f"{selector} {context}".lower()
+    if any(
+        term in region
+        for term in {
+            "main navigation",
+            "aria-label=\"related\"",
+            "aria-label='related'",
+            "toc",
+            "table of contents",
+            "sidebar",
+            "previous topic",
+            "next topic",
+            "this page",
+            "source link",
+        }
+    ):
+        return True
+    return value in {"navigation", "table of contents", "previous topic", "next topic", "this page"}
+
+
+def _heading_index(selector: str) -> int:
+    match = re.search(r"h[1-6]:nth-of-type\((\d+)\)", selector)
+    return int(match.group(1)) if match else 0
+
+
+def _is_main_page_title_prompt(prompt: str) -> bool:
+    compact = prompt.lower()
+    return any(
+        term in compact
+        for term in {
+            "main page title",
+            "page title",
+            "site title",
+            "main documentation page title",
+            "main pricing page title",
+            "main article title",
+            "article title",
+            "post title",
+        }
+    )
+
+
+def _is_page_heading_candidate(candidate: Candidate) -> bool:
+    if candidate.tag in {"h1", "title"}:
+        return True
+    region = f"{candidate.selector} {candidate.attr_text} {candidate.text}".lower()
+    return "role=\"heading\"" in region or "role='heading'" in region or candidate.attrs.get("role") == "heading"
+
+
+def _is_listing_item_prompt(prompt: str) -> bool:
+    compact = prompt.lower()
+    return any(term in compact for term in {"first product", "product card", "first result", "listing result", "first book", "first item"})
+
+
+def _candidate_in_listing_region(selector: str, context: str) -> bool:
+    return any(term in selector or term in context for term in {"article", "li:nth-of-type", "card", "product", "quote", "result"})
+
+
+def _looks_like_later_repeated_result(selector: str) -> bool:
+    indexes = [int(match) for match in re.findall(r"(?:article|section|li):nth-of-type\((\d+)\)", selector)]
+    return bool(indexes and max(indexes) >= 2)
+
+
+def _looks_like_price_value(value: str) -> bool:
+    return bool(re.search(r"[$€£¥]\s*\d|\b(?:usd|eur|gbp|cad|aud|jpy)\b|\d+\s*/\s*(?:mo|month|yr|year)", value, re.I))
+
+
 def _has_negative_date_role(context: str, value: str) -> bool:
     compact = context.lower()
     normalized_value = value.lower().strip()
@@ -370,8 +522,45 @@ def _requested_ordinal(prompt: str) -> int | None:
     return None
 
 
+def _requires_numeric_ordinal(prompt: str, ordinal: int) -> bool:
+    compact = prompt.lower()
+    if ordinal > 1:
+        return any(term in compact for term in {"chapter", "section", "tutorial", "heading"})
+    return any(term in compact for term in {"numbered", "chapter"}) or bool(re.search(r"\b1st\b", compact))
+
+
 def _value_starts_with_ordinal(value: str, ordinal: int) -> bool:
     return bool(re.match(rf"^\s*{ordinal}(?:[.)]|\b)", value))
+
+
+_PLAN_TERMS = ("free", "starter", "basic", "standard", "pro", "premium", "plus", "team", "business", "enterprise")
+
+
+def _price_plan_gate_reason(prompt: str, value: str, context: str, candidate_text: str) -> str | None:
+    compact = prompt.lower()
+    requested = next((plan for plan in _PLAN_TERMS if _contains_context_term(compact, plan) and "plan" in compact), None)
+    if not requested:
+        return None
+    if requested not in context and requested not in candidate_text:
+        return "price plan context missing"
+    competing = [
+        plan
+        for plan in _PLAN_TERMS
+        if plan != requested and (_contains_context_term(candidate_text, plan) or _plan_appears_before_value(context, value, plan))
+    ]
+    if competing and not _plan_appears_before_value(context, value, requested) and requested not in candidate_text:
+        return "wrong price plan context"
+    return None
+
+
+def _plan_appears_before_value(context: str, value: str, plan: str) -> bool:
+    value_index = context.find(value) if value else -1
+    plan_index = context.find(plan)
+    if plan_index < 0:
+        return False
+    if value_index < 0:
+        return plan_index <= 80
+    return plan_index <= value_index and value_index - plan_index <= 120
 
 
 def _word_count(value: str) -> int:

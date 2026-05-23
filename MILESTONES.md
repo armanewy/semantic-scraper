@@ -961,3 +961,83 @@ Exit criteria:
 - No unverified positives are used for model/ranker training.
 
 Status: failed release-readiness. `v0.1.0-alpha.2` is a valid internal validation tag, but fresh alpha.2 pilots found new false positives and candidate-recall misses. Do not promote to public alpha before an M14R remediation pass.
+
+## M14R: Fresh Alpha Safety Remediation
+
+**Question:** Can we remediate the fresh alpha.2 false positives and recall misses without overfitting or sacrificing the evidence loop?
+
+Deliverables:
+
+- Fresh-alpha incident report:
+  - `docs/m14r_fresh_alpha_incident_report.md`
+- Targeted remediation for:
+  - mojibake pound-symbol normalization during extraction and expected-value matching
+  - first-listing title selection vs later listing-card titles
+  - article/page titles vs section headings and price-shaped headings
+  - docs section headings vs paragraphs and navigation/related/sidebar regions
+  - plan-specific prices vs neighboring plan prices
+  - ARIA `role="heading"` page-title candidates
+- Fresh alpha.2 remediation rerun:
+  - `runs/m14r/fresh-alpha2-remediation-summary.md`
+- Final fresh mini-holdout rerun:
+  - `runs/m14r/fresh-mini-holdout-summary.md`
+- Base/adversarial regression reruns:
+  - `runs/m14r/base-holdout-ranker-local.jsonl`
+  - `runs/m14r/adversarial-holdout-ranker-local.jsonl`
+- Release-check:
+  - `runs/m14r/release-check.json`
+
+Fresh alpha.2 remediation set:
+
+```text
+pilots: 6
+domains: 5
+fields: 18
+coverage_rate: 0.777778
+false_positive_rate: 0.000000
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Final fresh mini-holdout:
+
+```text
+pilots: 3
+domains: 3
+fields: 7
+coverage_rate: 0.714286
+false_positive_rate: 0.000000
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Base/adversarial regression:
+
+```text
+base_holdout:
+  coverage_rate: 0.950000
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+adversarial_holdout:
+  false_positive_rate: 0.000000
+```
+
+Release-check:
+
+```text
+passed: true
+promotion: promote_candidate
+```
+
+Exit criteria:
+
+- Fresh alpha.2 remediation set FPR = 0.
+- Fresh alpha.2 remediation set recall@40 >= 95%.
+- Fresh mini-holdout FPR <= 2%.
+- Fresh mini-holdout recall@40 >= 95%.
+- Base/adversarial FPR remains 0.
+- No unverified production positives are used for training.
+- No new ranker artifact is promoted unless release-check passes.
+
+Status: passed. M14R restored false-positive safety on the fresh alpha.2 remediation set, passed a separate final mini-holdout, preserved base/adversarial safety, and kept pilot artifacts local/ignored. The packaged ranker artifact remains `candidate-ranker-v3`; M14R changed deterministic gates and normalization only.

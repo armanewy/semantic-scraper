@@ -17,3 +17,5 @@ pilots/**/*.zip
 pilots_external/
 pilots_external_holdout/
 pilots_external_alpha2/
+pilots_external_alpha2_holdout/
+pilots_external_alpha2_miniholdout_final/

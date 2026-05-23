@@ -15,7 +15,8 @@ from .models import FieldSpec, RankedCandidate, ScrapeSpec
 
 
 def normalize_expected(value: Any) -> str:
-    return str(value).strip().lower()
+    normalized = str(value).replace("Â£", "£").replace("Ł", "£")
+    return re.sub(r"\s+", " ", normalized).strip().lower()
 
 
 def expected_is_present(expected: Any) -> bool:
