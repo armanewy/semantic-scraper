@@ -86,6 +86,28 @@ Exit criteria:
 
 Status: complete.
 
+## M4B: Confidence gating and abstention
+
+**Question:** Can semscrape avoid silently wrong extractions by abstaining when evidence is weak or ambiguous?
+
+Deliverables:
+
+- Validator reasons, penalties, and hard disqualifiers.
+- Field-specific negative evidence for price, rating, article date, and title fields.
+- Strict decision gate.
+- `--strict`, `--min-confidence`, `--min-margin`, and `--min-validator-confidence` CLI flags.
+- Eval summary metrics for coverage, misses, abstentions, ambiguous abstentions, model errors, and false positives.
+- Tests for ambiguous candidates, missing fields, and near-miss scalar values.
+
+Exit criteria:
+
+- Heuristic strict candidate_recall@40 remains >= 95%.
+- Heuristic strict false_positive_rate <= 5%.
+- Every abstention/failure has a reason code.
+- Model errors never crash eval runs.
+
+Status: complete; local LLM strict comparison still needs Ollama.
+
 ## M5: Rendered pages
 
 **Question:** Can we run this against modern JavaScript pages?

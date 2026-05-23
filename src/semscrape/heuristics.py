@@ -35,6 +35,11 @@ FIELD_SYNONYMS: dict[str, set[str]] = {
 
 OLD_PRICE_TERMS = {"old", "was", "list", "compare", "original", "regular", "strike", "strikethrough", "msrp"}
 CURRENT_PRICE_TERMS = {"current", "sale", "deal", "now", "today", "offer", "discount", "your"}
+PRICE_HARD_NEGATIVE_TERMS = {"shipping", "delivery", "tax", "installment", "per month", "monthly"}
+PRICE_SOFT_NEGATIVE_TERMS = {"save", "savings", "discount", "coupon", "from", "starting at"}
+DATE_NEGATIVE_TERMS = {"updated", "commented", "joined", "copyright", "related"}
+TITLE_NEGATIVE_TERMS = {"sponsored", "ad", "breadcrumb", "nav", "footer", "recommended", "related"}
+RATING_NEGATIVE_TERMS = {"comments", "votes", "questions", "rank"}
 
 
 def field_tokens(field: FieldSpec) -> set[str]:
@@ -95,6 +100,7 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
         reasons.append("validator passed")
     elif validation.errors:
         reasons.append("validator: " + "; ".join(validation.errors[:2]))
+    reasons.extend("validator reason: " + item for item in validation.reasons[:3])
 
     overlap, found = token_overlap_score(f_tokens, attr_ctx)
     if overlap:
@@ -111,6 +117,7 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
 
     if candidate.hidden:
         score -= 2.0
+        validation.penalties.append("hidden element")
         reasons.append("penalized hidden element")
 
     if field.kind == "price":
@@ -124,19 +131,38 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             # If the user explicitly asks for old/list price, do not penalize.
             if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in OLD_PRICE_TERMS):
                 score -= 1.4
+                validation.penalties.append("old/list price cue")
                 reasons.append("penalized old/list price cue")
+        if any(term in attr_ctx or term in own for term in PRICE_SOFT_NEGATIVE_TERMS):
+            if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in PRICE_SOFT_NEGATIVE_TERMS):
+                score -= 0.55
+                validation.penalties.append("near discount/savings cue")
+                reasons.append("penalized discount/savings cue")
+        if any(term in attr_ctx or term in own for term in PRICE_HARD_NEGATIVE_TERMS):
+            if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in PRICE_HARD_NEGATIVE_TERMS):
+                score -= 2.0
+                validation.hard_disqualifiers.append("shipping/tax/installment price cue")
+                validation.errors.append("shipping/tax/installment price cue")
+                validation.passed = False
+                reasons.append("disqualified shipping/tax/installment price cue")
         if len(candidate.text) > 120:
             score -= 0.5
+            validation.penalties.append("broad price container")
             reasons.append("penalized broad price container")
 
     if name in {"title", "headline", "product_title", "product_name"} or "title" in f_tokens:
         if candidate.tag in {"h1", "h2"}:
             score += 1.4
             reasons.append("heading tag")
+        if any(term in attr_ctx for term in TITLE_NEGATIVE_TERMS):
+            score -= 1.2
+            validation.penalties.append("non-primary title context")
+            reasons.append("penalized non-primary title context")
         if candidate.tag in {"title"}:
             score += 0.6
         if len(value) > 140:
             score -= 1.0
+            validation.penalties.append("title too long")
             reasons.append("title too long")
 
     if "description" in name or "summary" in name:
@@ -152,6 +178,10 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score += 0.8
         if "review" in ctx or "star" in ctx:
             score += 0.5
+        if any(term in ctx for term in RATING_NEGATIVE_TERMS):
+            score -= 0.8
+            validation.penalties.append("rating-adjacent count cue")
+            reasons.append("penalized rating-adjacent count cue")
 
     if "availability" in name or "stock" in f_tokens:
         if any(term in text for term in ["in stock", "out of stock", "available", "ships", "sold out"]):
@@ -160,14 +190,23 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
     if field.kind == "url" and candidate.attrs.get("href"):
         score += 0.6
 
+    if field.kind == "date" or "date" in name or "published" in name:
+        if any(term in ctx for term in DATE_NEGATIVE_TERMS):
+            if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in DATE_NEGATIVE_TERMS):
+                score -= 1.0
+                validation.penalties.append("non-publication date cue")
+                reasons.append("penalized non-publication date cue")
+
     # Prefer leaf-ish elements. Huge containers often validate accidentally.
     child_text_ratio = len(candidate.own_text) / max(1, len(candidate.text))
     if child_text_ratio > 0.75:
         score += 0.25
     if len(candidate.text) > 260 and field.kind not in {"text"}:
         score -= 0.6
+        validation.penalties.append("broad non-text container")
     if candidate.tag in {"body", "html", "main", "section"} and field.kind not in {"text"}:
         score -= 0.7
+        validation.penalties.append("container element")
 
     # Very deep nth-path elements are acceptable but slightly less likely to generalize.
     if candidate.depth > 12:

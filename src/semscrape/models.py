@@ -82,6 +82,9 @@ class ValidationResult:
     score: float
     errors: list[str] = field(default_factory=list)
     normalized: str = ""
+    reasons: list[str] = field(default_factory=list)
+    penalties: list[str] = field(default_factory=list)
+    hard_disqualifiers: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -104,6 +107,7 @@ class FieldExtraction:
     validation_errors: list[str] = field(default_factory=list)
     candidate_id: str | None = None
     reasons: list[str] = field(default_factory=list)
+    status: str = "extracted"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +116,7 @@ class FieldExtraction:
             "ok": self.ok,
             "selector": self.selector,
             "source": self.source,
+            "status": self.status,
             "confidence": round(float(self.confidence), 4),
             "candidate_id": self.candidate_id,
             "validation_errors": self.validation_errors,

@@ -13,3 +13,10 @@ def test_text_validator_rejects_regex_not():
     field = FieldSpec(name="title", kind="text", validators={"regex_not": ["cart"]})
     result = validate_value(field, "Add to cart")
     assert not result.passed
+
+
+def test_rating_validator_rejects_review_count_as_rating():
+    field = FieldSpec(name="rating", kind="number")
+    result = validate_value(field, "218")
+    assert not result.passed
+    assert "rating outside 0-5 range" in result.hard_disqualifiers

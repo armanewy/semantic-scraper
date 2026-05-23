@@ -75,12 +75,15 @@ def _regex_list(value: str | list[str] | None) -> list[str]:
 def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
     normalized = normalize_ws(value or "")
     errors: list[str] = []
+    reasons: list[str] = []
+    penalties: list[str] = []
+    hard_disqualifiers: list[str] = []
     score = 0.0
 
     if not normalized:
         if field.required:
-            return ValidationResult(False, 0.0, ["empty required value"], "")
-        return ValidationResult(True, 0.2, [], "")
+            return ValidationResult(False, 0.0, ["empty required value"], "", [], [], [])
+        return ValidationResult(True, 0.2, [], "", ["optional empty value"], [], [])
 
     v = field.validators or {}
     min_length = int(v.get("min_length", 1 if field.kind == "text" else 0))
@@ -93,22 +96,32 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
     if field.kind == "price":
         if PRICE_RE.search(normalized):
             score += 0.55
+            reasons.append("looks like a price")
         else:
             errors.append("not price-like")
         if CURRENCY_RE.search(normalized):
             score += 0.2
+            reasons.append("currency present")
         elif v.get("require_currency", False):
             errors.append("currency missing")
 
     elif field.kind == "number":
         if NUMBER_RE.search(normalized):
             score += 0.55
+            reasons.append("looks like a number")
         else:
             errors.append("not number-like")
+        if "rating" in field.name.lower():
+            match = NUMBER_RE.search(normalized)
+            if match:
+                parsed = float(match.group(0).replace(",", "."))
+                if parsed < 0 or parsed > 5:
+                    hard_disqualifiers.append("rating outside 0-5 range")
 
     elif field.kind == "date":
         if DATE_RE.search(normalized):
             score += 0.55
+            reasons.append("looks like a date")
         else:
             errors.append("not date-like")
 
@@ -116,48 +129,58 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
         parsed = urlparse(normalized)
         if parsed.scheme in {"http", "https", "mailto"} or normalized.startswith(("/", "#")):
             score += 0.55
+            reasons.append("looks like a URL")
         elif URLISH_RE.search(normalized):
             score += 0.4
+            reasons.append("looks URL-like")
         else:
             errors.append("not url-like")
 
     elif field.kind == "email":
         if EMAIL_RE.search(normalized):
             score += 0.55
+            reasons.append("looks like an email")
         else:
             errors.append("not email-like")
 
     elif field.kind == "bool":
         if normalized.lower() in {"true", "false", "yes", "no", "in stock", "out of stock", "available", "unavailable"}:
             score += 0.55
+            reasons.append("looks like a boolean/availability value")
         else:
             errors.append("not bool-like")
 
     else:
         # Text fields pass as long as length/custom validators pass.
         score += 0.35
+        reasons.append("non-empty text")
         if len(normalized) >= max(2, min_length):
             score += 0.2
+            reasons.append("text length in range")
 
     for pattern in _regex_list(v.get("regex")):
         if not re.search(pattern, normalized, re.I):
             errors.append(f"regex did not match: {pattern}")
         else:
             score += 0.15
+            reasons.append(f"regex matched: {pattern}")
 
     for pattern in _regex_list(v.get("regex_not")):
         if re.search(pattern, normalized, re.I):
             errors.append(f"regex_not matched: {pattern}")
+            hard_disqualifiers.append(f"regex_not matched: {pattern}")
 
     for needle in _regex_list(v.get("contains")):
         if needle.lower() not in normalized.lower():
             errors.append(f"missing required text: {needle}")
         else:
             score += 0.05
+            reasons.append(f"contains required text: {needle}")
 
     for needle in _regex_list(v.get("not_contains")):
         if needle.lower() in normalized.lower():
             errors.append(f"contains rejected text: {needle}")
+            hard_disqualifiers.append(f"contains rejected text: {needle}")
 
     choices = v.get("choices")
     if choices:
@@ -166,9 +189,11 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
             errors.append("not in choices")
         else:
             score += 0.2
+            reasons.append("matched allowed choice")
 
-    passed = not errors
+    errors.extend(item for item in hard_disqualifiers if item not in errors)
+    passed = not errors and not hard_disqualifiers
     if passed:
         score += 0.2
 
-    return ValidationResult(passed, min(1.0, score), errors, normalized)
+    return ValidationResult(passed, min(1.0, score), errors, normalized, reasons, penalties, hard_disqualifiers)

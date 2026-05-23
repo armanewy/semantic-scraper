@@ -40,12 +40,16 @@ class OllamaLocator:
         return {
             "type": "object",
             "properties": {
-                "candidate_id": {"type": "string", "description": "ID of the chosen candidate, e.g. c0042"},
+                "action": {"type": "string", "enum": ["choose", "abstain"]},
+                "candidate_id": {
+                    "type": ["string", "null"],
+                    "description": "ID of the chosen candidate, e.g. c0042. Use null when action is abstain.",
+                },
                 "abstain": {"type": "boolean", "description": "True when no candidate safely matches the field."},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reason": {"type": "string"},
             },
-            "required": ["candidate_id", "confidence", "reason"],
+            "required": ["action", "candidate_id", "confidence", "reason"],
             "additionalProperties": False,
         }
 
@@ -66,7 +70,7 @@ class OllamaLocator:
         system = (
             "You are a DOM semantic locator. Choose exactly one candidate that best contains the requested field. "
             "Return only JSON matching the schema. Do not invent candidate IDs. Prefer candidates whose extracted_value is the scalar field value, not a broad container. "
-            "If no candidate safely matches, set candidate_id to an empty string, abstain to true, and explain why."
+            "If no candidate safely matches, set action to abstain, candidate_id to null, abstain to true, and explain why."
         )
         user = {
             "field": {
@@ -105,13 +109,15 @@ class OllamaLocator:
             raise LLMError(f"Ollama returned invalid JSON response: {response.text[:500]}") from exc
 
         parsed = self._parse_content(content)
-        candidate_id = str(parsed.get("candidate_id", "")).strip()
+        action = str(parsed.get("action", "choose")).strip().lower()
+        raw_candidate_id = parsed.get("candidate_id")
+        candidate_id = "" if raw_candidate_id is None else str(raw_candidate_id).strip()
         try:
             confidence = float(parsed.get("confidence", 0.0))
         except (TypeError, ValueError):
             confidence = 0.0
         reason = str(parsed.get("reason", ""))
-        if not candidate_id or parsed.get("abstain") is True:
+        if action == "abstain" or not candidate_id or parsed.get("abstain") is True:
             return LLMChoice(candidate_id=None, confidence=max(0.0, min(1.0, confidence)), reason=reason, raw=data)
         valid_ids = {item.candidate.id for item in ranked}
         if candidate_id not in valid_ids:

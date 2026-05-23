@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from .decision import candidate_confidence, strict_decision
 from .dom import generate_candidates
 from .heuristics import rank_candidates
 from .llm import LLMError, OllamaLocator
@@ -114,6 +115,9 @@ def ranked_candidate_dict(item: RankedCandidate, rank: int) -> dict[str, Any]:
             "passed": item.validation.passed,
             "score": round(item.validation.score, 4),
             "errors": item.validation.errors,
+            "reasons": item.validation.reasons,
+            "penalties": item.validation.penalties,
+            "hard_disqualifiers": item.validation.hard_disqualifiers,
         },
         "reasons": item.reasons,
         "candidate": item.candidate.compact(),
@@ -131,6 +135,10 @@ def evaluate_field(
     top_k: int,
     ollama_host: str | None,
     failures_dir: Path | None = None,
+    strict: bool = False,
+    min_confidence: float = 0.75,
+    min_margin: float = 0.15,
+    min_validator_confidence: float = 0.70,
 ) -> dict[str, Any]:
     candidates = generate_candidates(html)
     ranked = rank_candidates(field, candidates, top=max(1, top_k))
@@ -140,7 +148,7 @@ def evaluate_field(
     expected_candidate_ids = [item.candidate.id for item in matching]
     heuristic = ranked[0] if ranked else None
 
-    selected: RankedCandidate | None = None
+    proposed: RankedCandidate | None = None
     model_error: str | None = None
     model_reason: str | None = None
     model_confidence: float | None = None
@@ -148,7 +156,7 @@ def evaluate_field(
     started = time.perf_counter()
 
     if model == "heuristic":
-        selected = heuristic
+        proposed = heuristic
         model_reason = "heuristic baseline"
     else:
         try:
@@ -157,33 +165,46 @@ def evaluate_field(
             model_reason = choice.reason
             raw_result = choice.raw
             if choice.candidate_id is not None:
-                selected = {item.candidate.id: item for item in ranked}.get(choice.candidate_id)
-                if selected is None:
+                proposed = {item.candidate.id: item for item in ranked}.get(choice.candidate_id)
+                if proposed is None:
                     model_error = f"model chose missing candidate {choice.candidate_id}"
             else:
-                selected = None
+                proposed = None
         except LLMError as exc:
             model_error = str(exc)
 
     latency_ms = int(round((time.perf_counter() - started) * 1000))
-    selected_value = selected.value if selected else None
-    selected_id = selected.candidate.id if selected else None
-    validated = bool(selected and selected.validation.passed)
+    gate = strict_decision(
+        proposed,
+        ranked,
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+        enforce_margin=model == "heuristic",
+    ) if strict else None
+    extracted = proposed if gate is None or gate.ok else None
+    proposed_value = proposed.value if proposed else None
+    proposed_id = proposed.candidate.id if proposed else None
+    selected_value = extracted.value if extracted else None
+    selected_id = extracted.candidate.id if extracted else None
+    validated = bool(extracted and extracted.validation.passed)
     correct = values_match(expected, selected_value)
-    abstained = selected is None
+    abstained = extracted is None
     false_positive = validated and not correct
-    model_choice_correct = bool(selected_id and selected_id in expected_candidate_ids)
+    model_choice_correct = bool(proposed_id and proposed_id in expected_candidate_ids)
 
     failure_reason = None
     if expected_present and not candidate_present:
         failure_reason = "candidate_generation_failed"
     elif model_error:
         failure_reason = "model_error"
+    elif gate is not None and not gate.ok:
+        failure_reason = gate.reason
     elif expected_present and abstained:
         failure_reason = "abstained_expected_present"
     elif not expected_present and validated:
         failure_reason = "false_positive_missing_field"
-    elif selected is not None and not selected.validation.passed:
+    elif proposed is not None and not proposed.validation.passed:
         failure_reason = "validator_rejected_choice"
     elif expected_present and not correct:
         failure_reason = "model_chose_wrong_candidate"
@@ -201,11 +222,19 @@ def evaluate_field(
         "heuristic_candidate_id": heuristic.candidate.id if heuristic else None,
         "heuristic_value": heuristic.value if heuristic else None,
         "heuristic_selector": heuristic.candidate.selector if heuristic else None,
+        "proposed_candidate_id": proposed_id,
+        "proposed_value": proposed_value,
+        "proposed_selector": proposed.candidate.selector if proposed else None,
         "model_candidate_id": selected_id,
         "model_value": selected_value,
-        "model_selector": selected.candidate.selector if selected else None,
+        "model_selector": extracted.candidate.selector if extracted else None,
         "model_confidence": model_confidence,
         "model_reason": model_reason,
+        "strict": strict,
+        "status": "abstained" if abstained else "extracted",
+        "abstention_reason": failure_reason if abstained else None,
+        "decision_confidence": gate.confidence if gate else candidate_confidence(proposed),
+        "decision_margin": gate.margin if gate else None,
         "validated": validated,
         "correct": correct,
         "model_choice_correct": model_choice_correct,
@@ -213,8 +242,12 @@ def evaluate_field(
         "false_positive": false_positive,
         "latency_ms": latency_ms,
         "prompt_chars": prompt_size_chars(field, ranked),
-        "model_agreement_vs_heuristic": bool(selected_id and heuristic and selected_id == heuristic.candidate.id),
-        "validation_errors": selected.validation.errors if selected else [],
+        "model_agreement_vs_heuristic": bool(proposed_id and heuristic and proposed_id == heuristic.candidate.id),
+        "validation_errors": proposed.validation.errors if proposed else [],
+        "validator_confidence": proposed.validation.score if proposed else 0.0,
+        "validator_reasons": proposed.validation.reasons if proposed else [],
+        "validator_penalties": proposed.validation.penalties if proposed else [],
+        "hard_disqualifiers": proposed.validation.hard_disqualifiers if proposed else [],
         "failure_reason": failure_reason,
     }
 
@@ -238,15 +271,22 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         absent_rows = [row for row in model_rows if not row["expected_present"]]
         latencies = [row["latency_ms"] for row in model_rows]
         prompt_chars = [row["prompt_chars"] for row in model_rows]
+        extracted_rows = [row for row in model_rows if not row["abstained"]]
+        ambiguous_abstentions = [row for row in model_rows if row["abstained"] and row["failure_reason"] == "ambiguous_candidates"]
+        model_error_rows = [row for row in model_rows if row["failure_reason"] == "model_error"]
         summary[model] = {
             "rows": len(model_rows),
             "expected_present_rows": len(expected_rows),
             "expected_absent_rows": len(absent_rows),
             "candidate_recall_at_k": _rate(sum(row["candidate_present"] for row in expected_rows), len(expected_rows)),
+            "coverage_rate": _rate(len(extracted_rows), len(model_rows)),
             "model_choice_accuracy_when_candidate_present": _rate(sum(row["model_choice_correct"] for row in candidate_rows), len(candidate_rows)),
             "validated_accuracy": _rate(sum(row["validated"] and row["correct"] for row in expected_rows), len(expected_rows)),
             "abstention_rate": _rate(sum(row["abstained"] for row in model_rows), len(model_rows)),
+            "ambiguous_abstention_rate": _rate(len(ambiguous_abstentions), len(model_rows)),
+            "miss_rate": _rate(sum(row["expected_present"] and not row["correct"] for row in model_rows), len(expected_rows)),
             "false_positive_rate": _rate(sum(row["false_positive"] for row in model_rows), len(model_rows)),
+            "model_error_rate": _rate(len(model_error_rows), len(model_rows)),
             "latency_ms_per_field": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
             "prompt_chars_per_field": round(sum(prompt_chars) / len(prompt_chars), 2) if prompt_chars else 0.0,
             "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in model_rows), len(model_rows)),

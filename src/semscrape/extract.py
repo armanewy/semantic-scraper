@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .cache import SelectorCache
+from .decision import candidate_confidence, strict_decision
 from .dom import candidate_from_selector, generate_candidates, parse_html
 from .heuristics import rank_candidates
 from .llm import LLMError, OllamaLocator
@@ -62,18 +63,35 @@ def extract_field(
     ollama_host: str | None = None,
     top_k: int = 40,
     min_llm_confidence: float = 0.45,
+    strict: bool = False,
+    min_confidence: float = 0.75,
+    min_margin: float = 0.15,
+    min_validator_confidence: float = 0.70,
     learn: bool = False,
 ) -> FieldExtraction:
     if cache is not None:
         cached = _cached_candidate(field, html, cache)
         if cached is not None:
+            if strict and (not cached.validation.passed or cached.validation.score < min_validator_confidence or cached.validation.hard_disqualifiers):
+                return FieldExtraction(
+                    field=field.name,
+                    value=None,
+                    ok=False,
+                    selector=cached.candidate.selector,
+                    source="cache",
+                    confidence=cached.validation.score,
+                    candidate_id=cached.candidate.id,
+                    validation_errors=cached.validation.errors,
+                    reasons=["abstained: cached selector did not clear strict validation gate"],
+                    status="abstained",
+                )
             return FieldExtraction(
                 field=field.name,
                 value=cached.value,
                 ok=True,
                 selector=cached.candidate.selector,
                 source="cache",
-                confidence=cached.validation.score,
+                confidence=candidate_confidence(cached),
                 candidate_id=cached.candidate.id,
                 reasons=cached.reasons,
             )
@@ -113,6 +131,29 @@ def extract_field(
     if llm_error:
         chosen.reasons.append("llm fallback: " + llm_error)
 
+    if strict:
+        decision = strict_decision(
+            chosen,
+            ranked,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            enforce_margin=source.startswith("heuristic"),
+        )
+        if not decision.ok:
+            return FieldExtraction(
+                field=field.name,
+                value=None,
+                ok=False,
+                selector=chosen.candidate.selector,
+                source=source,
+                confidence=decision.confidence,
+                validation_errors=chosen.validation.errors,
+                candidate_id=chosen.candidate.id,
+                reasons=[f"abstained: {decision.reason}", *chosen.reasons[:7]],
+                status="abstained",
+            )
+
     ok = chosen.validation.passed
     if cache is not None and learn and ok:
         cache.remember(field, chosen, source=source)
@@ -123,7 +164,7 @@ def extract_field(
         ok=ok,
         selector=chosen.candidate.selector,
         source=source,
-        confidence=chosen.score,
+        confidence=candidate_confidence(chosen),
         validation_errors=chosen.validation.errors,
         candidate_id=chosen.candidate.id,
         reasons=chosen.reasons[:8],
@@ -140,6 +181,10 @@ def extract_html(
     model: str = "qwen3:1.7b",
     ollama_host: str | None = None,
     top_k: int = 40,
+    strict: bool = False,
+    min_confidence: float = 0.75,
+    min_margin: float = 0.15,
+    min_validator_confidence: float = 0.70,
     learn: bool = False,
 ):
     from .models import ExtractionReport
@@ -159,6 +204,10 @@ def extract_html(
             model=model,
             ollama_host=ollama_host,
             top_k=top_k,
+            strict=strict,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
             learn=learn,
         )
 

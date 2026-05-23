@@ -112,6 +112,18 @@ semscrape eval-model fixtures/**/*.yml --models heuristic --top-k 40
 
 The eval command writes one JSONL row per field, page, and model. When a row fails, it writes debug artifacts under `runs/failures/`: the HTML, prompt metadata, ranked candidates, and model result.
 
+Run conservative strict mode when false positives matter more than coverage:
+
+```bash
+semscrape eval-model fixtures/**/*.yml \
+  --models heuristic \
+  --top-k 40 \
+  --strict \
+  --out runs/heuristic-strict.jsonl
+```
+
+Strict mode abstains unless the selected candidate clears confidence, margin, validator-confidence, and hard-disqualifier gates.
+
 Generate mutated pages and test candidate recall:
 
 ```bash
@@ -140,9 +152,21 @@ The model is not asked to scrape arbitrary text. It receives a bounded top-K lis
 
 ```json
 {
+  "action": "choose",
   "candidate_id": "c0042",
   "confidence": 0.83,
   "reason": "This candidate is labeled as the current sale price."
+}
+```
+
+or:
+
+```json
+{
+  "action": "abstain",
+  "candidate_id": null,
+  "confidence": 0.34,
+  "reason": "Multiple plausible prices and no current-price label."
 }
 ```
 
@@ -185,7 +209,7 @@ semscrape extract SPEC INPUT [--no-llm] [--learn] [--model MODEL]
 semscrape inspect SPEC INPUT FIELD --top-k 20
 semscrape benchmark SPEC INPUT... [--expect-like BASENAME]
 semscrape recall SPEC INPUT... --top-k 40 [--expect-like BASENAME]
-semscrape eval-model SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40
+semscrape eval-model SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40 [--strict]
 semscrape mutate INPUT --out DIR --n 20 --seed 7
 semscrape cache-clear CACHE_PATH
 ```
@@ -202,6 +226,7 @@ semscrape extract examples/product.yml https://example.com/item --render --wait-
 src/semscrape/
   cache.py       selector memory / lock files
   cli.py         command line entrypoint
+  decision.py    strict confidence/abstention gates
   dom.py         HTML -> compact candidate elements
   eval_model.py  local model evaluation harness
   extract.py     extraction and repair loop
@@ -320,6 +345,28 @@ Implemented:
 - Cached selectors are tried first.
 - Cached values must still pass validation.
 - Broken selectors fall through to candidate repair.
+
+### Milestone 4B — Confidence gating and abstention
+
+Status: implemented.
+
+Goal: Avoid silently wrong extractions by making conservative abstention a first-class result.
+
+Implemented:
+
+- Validator reasons, penalties, and hard disqualifiers.
+- Field-specific negative evidence for prices, ratings, titles, and dates.
+- Strict decision gate with `--strict`, `--min-confidence`, `--min-margin`, and `--min-validator-confidence`.
+- `status: abstained` extraction results with reason codes.
+- Eval summaries split coverage, misses, abstentions, model errors, and false positives.
+
+Target:
+
+```text
+strict heuristic false_positive_rate <= 5%
+LLM strict false_positive_rate <= heuristic strict
+LLM strict coverage >= heuristic strict
+```
 
 ### Milestone 5 — Rendered pages
 

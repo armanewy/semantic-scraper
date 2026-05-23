@@ -40,6 +40,7 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
             "correct": True,
             "abstained": False,
             "false_positive": False,
+            "status": "extracted",
             "latency_ms": 0,
             "prompt_chars": 100,
             "model_agreement_vs_heuristic": True,
@@ -54,6 +55,7 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
             "correct": False,
             "abstained": False,
             "false_positive": True,
+            "status": "extracted",
             "latency_ms": 0,
             "prompt_chars": 200,
             "model_agreement_vs_heuristic": True,
@@ -65,4 +67,29 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
     assert summary["candidate_recall_at_k"] == 1.0
     assert summary["validated_accuracy"] == 1.0
     assert summary["false_positive_rate"] == 0.5
+    assert summary["coverage_rate"] == 1.0
     assert summary["failure_reasons"] == {"false_positive_missing_field": 1}
+
+
+def test_strict_eval_abstains_on_missing_optional_field(tmp_path):
+    spec = load_spec("fixtures/listings/search_results/spec.yml")
+    html_path = Path("fixtures/listings/search_results/v4_missing_field.html")
+    html = html_path.read_text(encoding="utf-8")
+    field = next(item for item in spec.fields if item.name == "coupon_code")
+
+    row = evaluate_field(
+        spec=spec,
+        fixture=str(html_path),
+        html=html,
+        field=field,
+        expected=spec.benchmarks["v4_missing_field.html"]["coupon_code"],
+        model="heuristic",
+        top_k=40,
+        ollama_host=None,
+        failures_dir=tmp_path,
+        strict=True,
+    )
+
+    assert row["abstained"] is True
+    assert row["false_positive"] is False
+    assert row["failure_reason"] in {"low_confidence", "ambiguous_candidates", "low_validator_confidence"}

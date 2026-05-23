@@ -51,6 +51,10 @@ def cmd_extract(args: argparse.Namespace) -> int:
         model=args.model,
         ollama_host=args.ollama_host,
         top_k=args.top_k,
+        strict=args.strict,
+        min_confidence=args.min_confidence,
+        min_margin=args.min_margin,
+        min_validator_confidence=args.min_validator_confidence,
         learn=args.learn,
     )
     if args.values_only:
@@ -113,6 +117,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             model=args.model,
             ollama_host=args.ollama_host,
             top_k=args.top_k,
+            strict=args.strict,
+            min_confidence=args.min_confidence,
+            min_margin=args.min_margin,
+            min_validator_confidence=args.min_validator_confidence,
             learn=False,
         )
         expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
@@ -250,6 +258,10 @@ def cmd_eval_model(args: argparse.Namespace) -> int:
                             top_k=args.top_k,
                             ollama_host=args.ollama_host,
                             failures_dir=failures_dir,
+                            strict=args.strict,
+                            min_confidence=args.min_confidence,
+                            min_margin=args.min_margin,
+                            min_validator_confidence=args.min_validator_confidence,
                         )
                     )
 
@@ -265,6 +277,7 @@ def cmd_eval_model(args: argparse.Namespace) -> int:
             "model_choice_accuracy_when_candidate_present": ">= 0.90",
             "validated_accuracy": ">= 0.90",
             "false_positive_rate": "<= 0.02",
+            "strict_heuristic_false_positive_rate": "<= 0.05",
         },
     }
     _print_json(summary)
@@ -298,6 +311,10 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--model", default="qwen3:1.7b", help="Ollama model name")
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
+    extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
+    extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
+    extract.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
+    extract.add_argument("--min-validator-confidence", type=float, default=0.70, help="Strict-mode minimum validator confidence")
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
     extract.add_argument("--values-only", action="store_true", help="Print only extracted values")
@@ -321,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--model", default="qwen3:1.7b")
     bench.add_argument("--ollama-host", default=None)
     bench.add_argument("--top-k", type=int, default=40)
+    bench.add_argument("--strict", action="store_true")
+    bench.add_argument("--min-confidence", type=float, default=0.75)
+    bench.add_argument("--min-margin", type=float, default=0.15)
+    bench.add_argument("--min-validator-confidence", type=float, default=0.70)
     bench.add_argument("--values-only", action="store_true")
     bench.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
     bench.add_argument("--render", action="store_true")
@@ -340,6 +361,10 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("paths", nargs="+", help="YAML specs and optional HTML inputs. Globs are expanded by semscrape.")
     eval_model.add_argument("--models", nargs="+", required=True, help="Ollama model names, or 'heuristic' for a no-LLM baseline")
     eval_model.add_argument("--top-k", type=int, default=40)
+    eval_model.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
+    eval_model.add_argument("--min-confidence", type=float, default=0.75)
+    eval_model.add_argument("--min-margin", type=float, default=0.15)
+    eval_model.add_argument("--min-validator-confidence", type=float, default=0.70)
     eval_model.add_argument("--out", default="runs/model-eval.jsonl", help="JSONL output path")
     eval_model.add_argument("--failures-dir", default="runs/failures", help="Directory for failure artifacts")
     eval_model.add_argument("--ollama-host", default=None)
