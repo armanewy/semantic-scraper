@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from bs4 import BeautifulSoup, Tag
+
 from .cache import SelectorCache
 from .decision import candidate_confidence, strict_decision
-from .dom import element_to_candidate, generate_candidates, parse_html
+from .dom import element_to_candidate, generate_candidates, parse_html, should_consider
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
@@ -76,21 +79,11 @@ def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> Cach
         strategy = str(entry.get("strategy") or "unknown")
         last_selector = selector
         last_strategy = strategy
-        try:
-            matches = soup.select(selector)
-        except Exception:
-            last_reason = "selector_invalid"
+        candidate, miss_reason = _candidate_from_cache_entry(field, soup, entry)
+        if candidate is None:
+            last_reason = miss_reason
             cache.record_selector_result(field, selector, success=False, reason=last_reason)
             continue
-        if not matches:
-            last_reason = "selector_no_match"
-            cache.record_selector_result(field, selector, success=False, reason=last_reason)
-            continue
-        if len(matches) > 1:
-            last_reason = "selector_many_matches"
-            cache.record_selector_result(field, selector, success=False, reason=last_reason)
-            continue
-        candidate = element_to_candidate(soup, matches[0], 1)
         value = extract_value(field, candidate)
         validation = validate_value(field, value)
         if candidate.hidden:
@@ -114,6 +107,145 @@ def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> Cach
             last_reason = "value_low_confidence"
         cache.record_selector_result(field, selector, success=False, reason=last_reason)
     return CacheLookup(None, attempted=bool(entries), selector_count=len(entries), rejection_reason=last_reason, rejection_selector=last_selector, rejection_strategy=last_strategy)
+
+
+def _candidate_from_cache_entry(field: FieldSpec, soup: BeautifulSoup, entry: dict) -> tuple:
+    strategy = str(entry.get("strategy") or "")
+    if strategy == "heading_relative":
+        return _heading_relative_candidate(field, soup, str(entry["selector"]))
+    if strategy == "table_relative":
+        return _table_relative_candidate(soup, str(entry.get("row_anchor") or ""), str(entry.get("column_anchor") or ""))
+    if strategy == "organic_result_relative":
+        return _organic_result_candidate(field, soup, str(entry["selector"]))
+    return _css_candidate(soup, str(entry["selector"]))
+
+
+def _css_candidate(soup: BeautifulSoup, selector: str) -> tuple:
+    try:
+        matches = soup.select(selector)
+    except Exception:
+        return None, "selector_invalid"
+    if not matches:
+        return None, "selector_no_match"
+    if len(matches) > 1:
+        return None, "selector_many_matches"
+    return element_to_candidate(soup, matches[0], 1), None
+
+
+def _heading_relative_candidate(field: FieldSpec, soup: BeautifulSoup, selector: str) -> tuple:
+    try:
+        matches = [item for item in soup.select(selector) if isinstance(item, Tag)]
+    except Exception:
+        return None, "selector_invalid"
+    for index, element in enumerate(matches, start=1):
+        candidate = element_to_candidate(soup, element, index)
+        validation = validate_value(field, extract_value(field, candidate))
+        if validation.passed:
+            return candidate, None
+    return None, "selector_no_match"
+
+
+def _table_relative_candidate(soup: BeautifulSoup, row_anchor: str, column_anchor: str) -> tuple:
+    if not row_anchor or not column_anchor:
+        return None, "selector_invalid"
+    row_needle = row_anchor.lower()
+    column_needle = column_anchor.lower()
+    for table in soup.find_all("table"):
+        if not isinstance(table, Tag):
+            continue
+        candidate = _matrix_table_cell(soup, table, row_needle, column_needle) or _key_value_table_cell(soup, table, row_needle, column_needle)
+        if candidate is not None:
+            return candidate, None
+    return None, "selector_no_match"
+
+
+def _organic_result_candidate(field: FieldSpec, soup: BeautifulSoup, selector: str) -> tuple:
+    try:
+        regions = [item for item in soup.select(selector) if isinstance(item, Tag)]
+    except Exception:
+        return None, "selector_invalid"
+    for region in regions:
+        text = region.get_text(" ", strip=True).lower()
+        classes = " ".join(str(item) for item in (region.attrs.get("class") or [])).lower()
+        if "sponsored" in text or "ad" in classes:
+            continue
+        prompt = field.prompt_text.lower()
+        if "coupon" in prompt or "promo" in prompt:
+            if not _region_has_coupon_cue(region):
+                continue
+            candidate = _coupon_candidate(field, soup, region)
+            if candidate is not None:
+                return candidate, None
+            continue
+        if "title" in field.name.lower():
+            for element in region.select("h1, h2, h3, a.title, .title"):
+                if isinstance(element, Tag):
+                    candidate = element_to_candidate(soup, element, 1)
+                    if validate_value(field, extract_value(field, candidate)).passed:
+                        return candidate, None
+        candidates = []
+        for element in region.find_all(True):
+            if isinstance(element, Tag) and should_consider(element):
+                candidates.append(element_to_candidate(soup, element, len(candidates) + 1))
+        ranked = rank_candidates(field, candidates)
+        for item in ranked:
+            if item.validation.passed:
+                return item.candidate, None
+    return None, "selector_no_match"
+
+
+def _region_has_coupon_cue(region: Tag) -> bool:
+    text = region.get_text(" ", strip=True).lower()
+    if "coupon" in text or "promo" in text:
+        return True
+    return any("coupon" in key.lower() for element in region.find_all(True) for key in element.attrs)
+
+
+def _coupon_candidate(field: FieldSpec, soup: BeautifulSoup, region: Tag):
+    candidates = []
+    for element in region.find_all(True):
+        if not isinstance(element, Tag) or not should_consider(element):
+            continue
+        candidate = element_to_candidate(soup, element, len(candidates) + 1)
+        ctx = " ".join([candidate.attr_text, candidate.parent_text, candidate.before_text, candidate.after_text]).lower()
+        value = extract_value(field, candidate)
+        if ("coupon" in ctx or "promo" in ctx) and "no active coupon" not in ctx and re.search(r"[A-Za-z]", value):
+            candidates.append(candidate)
+    ranked = rank_candidates(field, candidates)
+    for item in ranked:
+        if item.validation.passed:
+            return item.candidate
+    return None
+
+
+def _matrix_table_cell(soup: BeautifulSoup, table: Tag, row_needle: str, column_needle: str):
+    rows = [row for row in table.find_all("tr", recursive=False) if isinstance(row, Tag)]
+    if len(rows) < 2:
+        return None
+    header_cells = _row_cells(rows[0])
+    column_index = next((idx for idx, cell in enumerate(header_cells) if column_needle in cell.get_text(" ", strip=True).lower()), None)
+    if column_index is None:
+        return None
+    for row in rows[1:]:
+        cells = _row_cells(row)
+        if any(row_needle in cell.get_text(" ", strip=True).lower() for cell in cells) and column_index < len(cells):
+            return element_to_candidate(soup, cells[column_index], 1)
+    return None
+
+
+def _key_value_table_cell(soup: BeautifulSoup, table: Tag, row_needle: str, column_needle: str):
+    container = table.find_parent(["div", "section", "article"])
+    if not isinstance(container, Tag) or row_needle not in container.get_text(" ", strip=True).lower():
+        return None
+    for row in table.find_all("tr"):
+        cells = _row_cells(row)
+        if len(cells) >= 2 and column_needle in cells[0].get_text(" ", strip=True).lower():
+            return element_to_candidate(soup, cells[1], 1)
+    return None
+
+
+def _row_cells(row: Tag) -> list[Tag]:
+    return [cell for cell in row.find_all(["td", "th"], recursive=False) if isinstance(cell, Tag)]
 
 
 def _field_extraction(

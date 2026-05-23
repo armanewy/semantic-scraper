@@ -211,6 +211,35 @@ semscrape compare runs/m6d-pass1.jsonl runs/m6d-pass2.jsonl \
 
 Selector cache entries are structured records with strategy labels, quality scores, success/failure counters, and rejection reasons. The cache format is intentionally strict because the project is still pre-release.
 
+Run the cross-version drift memory benchmark:
+
+```bash
+semscrape canary corpus/repro_minimized/manifest-drift-v1.yml \
+  --policy safe-local \
+  --learn \
+  --cache-dir runs/m6e-cache \
+  --out runs/m6e-learn-v1.jsonl
+
+semscrape canary corpus/repro_minimized/manifest-drift-v2.yml \
+  --policy safe-local \
+  --cache-dir runs/m6e-cache \
+  --out runs/m6e-test-v2.jsonl
+
+semscrape compare runs/m6e-learn-v1.jsonl runs/m6e-test-v2.jsonl \
+  --left-label learn-v1 \
+  --right-label test-v2 \
+  --cross-version \
+  --out runs/m6e-compare.md
+```
+
+Generate a single drifted replay HTML file:
+
+```bash
+semscrape drift input.html \
+  --profile changed_classes \
+  --out drifted.html
+```
+
 Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
 
 ```bash

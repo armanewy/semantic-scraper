@@ -11,6 +11,7 @@ import yaml
 
 from .cache import SelectorCache
 from .dom import generate_candidates
+from .drift import DRIFT_PROFILES, write_drift
 from .eval_model import (
     append_calibration_jsonl,
     append_jsonl,
@@ -376,6 +377,8 @@ def _run_policy_eval_rows(
             base_failure_reason = _policy_failure_reason(extraction, expected_present, candidate_present, correct, model_error)
             row = {
                 "case_id": getattr(args, "case_id", None),
+                "group": getattr(args, "group", None),
+                "version": getattr(args, "version", None),
                 "category": getattr(args, "category", None),
                 "spec": spec.name,
                 "fixture": input_ref,
@@ -596,14 +599,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     left_rows = read_jsonl(args.left)
     right_rows = read_jsonl(args.right)
-    text = _compare_report(args.left_label, left_rows, args.right_label, right_rows)
+    text = _compare_report(args.left_label, left_rows, args.right_label, right_rows, cross_version=args.cross_version)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(text, encoding="utf-8")
     print(f"wrote {args.out}")
     return 0
 
 
-def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_label: str, right_rows: list[dict[str, Any]]) -> str:
+def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_label: str, right_rows: list[dict[str, Any]], *, cross_version: bool = False) -> str:
     def first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         summary = summarize_rows(rows)
         return next(iter(summary.values())) if summary else {}
@@ -619,6 +622,31 @@ def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_labe
             f"{metrics.get('cache_rejected_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
             f"{metrics.get('end_to_end_latency_p95', 0.0):.1f} |"
         )
+    if cross_version:
+        metrics = first_metrics(right_rows)
+        lines.extend(
+            [
+                "",
+                "## Cross-Version Metrics",
+                "",
+                f"- cross_version_candidate_recall_at_40: {metrics.get('candidate_recall_at_k', 0.0):.6f}",
+                f"- cross_version_coverage: {metrics.get('coverage_rate', 0.0):.6f}",
+                f"- cross_version_false_positive_rate: {metrics.get('false_positive_rate', 0.0):.6f}",
+                f"- cross_version_selector_reuse_rate: {metrics.get('selector_reuse_rate', 0.0):.6f}",
+                f"- cross_version_model_call_rate: {metrics.get('model_call_rate', 0.0):.6f}",
+                f"- cache_false_positive_rate: {metrics.get('cache_false_positive_rate', 0.0):.6f}",
+            ]
+        )
+        breakdown = metrics.get("selector_strategy_breakdown", {})
+        lines.extend(["", "## Cross-Version Strategy Reuse", "", "| strategy | attempts | accepted | rejected | false pos | reuse rate |", "|---|---:|---:|---:|---:|---:|"])
+        if breakdown:
+            for strategy, values in breakdown.items():
+                lines.append(
+                    f"| {strategy} | {values['attempts']} | {values['accepted']} | {values['rejected']} | "
+                    f"{values['false_pos']} | {values['reuse_rate']:.3f} |"
+                )
+        else:
+            lines.append("| n/a | 0 | 0 | 0 | 0 | 0.000 |")
     return "\n".join(lines) + "\n"
 
 
@@ -706,6 +734,12 @@ def cmd_mutate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_drift(args: argparse.Namespace) -> int:
+    path = write_drift(args.input, args.out, profile=args.profile, seed=args.seed)
+    _print_json({"created": str(path), "profile": args.profile})
+    return 0
+
+
 def cmd_snapshot(args: argparse.Namespace) -> int:
     _apply_policy_defaults(args)
     result = create_snapshot(
@@ -741,6 +775,8 @@ def cmd_canary(args: argparse.Namespace) -> int:
             render_failures += 1
             row = {
                 "case_id": case["id"],
+                "group": case.get("group") or case["id"],
+                "version": case.get("version"),
                 "category": case.get("category"),
                 "spec": spec.name,
                 "fixture": input_ref,
@@ -765,6 +801,8 @@ def cmd_canary(args: argparse.Namespace) -> int:
             models=[model],
             policy=args.policy,
             case_id=case["id"],
+            group=case.get("group") or case["id"],
+            version=case.get("version"),
             category=case.get("category"),
             top_k=args.top_k,
             ollama_host=args.ollama_host,
@@ -777,6 +815,8 @@ def cmd_canary(args: argparse.Namespace) -> int:
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
         for row in case_rows:
             row["case_id"] = case["id"]
+            row["group"] = case.get("group") or case["id"]
+            row["version"] = case.get("version")
             row["category"] = case.get("category")
         rows.extend(case_rows)
 
@@ -841,11 +881,16 @@ def _canary_input_for_case(case: dict[str, Any], spec, *, live: bool) -> str:
 def _canary_cache_path(args: argparse.Namespace, case: dict[str, Any]) -> str | None:
     if args.cache_dir:
         cache_dir = Path(args.cache_dir)
-        return str(cache_dir / f"{case['id']}.lock.json")
+        key = str(case.get("group") or case["id"])
+        return str(cache_dir / f"{_safe_cache_name(key)}.lock.json")
     default = SelectorCache.default_path(case["path"])
     if args.learn or default.exists():
         return str(default)
     return None
+
+
+def _safe_cache_name(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value).strip("._") or "case"
 
 
 def _timeout_rate(rows: list[dict[str, Any]]) -> float:
@@ -1006,6 +1051,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("right")
     compare.add_argument("--left-label", default="pass1")
     compare.add_argument("--right-label", default="pass2")
+    compare.add_argument("--cross-version", action="store_true", help="Label right-side metrics as cross-version transfer metrics")
     compare.add_argument("--out", required=True)
     compare.set_defaults(func=cmd_compare)
 
@@ -1016,6 +1062,13 @@ def build_parser() -> argparse.ArgumentParser:
     mutate.add_argument("--seed", type=int, default=0)
     mutate.add_argument("--intensity", type=float, default=0.45)
     mutate.set_defaults(func=cmd_mutate)
+
+    drift = sub.add_parser("drift", help="Generate a named DOM drift variant from replay HTML")
+    drift.add_argument("input")
+    drift.add_argument("--out", required=True)
+    drift.add_argument("--profile", choices=sorted(DRIFT_PROFILES), required=True)
+    drift.add_argument("--seed", type=int, default=0)
+    drift.set_defaults(func=cmd_drift)
 
     snapshot = sub.add_parser("snapshot", help="Capture a replayable rendered-page snapshot")
     snapshot.add_argument("spec")

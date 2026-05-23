@@ -1,0 +1,33 @@
+name: repro_minimized_drift_v1
+description: Learn selector memory from the first version of each minimized replay group.
+cases:
+  - id: product_001_v1
+    group: product_001
+    version: v1
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v1.html
+  - id: article_001_v1
+    group: article_001
+    version: v1
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v1.html
+  - id: listing_001_v1
+    group: listing_001
+    version: v1
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v1.html
+  - id: pricing_001_v1
+    group: pricing_001
+    version: v1
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v1.html
+  - id: docs_001_v1
+    group: docs_001
+    version: v1
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v1.html

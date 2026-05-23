@@ -42,6 +42,7 @@ def test_cache_writes_structured_selector_entries(tmp_path):
     )
 
     entries = cache.selector_entries_for(spec.fields[0])
+    assert cache.data["schema_version"] == 1
     assert entries
     assert entries[0]["selector"]
     assert entries[0]["strategy"]
@@ -73,3 +74,59 @@ def test_cache_rejects_malformed_selector_entries(tmp_path):
 
     with pytest.raises(ValueError, match="Malformed selector cache entry"):
         cache.selector_entries_for(spec.fields[0])
+
+
+def test_cache_rejects_unsupported_schema_version(tmp_path):
+    path = tmp_path / "cache.json"
+    path.write_text('{"schema_version": 999, "fields": {}}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported selector cache schema_version"):
+        SelectorCache(path)
+
+
+def test_table_relative_memory_survives_column_reorder(tmp_path):
+    spec = _one_field_spec("fixtures/tables/pricing_table/spec.yml", "pro_monthly_price")
+    cache = SelectorCache(tmp_path / "cache.json")
+    v1 = Path("fixtures/tables/pricing_table/v1.html").read_text(encoding="utf-8")
+    v2 = Path("fixtures/tables/pricing_table/v2_columns_reordered.html").read_text(encoding="utf-8")
+
+    extract_html(
+        spec,
+        v1,
+        cache=cache,
+        strict=True,
+        min_confidence=0.3,
+        min_margin=0.0,
+        min_validator_confidence=0.5,
+        learn=True,
+    )
+    report = extract_html(spec, v2, cache=cache, strict=True, min_confidence=0.3, min_margin=0.0, min_validator_confidence=0.5)
+
+    result = report.fields["pro_monthly_price"]
+    assert result.source == "cache"
+    assert result.value == "$29"
+    assert any(item.get("strategy") == "table_relative" for item in result.trace)
+
+
+def test_organic_result_memory_skips_sponsored_result(tmp_path):
+    spec = _one_field_spec("fixtures/listings/search_results/spec.yml", "first_organic_title")
+    cache = SelectorCache(tmp_path / "cache.json")
+    v1 = Path("fixtures/listings/search_results/v1.html").read_text(encoding="utf-8")
+    v3 = Path("fixtures/listings/search_results/v3_sponsored_results.html").read_text(encoding="utf-8")
+
+    extract_html(
+        spec,
+        v1,
+        cache=cache,
+        strict=True,
+        min_confidence=0.3,
+        min_margin=0.0,
+        min_validator_confidence=0.5,
+        learn=True,
+    )
+    report = extract_html(spec, v3, cache=cache, strict=True, min_confidence=0.3, min_margin=0.0, min_validator_confidence=0.5)
+
+    result = report.fields["first_organic_title"]
+    assert result.source == "cache"
+    assert result.value == "Northstar Daypack"
+    assert any(item.get("strategy") == "organic_result_relative" for item in result.trace)

@@ -1,0 +1,87 @@
+name: repro_minimized_drift_v2
+description: Test selector memory learned from v1 against nearby changed versions.
+cases:
+  - id: product_001_v2_changed_classes
+    group: product_001
+    version: v2_changed_classes
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v2_changed_classes.html
+  - id: product_001_v3_changed_layout
+    group: product_001
+    version: v3_changed_layout
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v3_changed_layout.html
+  - id: product_001_v4_price_near_discount
+    group: product_001
+    version: v4_price_near_discount
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v4_price_near_discount.html
+  - id: product_001_v5_multiple_prices
+    group: product_001
+    version: v5_multiple_prices
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v5_multiple_prices.html
+  - id: article_001_v2_author_moved
+    group: article_001
+    version: v2_author_moved
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v2_author_moved.html
+  - id: article_001_v3_date_in_meta
+    group: article_001
+    version: v3_date_in_meta
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v3_date_in_meta.html
+  - id: article_001_v4_title_changed_tag
+    group: article_001
+    version: v4_title_changed_tag
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v4_title_changed_tag.html
+  - id: listing_001_v2_cards_reordered
+    group: listing_001
+    version: v2_cards_reordered
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v2_cards_reordered.html
+  - id: listing_001_v3_sponsored_results
+    group: listing_001
+    version: v3_sponsored_results
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v3_sponsored_results.html
+  - id: listing_001_v4_missing_field
+    group: listing_001
+    version: v4_missing_field
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v4_missing_field.html
+  - id: pricing_001_v2_columns_reordered
+    group: pricing_001
+    version: v2_columns_reordered
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v2_columns_reordered.html
+  - id: pricing_001_v3_nested_table
+    group: pricing_001
+    version: v3_nested_table
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v3_nested_table.html
+  - id: docs_001_v2_sidebar_duplicate
+    group: docs_001
+    version: v2_sidebar_duplicate
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v2_sidebar_duplicate.html
+  - id: docs_001_v3_legacy_command
+    group: docs_001
+    version: v3_legacy_command
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v3_legacy_command.html

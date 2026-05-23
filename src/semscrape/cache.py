@@ -8,20 +8,23 @@ from .models import FieldSpec, RankedCandidate, ScrapeSpec
 from .selectors import selector_quality, selector_strategy
 from .util import load_json, stable_hash, write_json
 
-CACHE_VERSION = 2
+CACHE_SCHEMA_VERSION = 1
 
 
 class SelectorCache:
     def __init__(self, path: str | Path | None):
         self.path = Path(path) if path else None
         self.data: dict[str, Any] = {
-            "version": CACHE_VERSION,
+            "schema_version": CACHE_SCHEMA_VERSION,
             "spec_hash": "",
             "fields": {},
         }
         if self.path and self.path.exists():
             loaded = load_json(self.path, default={})
             if isinstance(loaded, dict):
+                schema_version = loaded.get("schema_version")
+                if schema_version != CACHE_SCHEMA_VERSION:
+                    raise ValueError(f"Unsupported selector cache schema_version {schema_version!r}; expected {CACHE_SCHEMA_VERSION}")
                 self.data.update(loaded)
 
     @staticmethod
@@ -37,7 +40,7 @@ class SelectorCache:
         return stable_hash(material, length=16)
 
     def prepare(self, spec: ScrapeSpec) -> None:
-        self.data["version"] = CACHE_VERSION
+        self.data["schema_version"] = CACHE_SCHEMA_VERSION
         self.data["spec_hash"] = self.spec_hash(spec)
         self.data.setdefault("fields", {})
 
@@ -59,16 +62,14 @@ class SelectorCache:
 
     def remember(self, field: FieldSpec, ranked: RankedCandidate, *, source: str) -> None:
         fields = self.data.setdefault("fields", {})
-        selector = ranked.candidate.selector
         entries = self.selector_entries_for(field)
-        if selector:
-            by_selector = {entry["selector"]: entry for entry in entries}
-            entry = by_selector.get(selector) or _selector_entry(selector)
+        by_key = {_entry_key(entry): entry for entry in entries}
+        for new_entry in _entries_for_candidate(field, ranked, source=source):
+            key = _entry_key(new_entry)
+            entry = by_key.get(key) or new_entry
             entry.update(
                 {
-                    "selector": selector,
-                    "strategy": selector_strategy(selector),
-                    "quality": selector_quality(selector),
+                    **new_entry,
                     "confidence": round(float(ranked.score), 4),
                     "source": source,
                     "successes": int(entry.get("successes") or 0) + 1,
@@ -79,8 +80,8 @@ class SelectorCache:
                     "last_rejection_reason": None,
                 }
             )
-            by_selector[selector] = entry
-            entries = sorted(by_selector.values(), key=_entry_rank, reverse=True)
+            by_key[key] = entry
+        entries = sorted(by_key.values(), key=_entry_rank, reverse=True)
         fields[field.name] = {
             "selectors": entries[:8],
             "last_value": ranked.value,
@@ -123,7 +124,7 @@ class SelectorCache:
         write_json(self.path, self.data)
 
     def clear(self) -> None:
-        self.data = {"version": CACHE_VERSION, "spec_hash": "", "fields": {}}
+        self.data = {"schema_version": CACHE_SCHEMA_VERSION, "spec_hash": "", "fields": {}}
         if self.path and self.path.exists():
             self.path.unlink()
 
@@ -138,6 +139,85 @@ def _selector_entry(selector: str) -> dict[str, Any]:
         "failures": 0,
         "last_rejection_reason": None,
     }
+
+
+def _entries_for_candidate(field: FieldSpec, ranked: RankedCandidate, *, source: str) -> list[dict[str, Any]]:
+    selector = ranked.candidate.selector
+    entries: list[dict[str, Any]] = []
+    if selector and selector_quality(selector) >= 0.22:
+        entries.append(_selector_entry(selector))
+    heading = _heading_entry(field, ranked)
+    if heading:
+        entries.append(heading)
+    table = _table_relative_entry(field)
+    if table:
+        entries.append(table)
+    organic = _organic_result_entry(field)
+    if organic:
+        entries.append(organic)
+    return entries or [_selector_entry(selector)]
+
+
+def _heading_entry(field: FieldSpec, ranked: RankedCandidate) -> dict[str, Any] | None:
+    name = field.name.lower()
+    prompt = field.prompt_text.lower()
+    if any(term in prompt for term in {"organic result", "search result", "sponsored", "listing"}):
+        return None
+    if ranked.candidate.tag not in {"h1", "h2"} and "title" not in name and "headline" not in name:
+        return None
+    return {
+        "selector": "main h1, article h1, h1, [role='heading'][aria-level='1'], main h2, article h2, h2",
+        "strategy": "heading_relative",
+        "quality": 0.78,
+        "confidence": 0.0,
+        "successes": 0,
+        "failures": 0,
+        "last_rejection_reason": None,
+    }
+
+
+def _organic_result_entry(field: FieldSpec) -> dict[str, Any] | None:
+    prompt = field.prompt_text.lower()
+    if "organic" not in prompt and "search result" not in prompt:
+        return None
+    return {
+        "selector": ".organic, [data-rank='1']",
+        "strategy": "organic_result_relative",
+        "quality": 0.84,
+        "confidence": 0.0,
+        "successes": 0,
+        "failures": 0,
+        "field_name": field.name,
+        "last_rejection_reason": None,
+    }
+
+
+def _table_relative_entry(field: FieldSpec) -> dict[str, Any] | None:
+    hints = [str(item).strip() for item in field.hints if str(item).strip()]
+    lowered = [item.lower() for item in hints]
+    column_terms = {"monthly", "annual", "storage", "price"}
+    row_anchor = next((hint for hint, lower in zip(hints, lowered, strict=False) if lower not in column_terms), "")
+    column_anchor = next((hint for hint, lower in zip(hints, lowered, strict=False) if lower in {"monthly", "annual", "storage"}), "")
+    if not row_anchor or not column_anchor:
+        return None
+    return {
+        "selector": "table",
+        "strategy": "table_relative",
+        "quality": 0.86,
+        "confidence": 0.0,
+        "successes": 0,
+        "failures": 0,
+        "row_anchor": row_anchor,
+        "column_anchor": column_anchor,
+        "last_rejection_reason": None,
+    }
+
+
+def _entry_key(entry: dict[str, Any]) -> str:
+    parts = [str(entry.get("strategy") or "css"), str(entry.get("selector") or "")]
+    if entry.get("row_anchor") or entry.get("column_anchor"):
+        parts.extend([str(entry.get("row_anchor") or ""), str(entry.get("column_anchor") or "")])
+    return "|".join(parts)
 
 
 def _entry_rank(entry: dict[str, Any]) -> float:

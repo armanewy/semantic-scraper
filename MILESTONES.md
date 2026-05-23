@@ -269,6 +269,48 @@ pass2:
   cache_false_positive_rate: 0.000000
 ```
 
+## M6E: Selector memory generalization under drift
+
+**Question:** Do learned selectors survive realistic DOM changes, or only exact replay?
+
+Deliverables:
+
+- Versioned corpus manifests with group/version metadata.
+- Drift generation for rendered snapshots.
+- Cross-version canary comparison.
+- Strategy-level reuse and rejection report.
+- Cache schema versioning.
+- Failure artifacts for cross-version selector misses and stale selectors.
+- Relative memory strategies for headings, organic result regions, and tables.
+
+Exit criteria:
+
+- cross_version_candidate_recall@40 >= 95%.
+- cross_version_coverage >= 65%.
+- cross_version_false_positive_rate <= 2%.
+- cross_version_selector_reuse_rate >= 45%.
+- cross_version_model_call_rate <= 50%.
+- cache_false_positive_rate = 0%.
+
+Status: complete on the minimized cross-version replay corpus.
+
+Latest cross-version replay result:
+
+```text
+learn-v1:
+  coverage_rate: 0.944444
+  false_positive_rate: 0.000000
+  model_call_rate: 0.444444
+
+test-v2:
+  cross_version_candidate_recall_at_40: 0.980392
+  cross_version_coverage: 0.846154
+  cross_version_false_positive_rate: 0.000000
+  cross_version_selector_reuse_rate: 0.500000
+  cross_version_model_call_rate: 0.346154
+  cache_false_positive_rate: 0.000000
+```
+
 ## M7: Specialized local ranker
 
 **Question:** Is a tiny specialized model better than generic local LLMs for this task?
