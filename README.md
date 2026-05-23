@@ -47,6 +47,7 @@ This repo is a developer-alpha semantic scraper CLI:
 - Replayable rendered-page snapshots and real-page canary evaluation are included.
 - Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
 - A packaged default ranker is included, so `ranker-local` works without Ollama or an explicit `--ranker` path.
+- Local SQLite evidence capture, review, labeling, privacy-safe export, and evidence-derived dataset generation are included.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -129,6 +130,18 @@ Exit codes for alpha scripting:
 2 = config/spec/runtime error
 3 = reserved for render/network errors
 4 = model or ranker unavailable
+```
+
+Record extraction evidence locally:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html \
+  --record-evidence \
+  --evidence-db .semscrape/evidence.db \
+  --values-only
+
+semscrape evidence stats .semscrape/evidence.db
+semscrape evidence review .semscrape/evidence.db --limit 5
 ```
 
 Evaluate the model locator against the fixture corpus:
@@ -346,6 +359,53 @@ semscrape report-domain runs/ood-ranker-local.jsonl runs/ood-ranker-plus-llm.jso
 ```
 
 `ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
+
+## Evidence Loop
+
+Evidence capture is opt-in and local by default:
+
+```bash
+semscrape canary corpus/ood_holdout/manifest.yml \
+  --policy ranker-local \
+  --record-evidence \
+  --evidence-db .semscrape/evidence.db \
+  --out runs/ood-holdout.jsonl
+```
+
+Review and label records:
+
+```bash
+semscrape evidence stats .semscrape/evidence.db
+semscrape evidence review .semscrape/evidence.db --status abstained --limit 20
+
+semscrape evidence label .semscrape/evidence.db 123 --correct-candidate c0017
+semscrape evidence label .semscrape/evidence.db 124 --correct-value "$59.99"
+semscrape evidence label .semscrape/evidence.db 125 --abstention-correct
+```
+
+Export privacy-controlled evidence and turn it into ranker data:
+
+```bash
+semscrape evidence export .semscrape/evidence.db \
+  --only-labeled \
+  --privacy features-only \
+  --out data/evidence-labeled.jsonl
+
+semscrape dataset build \
+  --from-evidence data/evidence-labeled.jsonl \
+  --out data/candidate-ranking-v3.jsonl
+
+semscrape ranker model-card models/candidate-ranker-v2.json \
+  --out models/candidate-ranker-v2.md
+```
+
+Privacy modes:
+
+```text
+full          keeps candidate values/text/context for local debugging
+redacted      keeps candidate values and ML features, replaces long text/context with hashes
+features-only keeps labels and ML features, omits raw values/text/context/selectors
+```
 
 Run the M8C OOD hardening workflow:
 

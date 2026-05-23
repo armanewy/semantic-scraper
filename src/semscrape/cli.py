@@ -32,6 +32,14 @@ from .eval_model import (
     summarize_rows,
     values_match,
 )
+from .evidence import (
+    DEFAULT_EVIDENCE_DB,
+    PRIVACY_MODES,
+    EvidenceStore,
+    record_report_evidence,
+    write_dataset_from_evidence_export,
+    write_evidence_jsonl,
+)
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
@@ -100,6 +108,21 @@ def cmd_extract(args: argparse.Namespace) -> int:
         max_ranker_penalties=args.max_ranker_penalties,
         llm_fallback_policy=args.llm_fallback_policy,
     )
+    if args.record_evidence:
+        expected_for_file = spec.benchmarks.get(basename_key(args.input), {})
+        record_report_evidence(
+            db_path=args.evidence_db,
+            command="extract",
+            policy=args.policy,
+            spec=spec,
+            input_ref=args.input,
+            html=html,
+            report=report,
+            expected_for_file=expected_for_file,
+            top_k=args.top_k,
+            privacy=args.evidence_privacy,
+            ranker_model=args.ranker,
+        )
     _ensure_known_required_fields(report, args)
     if args.values_only:
         _print_json(report.values())
@@ -410,6 +433,23 @@ def _run_policy_eval_rows(
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
             llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
         )
+        if getattr(args, "record_evidence", False):
+            record_report_evidence(
+                db_path=getattr(args, "evidence_db", DEFAULT_EVIDENCE_DB),
+                command=getattr(args, "command", "eval-model"),
+                policy=getattr(args, "policy", "safe-local"),
+                spec=spec,
+                input_ref=input_ref,
+                html=html,
+                report=report,
+                expected_for_file=expected_for_file,
+                top_k=args.top_k,
+                privacy=getattr(args, "evidence_privacy", "redacted"),
+                case_id=getattr(args, "case_id", None),
+                bucket=getattr(args, "bucket", None),
+                category=getattr(args, "category", None),
+                ranker_model=getattr(args, "ranker", None),
+            )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
             extraction = report.fields[field.name]
@@ -1126,6 +1166,10 @@ def cmd_canary(args: argparse.Namespace) -> int:
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
             llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
             learn=args.learn,
+            record_evidence=getattr(args, "record_evidence", False),
+            evidence_db=getattr(args, "evidence_db", DEFAULT_EVIDENCE_DB),
+            evidence_privacy=getattr(args, "evidence_privacy", "redacted"),
+            command="canary",
         )
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
         for row in case_rows:
@@ -1243,6 +1287,90 @@ def cmd_failures_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evidence_stats(args: argparse.Namespace) -> int:
+    _print_json(EvidenceStore(args.db).stats())
+    return 0
+
+
+def cmd_evidence_review(args: argparse.Namespace) -> int:
+    rows = EvidenceStore(args.db).review(
+        status=args.status,
+        label_status=args.label_status,
+        limit=args.limit,
+    )
+    _print_json({"db": args.db, "records": rows})
+    return 0
+
+
+def cmd_evidence_label(args: argparse.Namespace) -> int:
+    try:
+        result = EvidenceStore(args.db).label_record(
+            args.record_id,
+            correct_candidate_id=args.correct_candidate,
+            correct_value=args.correct_value,
+            abstention_correct=args.abstention_correct,
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), 2) from exc
+    _print_json(result)
+    return 0
+
+
+def cmd_evidence_export(args: argparse.Namespace) -> int:
+    rows = EvidenceStore(args.db).export_records(
+        privacy=args.privacy,
+        only_labeled=args.only_labeled,
+    )
+    write_evidence_jsonl(args.out, rows)
+    _print_json({"db": args.db, "out": args.out, "rows": len(rows), "privacy": args.privacy})
+    return 0
+
+
+def cmd_ranker_model_card(args: argparse.Namespace) -> int:
+    try:
+        ranker = CandidateRanker.load(args.model)
+        raw = json.loads(Path(args.model).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CliError(f"Ranker unavailable: {exc}", 4) from exc
+    lines = [
+        f"# {Path(args.model).name}",
+        "",
+        "## Summary",
+        "",
+        f"- type: `{raw.get('type')}`",
+        f"- schema_version: `{raw.get('schema_version')}`",
+        f"- feature_schema_version: `{raw.get('feature_schema_version', 'unknown')}`",
+        f"- feature_count: `{len(ranker.weights)}`",
+        f"- threshold: `{ranker.threshold}`",
+        f"- margin: `{ranker.margin}`",
+        "",
+        "## Training Metadata",
+        "",
+    ]
+    for key, value in sorted((ranker.metadata or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    metrics = raw.get("metrics") or {}
+    if metrics:
+        lines.extend(["", "## Metrics", ""])
+        for key, value in sorted(metrics.items()):
+            lines.append(f"- {key}: `{value}`")
+    lines.extend(
+        [
+            "",
+            "## Known Limits",
+            "",
+            "- Metrics describe the replay suites recorded in this repo, not arbitrary web pages.",
+            "- Abstention is an intended safety behavior outside the demonstrated domain envelope.",
+            "- Untrusted production evidence should not be used as positive training data.",
+            "",
+        ]
+    )
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    _print_json({"out": args.out})
+    return 0
+
+
 def _load_failure_rows(path: str) -> list[dict[str, Any]]:
     target = Path(path)
     rows: list[dict[str, Any]] = []
@@ -1260,6 +1388,11 @@ def _load_failure_rows(path: str) -> list[dict[str, Any]]:
 
 
 def cmd_dataset_build(args: argparse.Namespace) -> int:
+    if args.from_evidence:
+        _print_json(write_dataset_from_evidence_export(args.from_evidence, args.out))
+        return 0
+    if not args.paths:
+        raise CliError("dataset build requires paths unless --from-evidence is used", 2)
     rows: list[dict[str, Any]] = []
     cases = _canary_cases(args.paths)
     for case in cases:
@@ -1556,6 +1689,9 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--require-fields", nargs="+", default=[], help="Field names that must extract successfully when --fail-on-abstain is set")
     extract.add_argument("--fail-on-abstain", action="store_true", help="Return exit code 1 when any required field abstains or fails")
     extract.add_argument("--min-coverage", type=float, default=None, help="Return exit code 1 when extracted field coverage is below this threshold")
+    extract.add_argument("--record-evidence", action="store_true", help="Record field-level extraction evidence to SQLite")
+    extract.add_argument("--evidence-db", default=DEFAULT_EVIDENCE_DB, help="SQLite evidence DB path")
+    extract.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted", help="Evidence capture privacy mode")
     extract.add_argument("--render", action="store_true", help="Render URL with Playwright before extraction")
     extract.add_argument("--wait-for", default=None, help="CSS selector to wait for when --render is used")
     extract.set_defaults(func=cmd_extract)
@@ -1631,6 +1767,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
     eval_model.add_argument("--render", action="store_true")
     eval_model.add_argument("--wait-for", default=None)
+    eval_model.add_argument("--record-evidence", action="store_true", help="Record field-level eval evidence to SQLite")
+    eval_model.add_argument("--evidence-db", default=DEFAULT_EVIDENCE_DB)
+    eval_model.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted")
     eval_model.set_defaults(func=cmd_eval_model)
 
     calibrate = sub.add_parser("calibrate", help="Sweep strict thresholds and find coverage/FPR tradeoffs")
@@ -1727,12 +1866,16 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--min-ranker-margin", type=float, default=0.00)
     canary.add_argument("--max-ranker-penalties", type=int, default=0)
     canary.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
+    canary.add_argument("--record-evidence", action="store_true", help="Record field-level canary evidence to SQLite")
+    canary.add_argument("--evidence-db", default=DEFAULT_EVIDENCE_DB)
+    canary.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted")
     canary.set_defaults(func=cmd_canary)
 
     dataset = sub.add_parser("dataset", help="Build and split labeled candidate-ranking datasets")
     dataset_sub = dataset.add_subparsers(dest="dataset_cmd", required=True)
     dataset_build = dataset_sub.add_parser("build", help="Build candidate-ranking JSONL from specs/manifests")
-    dataset_build.add_argument("paths", nargs="+", help="Spec paths or manifest paths")
+    dataset_build.add_argument("paths", nargs="*", help="Spec paths or manifest paths")
+    dataset_build.add_argument("--from-evidence", default=None, help="Build candidate-ranking JSONL from evidence export JSONL")
     dataset_build.add_argument("--top-k", type=int, default=40)
     dataset_build.add_argument("--out", required=True)
     dataset_build.add_argument("--render", action="store_true", help="Deprecated alias for --live")
@@ -1783,11 +1926,45 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_calibrate.add_argument("--out", required=True)
     ranker_calibrate.set_defaults(func=cmd_ranker_calibrate)
 
+    ranker_model_card = ranker_sub.add_parser("model-card", help="Generate a Markdown model card for a ranker")
+    ranker_model_card.add_argument("model")
+    ranker_model_card.add_argument("--out", required=True)
+    ranker_model_card.set_defaults(func=cmd_ranker_model_card)
+
     failures = sub.add_parser("failures", help="Inspect failure artifacts")
     failure_sub = failures.add_subparsers(dest="failure_cmd", required=True)
     failure_summary = failure_sub.add_parser("summarize", help="Summarize canary/eval failure reasons")
     failure_summary.add_argument("path", help="Failure artifact directory or JSONL output")
     failure_summary.set_defaults(func=cmd_failures_summarize)
+
+    evidence = sub.add_parser("evidence", help="Inspect, label, and export local evidence")
+    evidence_sub = evidence.add_subparsers(dest="evidence_cmd", required=True)
+    evidence_stats = evidence_sub.add_parser("stats", help="Summarize an evidence DB")
+    evidence_stats.add_argument("db", nargs="?", default=DEFAULT_EVIDENCE_DB)
+    evidence_stats.set_defaults(func=cmd_evidence_stats)
+
+    evidence_review = evidence_sub.add_parser("review", help="Review evidence records")
+    evidence_review.add_argument("db", nargs="?", default=DEFAULT_EVIDENCE_DB)
+    evidence_review.add_argument("--status", default=None)
+    evidence_review.add_argument("--label-status", default=None)
+    evidence_review.add_argument("--limit", type=int, default=20)
+    evidence_review.set_defaults(func=cmd_evidence_review)
+
+    evidence_label = evidence_sub.add_parser("label", help="Add a user correction label to one evidence record")
+    evidence_label.add_argument("db")
+    evidence_label.add_argument("record_id", type=int)
+    label_group = evidence_label.add_mutually_exclusive_group(required=True)
+    label_group.add_argument("--correct-candidate", default=None)
+    label_group.add_argument("--correct-value", default=None)
+    label_group.add_argument("--abstention-correct", action="store_true")
+    evidence_label.set_defaults(func=cmd_evidence_label)
+
+    evidence_export = evidence_sub.add_parser("export", help="Export evidence records as JSONL")
+    evidence_export.add_argument("db", nargs="?", default=DEFAULT_EVIDENCE_DB)
+    evidence_export.add_argument("--only-labeled", action="store_true")
+    evidence_export.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only")
+    evidence_export.add_argument("--out", required=True)
+    evidence_export.set_defaults(func=cmd_evidence_export)
 
     cache = sub.add_parser("cache-clear", help="Delete a selector cache/lock file")
     cache.add_argument("cache")

@@ -8,4 +8,5 @@ dist/
 build/
 *.lock.json
 runs/
+.semscrape/
 corpus/real_local/

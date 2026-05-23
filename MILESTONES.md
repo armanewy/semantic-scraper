@@ -570,3 +570,41 @@ Exit criteria:
 - Optional qwen fallback is documented but not required.
 
 Status: passed for developer-alpha packaging.
+
+## M9: Structural Evidence Store and Learning Loop
+
+**Question:** Can semscrape turn extraction attempts, failures, abstentions, canaries, and user corrections into trustworthy training/evaluation evidence?
+
+Deliverables:
+
+- Local SQLite evidence store at `.semscrape/evidence.db` by default.
+- `--record-evidence`, `--evidence-db`, and `--evidence-privacy` for `extract`, `canary`, and policy eval flows.
+- EvidenceRecord v1 fields for run metadata, spec/input hashes, field identity, candidates, selection source, validator state, ranker state, trace, failure reason, label state, and trust level.
+- Automatic gold labels from benchmark/canary expected values.
+- Manual correction commands:
+  - `semscrape evidence label DB RECORD_ID --correct-candidate CANDIDATE_ID`
+  - `semscrape evidence label DB RECORD_ID --correct-value VALUE`
+  - `semscrape evidence label DB RECORD_ID --abstention-correct`
+- Evidence inspection commands:
+  - `semscrape evidence stats`
+  - `semscrape evidence review`
+  - `semscrape evidence export`
+- Privacy modes:
+  - `full`
+  - `redacted`
+  - `features-only`
+- Evidence-derived ranker data:
+  - `semscrape dataset build --from-evidence`
+- Ranker model-card generation:
+  - `semscrape ranker model-card`
+
+Exit criteria:
+
+- Evidence capture works for `extract` and `canary` ranker-local workflows.
+- Benchmark/canary expected values become gold labels.
+- User corrections can label correct candidates, corrected values, or correct abstentions.
+- Features-only export strips raw candidate values, full candidate text, full candidate context, and selectors.
+- Dataset build can consume evidence exports.
+- Existing M8B alpha CLI workflows still pass.
+
+Status: implemented; ranker-v3 training/evaluation from accumulated evidence remains the next validation step.
