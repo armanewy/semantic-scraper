@@ -202,6 +202,9 @@ def extract_field(
 ) -> FieldExtraction:
     trace: list[dict] = []
     if cache is not None:
+        selectors = cache.selectors_for(field)
+        if selectors:
+            trace.append({"stage": "cache", "status": "attempted", "selector_count": len(selectors)})
         cached = _cached_candidate(field, html, cache)
         if cached is not None:
             trace.append({"stage": "cache", "status": "hit", "candidate_id": cached.candidate.id})
@@ -209,7 +212,7 @@ def extract_field(
                 decision = _evaluate_strict(
                     cached,
                     [cached],
-                    min_confidence=min_confidence,
+                    min_confidence=0.0,
                     min_margin=min_margin,
                     min_validator_confidence=min_validator_confidence,
                     enforce_margin=False,
@@ -218,7 +221,7 @@ def extract_field(
                     trace.append({"stage": "cache", "status": "abstained", "reason": decision.reason})
                     return _abstention(field, source="cache", reason=decision.reason or "cache_rejected", chosen=cached, trace=trace)
             return _field_extraction(field, cached, source="cache", trace=trace)
-        trace.append({"stage": "cache", "status": "miss"})
+        trace.append({"stage": "cache", "status": "miss", "reason": "selector_not_validated" if selectors else "empty"})
 
     ranked = rank_candidates(field, candidates, top=max(1, top_k))
     heuristic = next((item for item in ranked if item.validation.passed), ranked[0] if ranked else None)

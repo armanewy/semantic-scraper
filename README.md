@@ -157,7 +157,37 @@ semscrape canary corpus/real/**/spec.yml \
   --failures-dir runs/failures-real-canary
 ```
 
-Canary specs can point to a live `url:` in the spec, but the preferred regression input is a stored sibling `rendered.html` so failures can be reproduced offline. The canary summary reports render failures, timeout rate, and the same safe-local extraction metrics used by model evaluation.
+Canary specs can point to a live `url:` in the spec, but replay is the default: if a sibling `rendered.html` exists, canary uses it unless you pass `--live`. For repo-safe tests, a manifest can also point at local replay HTML:
+
+```bash
+semscrape canary corpus/repro_minimized/manifest.yml \
+  --policy conservative \
+  --out runs/repro-canary.jsonl
+```
+
+The canary summary reports render failures, timeout rate, cache hit/rejection rates, selector reuse, hidden-candidate rejection rate, and the same safe-local extraction metrics used by model evaluation.
+
+Measure selector reuse with a learn pass followed by a replay pass:
+
+```bash
+semscrape canary corpus/repro_minimized/manifest.yml \
+  --policy conservative \
+  --learn \
+  --cache-dir runs/repro-cache \
+  --out runs/repro-learn-pass1.jsonl
+
+semscrape canary corpus/repro_minimized/manifest.yml \
+  --policy conservative \
+  --cache-dir runs/repro-cache \
+  --out runs/repro-learn-pass2.jsonl
+```
+
+Summarize failure artifacts or a JSONL run:
+
+```bash
+semscrape failures summarize runs/failures-real-canary
+semscrape failures summarize runs/real-canary.jsonl
+```
 
 Sweep strict-mode thresholds to find the best coverage at a target false-positive rate:
 

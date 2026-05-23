@@ -284,6 +284,12 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         model_validated_recovery = [row for row in model_rows if row.get("model_validated_recovery")]
         model_false_positive = [row for row in model_rows if row.get("model_false_positive")]
         model_latencies = [row["model_latency_ms"] for row in model_rows if row.get("model_latency_ms") is not None]
+        cache_attempts = [row for row in model_rows if row.get("cache_attempted")]
+        cache_hits = [row for row in model_rows if row.get("cache_hit")]
+        cache_validated_hits = [row for row in model_rows if row.get("cache_validated_hit")]
+        cache_rejections = [row for row in model_rows if row.get("cache_rejected")]
+        hidden_candidate_rejections = [row for row in model_rows if row.get("hidden_candidate_rejected")]
+        visible_candidate_accepts = [row for row in model_rows if row.get("visible_candidate_accepted")]
         summary[model] = {
             "rows": len(model_rows),
             "expected_present_rows": len(expected_rows),
@@ -303,6 +309,15 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "model_recovery_rate": _rate(len(model_validated_recovery), len(heuristic_abstained)),
             "model_validated_recovery_rate": _rate(len(model_validated_recovery), len(model_called)),
             "model_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "cache_attempts": len(cache_attempts),
+            "cache_hit_rate": _rate(len(cache_hits), len(cache_attempts)),
+            "cache_validated_hit_rate": _rate(len(cache_validated_hits), len(model_rows)),
+            "cache_rejected_rate": _rate(len(cache_rejections), len(cache_attempts)),
+            "selector_reuse_rate": _rate(len(cache_validated_hits), len(model_rows)),
+            "learned_selector_count": sum(int(bool(row.get("learned_selector"))) for row in model_rows),
+            "model_calls_avoided": sum(int(bool(row.get("model_call_avoided"))) for row in model_rows),
+            "hidden_candidate_rejection_rate": _rate(len(hidden_candidate_rejections), len(model_rows)),
+            "visible_candidate_accept_rate": _rate(len(visible_candidate_accepts), len(extracted_rows)),
             "latency_ms_per_field": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
             "end_to_end_latency_p50": _percentile(latencies, 50),
             "end_to_end_latency_p95": _percentile(latencies, 95),

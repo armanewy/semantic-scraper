@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .cache import SelectorCache
 from .dom import generate_candidates
 from .eval_model import (
@@ -326,11 +328,14 @@ def _run_policy_eval_rows(
     rows = []
     candidates = generate_candidates(html)
     for model in args.models:
+        cache_path = getattr(args, "cache_path", None)
+        cache = SelectorCache(cache_path) if cache_path else None
         report_started = time.perf_counter()
         report = extract_html(
             spec,
             html,
             input_name=basename_key(input_ref),
+            cache=cache,
             use_llm=model != "heuristic",
             model=model if model != "heuristic" else "qwen3:1.7b",
             ollama_host=args.ollama_host,
@@ -339,9 +344,9 @@ def _run_policy_eval_rows(
             min_confidence=args.min_confidence,
             min_margin=args.min_margin,
             min_validator_confidence=args.min_validator_confidence,
-            policy="safe-local",
+            policy=getattr(args, "policy", "safe-local"),
             model_on_abstain_only=True,
-            learn=False,
+            learn=bool(getattr(args, "learn", False)),
         )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
@@ -359,7 +364,18 @@ def _run_policy_eval_rows(
             heuristic_accepted = any(item.get("stage") == "strict_heuristic" and item.get("status") == "accepted" for item in extraction.trace)
             heuristic_abstained = any(item.get("stage") == "strict_heuristic" and item.get("status") == "abstained" for item in extraction.trace)
             model_error = any(item.get("stage") == "local_model" and item.get("status") == "error" for item in extraction.trace)
+            cache_attempted = any(item.get("stage") == "cache" and item.get("status") == "attempted" for item in extraction.trace)
+            cache_hit = any(item.get("stage") == "cache" and item.get("status") == "hit" for item in extraction.trace)
+            cache_rejected = any(
+                item.get("stage") == "cache" and item.get("status") in {"miss", "abstained"} and item.get("reason") != "empty"
+                for item in extraction.trace
+            )
+            chosen = next((item for item in ranked if item.candidate.id == extraction.candidate_id), None)
+            hidden_candidate = bool(chosen and chosen.candidate.hidden)
+            base_failure_reason = _policy_failure_reason(extraction, expected_present, candidate_present, correct, model_error)
             row = {
+                "case_id": getattr(args, "case_id", None),
+                "category": getattr(args, "category", None),
                 "spec": spec.name,
                 "fixture": input_ref,
                 "field": field.name,
@@ -400,7 +416,7 @@ def _run_policy_eval_rows(
                 "validator_reasons": extraction.decision.get("validator_reasons", []),
                 "validator_penalties": extraction.decision.get("validator_penalties", []),
                 "hard_disqualifiers": extraction.decision.get("hard_disqualifiers", []),
-                "failure_reason": _policy_failure_reason(extraction, expected_present, candidate_present, correct, model_error),
+                "failure_reason": base_failure_reason,
                 "trace": extraction.trace,
                 "heuristic_accepted": heuristic_accepted,
                 "heuristic_abstained": heuristic_abstained,
@@ -409,7 +425,17 @@ def _run_policy_eval_rows(
                 "model_validated_recovery": bool(model_recovered and correct),
                 "model_false_positive": bool(extraction.source == "model_recovery" and false_positive),
                 "model_error": model_error,
+                "cache_attempted": cache_attempted,
+                "cache_hit": cache_hit,
+                "cache_validated_hit": bool(extraction.source == "cache" and extraction.ok),
+                "cache_rejected": cache_rejected,
+                "learned_selector": bool(getattr(args, "learn", False) and extraction.ok and extraction.source in {"heuristic", "model_recovery", "llm"}),
+                "model_call_avoided": bool(cache_hit or heuristic_accepted),
+                "hidden_candidate_chosen": hidden_candidate,
+                "hidden_candidate_rejected": bool(hidden_candidate and not extraction.ok),
+                "visible_candidate_accepted": bool(extraction.ok and not hidden_candidate),
             }
+            row["failure_reason"] = _triage_failure_reason(row)
             rows.append(row)
             if row["failure_reason"] and failures_dir is not None:
                 failures_dir.mkdir(parents=True, exist_ok=True)
@@ -430,6 +456,31 @@ def _policy_failure_reason(extraction, expected_present: bool, candidate_present
     if extraction.ok and not correct:
         return "model_chose_wrong_candidate" if extraction.source == "model_recovery" else "heuristic_chose_wrong_candidate"
     return None
+
+
+def _triage_failure_reason(row: dict[str, Any]) -> str | None:
+    reason = row.get("failure_reason")
+    if row.get("timeout"):
+        return "render_timeout"
+    if reason is None:
+        return None
+    if row.get("cache_rejected") and row.get("abstained"):
+        return "selector_cache_rejected"
+    if row.get("hidden_candidate_chosen") and row.get("false_positive"):
+        return "hidden_duplicate_chosen"
+    if reason == "candidate_generation_failed":
+        return "candidate_missing"
+    if reason in {"validator_rejected", "validator_disqualified", "low_validator_confidence"}:
+        return "candidate_present_but_validator_rejected"
+    if reason == "ambiguous_candidates":
+        return "candidate_present_but_ranked_too_low" if row.get("candidate_present") else "candidate_missing"
+    if reason == "model_abstained":
+        return "model_abstained_too_often"
+    if reason == "model_chose_wrong_candidate":
+        return "model_chose_wrong_candidate"
+    if reason == "heuristic_chose_wrong_candidate":
+        return "model_chose_wrong_candidate" if row.get("model_called") else "candidate_present_but_ranked_too_low"
+    return reason
 
 
 def _apply_policy_defaults(args: argparse.Namespace) -> None:
@@ -631,17 +682,19 @@ def cmd_canary(args: argparse.Namespace) -> int:
     _apply_policy_defaults(args)
     rows = []
     render_failures = 0
-    total_specs = 0
+    cases = _canary_cases(args.specs)
     failures_dir = Path(args.failures_dir) if args.failures_dir else None
-    for spec_path in _expand_paths(args.specs):
-        total_specs += 1
+    for case in cases:
+        spec_path = case["path"]
         spec = load_spec(spec_path)
-        input_ref = _canary_input_for_spec(spec_path, spec, render=args.render)
+        input_ref = _canary_input_for_case(case, spec, live=bool(args.live or args.render))
         try:
-            html = _load_input(input_ref, render=args.render and _is_url(input_ref), wait_for=args.wait_for)
+            html = _load_input(input_ref, render=_is_url(input_ref), wait_for=args.wait_for)
         except Exception as exc:
             render_failures += 1
             row = {
+                "case_id": case["id"],
+                "category": case.get("category"),
                 "spec": spec.name,
                 "fixture": input_ref,
                 "field": None,
@@ -649,7 +702,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
                 "policy": args.policy,
                 "render_failed": True,
                 "timeout": "timeout" in str(exc).lower(),
-                "failure_reason": "render_failed",
+                "failure_reason": "render_timeout" if "timeout" in str(exc).lower() else "render_failed",
                 "error": str(exc),
             }
             rows.append(row)
@@ -660,23 +713,34 @@ def cmd_canary(args: argparse.Namespace) -> int:
 
         expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
         model = args.model or ("qwen3:1.7b" if args.policy == "safe-local" else "heuristic")
+        cache_path = _canary_cache_path(args, case)
         eval_args = argparse.Namespace(
             models=[model],
+            policy=args.policy,
+            case_id=case["id"],
+            category=case.get("category"),
             top_k=args.top_k,
             ollama_host=args.ollama_host,
             min_confidence=args.min_confidence,
             min_margin=args.min_margin,
             min_validator_confidence=args.min_validator_confidence,
+            cache_path=cache_path,
+            learn=args.learn,
         )
-        rows.extend(_run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir))
+        case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
+        for row in case_rows:
+            row["case_id"] = case["id"]
+            row["category"] = case.get("category")
+        rows.extend(case_rows)
 
     out_path = Path(args.out)
     append_jsonl(out_path, rows)
     summary = summarize_rows([row for row in rows if row.get("field") is not None])
-    render_failure_rate = render_failures / total_specs if total_specs else 0.0
+    render_failure_rate = render_failures / len(cases) if cases else 0.0
     _print_json(
         {
             "out": str(out_path),
+            "cases": len(cases),
             "render_failure_rate": render_failure_rate,
             "timeout_rate": _timeout_rate(rows),
             "summary": summary,
@@ -685,15 +749,56 @@ def cmd_canary(args: argparse.Namespace) -> int:
     return 0
 
 
-def _canary_input_for_spec(spec_path: str, spec, *, render: bool) -> str:
-    if render and spec.metadata.get("url"):
+def _canary_cases(paths: list[str]) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for path in _expand_paths(paths):
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) if Path(path).suffix.lower() in {".yml", ".yaml"} else None
+        if isinstance(raw, dict) and isinstance(raw.get("cases"), list):
+            manifest_dir = Path(path).parent
+            for index, item in enumerate(raw["cases"], start=1):
+                if not isinstance(item, dict) or not item.get("path"):
+                    raise ValueError(f"Manifest case {index} in {path} must include path")
+                case_path = Path(str(item["path"]))
+                if not case_path.is_absolute():
+                    case_path = manifest_dir / case_path
+                case = dict(item)
+                case["path"] = str(case_path)
+                case["id"] = str(case.get("id") or case_path.parent.name or case_path.stem)
+                cases.append(case)
+        else:
+            spec_path = Path(path)
+            cases.append({"id": spec_path.parent.name or spec_path.stem, "path": str(spec_path), "category": None})
+    return cases
+
+
+def _canary_input_for_case(case: dict[str, Any], spec, *, live: bool) -> str:
+    spec_path = str(case["path"])
+    if case.get("input"):
+        raw_input = str(case["input"])
+        if _is_url(raw_input):
+            return raw_input
+        input_path = Path(raw_input)
+        if not input_path.is_absolute():
+            input_path = Path(spec_path).parent / input_path
+        return str(input_path)
+    if live and spec.metadata.get("url"):
         return str(spec.metadata["url"])
     rendered = Path(spec_path).parent / "rendered.html"
     if rendered.exists():
         return str(rendered)
-    if spec.metadata.get("url"):
+    if live and spec.metadata.get("url"):
         return str(spec.metadata["url"])
-    raise ValueError(f"No url or rendered.html for canary spec {spec_path}")
+    raise ValueError(f"No replay input for canary spec {spec_path}; add rendered.html, manifest input, or pass --live")
+
+
+def _canary_cache_path(args: argparse.Namespace, case: dict[str, Any]) -> str | None:
+    if args.cache_dir:
+        cache_dir = Path(args.cache_dir)
+        return str(cache_dir / f"{case['id']}.lock.json")
+    default = SelectorCache.default_path(case["path"])
+    if args.learn or default.exists():
+        return str(default)
+    return None
 
 
 def _timeout_rate(rows: list[dict[str, Any]]) -> float:
@@ -707,6 +812,43 @@ def cmd_cache_clear(args: argparse.Namespace) -> int:
     cache.clear()
     print(f"cleared {args.cache}")
     return 0
+
+
+def cmd_failures_summarize(args: argparse.Namespace) -> int:
+    rows = _load_failure_rows(args.path)
+    counts: dict[str, int] = {}
+    by_category: dict[str, dict[str, int]] = {}
+    for row in rows:
+        reason = _triage_failure_reason(row) or row.get("failure_reason") or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+        category = str(row.get("category") or "unknown")
+        by_category.setdefault(category, {})
+        by_category[category][reason] = by_category[category].get(reason, 0) + 1
+    _print_json(
+        {
+            "path": args.path,
+            "rows": len(rows),
+            "failure_reasons": dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))),
+            "by_category": {category: dict(sorted(items.items())) for category, items in sorted(by_category.items())},
+        }
+    )
+    return 0
+
+
+def _load_failure_rows(path: str) -> list[dict[str, Any]]:
+    target = Path(path)
+    rows: list[dict[str, Any]] = []
+    if target.is_file() and target.suffix.lower() == ".jsonl":
+        return [row for row in read_jsonl(target) if row.get("failure_reason")]
+    files = [target] if target.is_file() else sorted(target.rglob("*.result.json"))
+    for file in files:
+        try:
+            raw = json.loads(file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(raw, dict):
+            rows.append(raw)
+    return rows
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -824,6 +966,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("spec")
     snapshot.add_argument("input", help="URL or local HTML file")
     snapshot.add_argument("--out", required=True)
+    snapshot.add_argument("--render", action="store_true", help="Compatibility flag; URL snapshots render by default")
     snapshot.add_argument("--wait-for", default="body")
     snapshot.add_argument("--screenshot", action="store_true")
     snapshot.add_argument("--candidates", action="store_true")
@@ -838,16 +981,25 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("specs", nargs="+")
     canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
     canary.add_argument("--model", default=None)
-    canary.add_argument("--render", action="store_true")
+    canary.add_argument("--render", action="store_true", help="Deprecated alias for --live")
+    canary.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
     canary.add_argument("--wait-for", default="body")
     canary.add_argument("--top-k", type=int, default=40)
     canary.add_argument("--out", default="runs/real-canary.jsonl")
     canary.add_argument("--failures-dir", default="runs/failures-real-canary")
+    canary.add_argument("--learn", action="store_true", help="Persist accepted selectors for replay reuse measurement")
+    canary.add_argument("--cache-dir", default=None, help="Directory for per-case selector lock files")
     canary.add_argument("--ollama-host", default=None)
     canary.add_argument("--min-confidence", type=float, default=0.75)
     canary.add_argument("--min-margin", type=float, default=0.15)
     canary.add_argument("--min-validator-confidence", type=float, default=0.70)
     canary.set_defaults(func=cmd_canary)
+
+    failures = sub.add_parser("failures", help="Inspect failure artifacts")
+    failure_sub = failures.add_subparsers(dest="failure_cmd", required=True)
+    failure_summary = failure_sub.add_parser("summarize", help="Summarize canary/eval failure reasons")
+    failure_summary.add_argument("path", help="Failure artifact directory or JSONL output")
+    failure_summary.set_defaults(func=cmd_failures_summarize)
 
     cache = sub.add_parser("cache-clear", help="Delete a selector cache/lock file")
     cache.add_argument("cache")

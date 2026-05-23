@@ -204,6 +204,29 @@ Exit criteria:
 
 Status: infrastructure implemented; real-page corpus collection pending.
 
+## M6C: Real canary corpus and failure triage
+
+**Question:** Does safe-local still work on messy replayed DOM snapshots, and what is the next bottleneck?
+
+Deliverables:
+
+- Canary manifest format for grouped replay cases with IDs, categories, specs, and local replay inputs.
+- Replay-first canary behavior; live rendering requires an explicit `--live` flag.
+- Failure summarizer for canary/eval JSONL output and `*.result.json` failure artifacts.
+- Selector reuse metrics: cache attempts, hit rate, validated hits, rejections, learned selector count, and model calls avoided.
+- Rendered/visibility metrics: hidden-candidate rejection and visible-candidate acceptance rates.
+- Repo-safe minimized replay corpus across product, article, listing, pricing, and docs/reference pages.
+
+Exit criteria:
+
+- First replay corpus report generated.
+- false_positive_rate <= 2%.
+- every failed extraction has a reason code from the failure taxonomy.
+- replayed snapshots are deterministic.
+- second pass shows measurable selector reuse when a cache from the learn pass is reused.
+
+Status: implemented for the minimized replay corpus; real third-party page captures should stay local under `corpus/real_local/` unless reduced to repo-safe repro cases.
+
 ## M7: Specialized local ranker
 
 **Question:** Is a tiny specialized model better than generic local LLMs for this task?

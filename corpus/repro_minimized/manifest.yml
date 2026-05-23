@@ -1,0 +1,79 @@
+name: repro_minimized_v1
+description: Repo-safe replay corpus built from minimized pages that mimic real rendered DOM failure modes.
+cases:
+  - id: product_001
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v1.html
+  - id: product_002
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v2_changed_classes.html
+  - id: product_003
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v3_changed_layout.html
+  - id: product_004
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v4_price_near_discount.html
+  - id: product_005
+    category: product
+    path: ../../fixtures/product/simple_card/spec.yml
+    input: v5_multiple_prices.html
+  - id: article_001
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v1.html
+  - id: article_002
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v2_author_moved.html
+  - id: article_003
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v3_date_in_meta.html
+  - id: article_004
+    category: article
+    path: ../../fixtures/article/news_article/spec.yml
+    input: v4_title_changed_tag.html
+  - id: listing_001
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v1.html
+  - id: listing_002
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v2_cards_reordered.html
+  - id: listing_003
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v3_sponsored_results.html
+  - id: listing_004
+    category: listing
+    path: ../../fixtures/listings/search_results/spec.yml
+    input: v4_missing_field.html
+  - id: pricing_001
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v1.html
+  - id: pricing_002
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v2_columns_reordered.html
+  - id: pricing_003
+    category: pricing
+    path: ../../fixtures/tables/pricing_table/spec.yml
+    input: v3_nested_table.html
+  - id: docs_001
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v1.html
+  - id: docs_002
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v2_sidebar_duplicate.html
+  - id: docs_003
+    category: docs
+    path: ../../fixtures/docs/reference/spec.yml
+    input: v3_legacy_command.html
