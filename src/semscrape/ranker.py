@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,11 +22,13 @@ NUMERIC_FEATURES = {
     "validation_passed": 1.0,
     "validation_error_count": 4.0,
     "validator_penalty_count": 5.0,
+    "hard_disqualifier_count": 3.0,
     "hard_disqualified": 1.0,
     "candidate_hidden": 1.0,
     "candidate_depth": 20.0,
     "candidate_text_len": 300.0,
     "candidate_own_text_len": 200.0,
+    "candidate_own_text_ratio": 1.0,
     "candidate_attr_text_len": 200.0,
     "selector_quality": 1.0,
     "has_currency": 1.0,
@@ -36,6 +39,7 @@ NUMERIC_FEATURES = {
     "matches_description_terms": 1.0,
     "positive_context_hits": 8.0,
     "negative_context_hits": 8.0,
+    "own_negative_context_hits": 5.0,
     "visible": 1.0,
     "in_viewport": 1.0,
     "bbox_area": 100000.0,
@@ -75,21 +79,23 @@ class CandidateRanker:
     def train(cls, rows: list[dict[str, Any]], *, threshold: float = 0.70, margin: float = 0.00) -> CandidateRanker:
         if not rows:
             raise RankerError("Cannot train ranker with no rows")
-        vectors = [(feature_vector(row), int(bool(row.get("label")))) for row in rows]
-        pos = [vec for vec, label in vectors if label == 1]
-        neg = [vec for vec, label in vectors if label == 0]
+        vectors = [(feature_vector(row), int(bool(row.get("label"))), _sample_weight(row)) for row in rows]
+        pos = [(vec, weight) for vec, label, weight in vectors if label == 1]
+        neg = [(vec, weight) for vec, label, weight in vectors if label == 0]
         if not pos:
             raise RankerError("Cannot train ranker: dataset has no positive candidate labels")
         if not neg:
             raise RankerError("Cannot train ranker: dataset has no negative candidate labels")
-        feature_names = sorted({name for vec, _ in vectors for name in vec})
+        feature_names = sorted({name for vec, _, _ in vectors for name in vec})
         weights: dict[str, float] = {}
         for name in feature_names:
-            pos_mean = sum(vec.get(name, 0.0) for vec in pos) / len(pos)
-            neg_mean = sum(vec.get(name, 0.0) for vec in neg) / len(neg)
+            pos_mean = _weighted_feature_mean(pos, name)
+            neg_mean = _weighted_feature_mean(neg, name)
             delta = pos_mean - neg_mean
             if abs(delta) >= 0.015:
                 weights[name] = round(delta * 4.0, 8)
+        pos_weight = sum(weight for _, weight in pos)
+        neg_weight = sum(weight for _, weight in neg)
         pos_rate = len(pos) / len(vectors)
         bias = math.log(max(1e-6, pos_rate) / max(1e-6, 1.0 - pos_rate))
         return cls(
@@ -102,6 +108,9 @@ class CandidateRanker:
                 "rows": len(rows),
                 "positives": len(pos),
                 "negatives": len(neg),
+                "hard_negatives": sum(1 for row in rows if row.get("hard_negative")),
+                "positive_weight": round(pos_weight, 4),
+                "negative_weight": round(neg_weight, 4),
                 "trained_at": int(time.time()),
             },
         )
@@ -119,27 +128,44 @@ class CandidateRanker:
         *,
         min_confidence: float | None = None,
         min_margin: float | None = None,
+        min_validator_confidence: float = 0.70,
+        max_penalties: int = 0,
+        require_visible: bool = True,
     ) -> RankerPrediction:
         if not rows:
             return RankerPrediction("abstain", None, 0.0, 0.0, "no_candidates")
         threshold = self.threshold if min_confidence is None else min_confidence
         margin_threshold = self.margin if min_margin is None else min_margin
         scored = sorted(((self.confidence_row(row), row) for row in rows), key=lambda item: item[0], reverse=True)
-        best_conf, best = scored[0]
-        second_conf = scored[1][0] if len(scored) > 1 else 0.0
-        margin = max(0.0, best_conf - second_conf)
-        if best_conf < threshold:
-            return RankerPrediction("abstain", None, best_conf, margin, "low_ranker_confidence", best)
-        if margin < margin_threshold:
-            return RankerPrediction("abstain", None, best_conf, margin, "ambiguous_ranker_candidates", best)
-        return RankerPrediction(
-            "choose",
-            str(best.get("candidate_id")),
-            best_conf,
-            margin,
-            _reason_from_row(best, best_conf, margin),
-            best,
-        )
+        first_blocked: RankerPrediction | None = None
+        for index, (best_conf, best) in enumerate(scored):
+            second_conf = max((score for other_index, (score, _) in enumerate(scored) if other_index != index), default=0.0)
+            margin = max(0.0, best_conf - second_conf)
+            gate_reason = _ranker_gate_reason(
+                best,
+                confidence=best_conf,
+                margin=margin,
+                min_confidence=threshold,
+                min_margin=margin_threshold,
+                min_validator_confidence=min_validator_confidence,
+                max_penalties=max_penalties,
+                require_visible=require_visible,
+            )
+            if gate_reason is None:
+                return RankerPrediction(
+                    "choose",
+                    str(best.get("candidate_id")),
+                    best_conf,
+                    margin,
+                    _reason_from_row(best, best_conf, margin),
+                    best,
+                )
+            blocked = RankerPrediction("abstain", None, best_conf, margin, gate_reason, best)
+            if first_blocked is None:
+                first_blocked = blocked
+            if gate_reason in {"low_ranker_confidence", "low_ranker_margin"}:
+                return blocked
+        return first_blocked or RankerPrediction("abstain", None, 0.0, 0.0, "no_safe_ranker_candidate")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -190,18 +216,48 @@ class CandidateRanker:
 class RankerLocator:
     """Locator-compatible wrapper around a trained candidate ranker."""
 
-    def __init__(self, ranker: CandidateRanker, *, min_confidence: float | None = None, min_margin: float | None = None):
+    def __init__(
+        self,
+        ranker: CandidateRanker,
+        *,
+        min_confidence: float | None = None,
+        min_margin: float | None = None,
+        min_validator_confidence: float = 0.70,
+        max_penalties: int = 0,
+    ):
         self.ranker = ranker
         self.min_confidence = min_confidence
         self.min_margin = min_margin
+        self.min_validator_confidence = min_validator_confidence
+        self.max_penalties = max_penalties
 
     @classmethod
-    def load(cls, path: str | Path, *, min_confidence: float | None = None, min_margin: float | None = None) -> RankerLocator:
-        return cls(CandidateRanker.load(path), min_confidence=min_confidence, min_margin=min_margin)
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        min_confidence: float | None = None,
+        min_margin: float | None = None,
+        min_validator_confidence: float = 0.70,
+        max_penalties: int = 0,
+    ) -> RankerLocator:
+        return cls(
+            CandidateRanker.load(path),
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            max_penalties=max_penalties,
+        )
 
     def choose(self, field: FieldSpec, ranked: list[RankedCandidate]) -> LLMChoice:
         rows = [runtime_candidate_row(field, item, rank, top_k=len(ranked)) for rank, item in enumerate(ranked, start=1)]
-        prediction = self.ranker.choose_rows(rows, min_confidence=self.min_confidence, min_margin=self.min_margin)
+        prediction = self.ranker.choose_rows(
+            rows,
+            min_confidence=self.min_confidence,
+            min_margin=self.min_margin,
+            min_validator_confidence=self.min_validator_confidence,
+            max_penalties=self.max_penalties,
+        )
         if prediction.action == "abstain":
             return LLMChoice(candidate_id=None, confidence=prediction.confidence, reason=prediction.reason, raw={"margin": prediction.margin})
         return LLMChoice(
@@ -242,6 +298,8 @@ def evaluate_ranker_dataset(
     *,
     min_confidence: float | None = None,
     min_margin: float | None = None,
+    min_validator_confidence: float = 0.70,
+    max_penalties: int = 0,
     model_name: str = "ranker",
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -251,7 +309,13 @@ def evaluate_ranker_dataset(
     out: list[dict[str, Any]] = []
     for _example_id, items in sorted(grouped.items()):
         started = time.perf_counter()
-        prediction = ranker.choose_rows(items, min_confidence=min_confidence, min_margin=min_margin)
+        prediction = ranker.choose_rows(
+            items,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            max_penalties=max_penalties,
+        )
         elapsed_ms = int(round((time.perf_counter() - started) * 1000))
         chosen = prediction.row if prediction.action == "choose" else None
         first = items[0]
@@ -294,6 +358,9 @@ def evaluate_ranker_dataset(
                 "proposed_selector": chosen.get("candidate_selector") if chosen else None,
                 "proposed_confidence": prediction.confidence,
                 "proposed_margin": prediction.margin,
+                "ranker_confidence": prediction.confidence,
+                "ranker_margin": prediction.margin,
+                "ranker_reason": prediction.reason,
                 "model_candidate_id": chosen.get("candidate_id") if chosen else None,
                 "model_value": chosen.get("candidate_value") if chosen else None,
                 "model_selector": chosen.get("candidate_selector") if chosen else None,
@@ -320,6 +387,10 @@ def evaluate_ranker_dataset(
                 "validator_penalties": [],
                 "hard_disqualifiers": ["hard_disqualified"] if chosen and chosen.get("hard_disqualified") else [],
                 "failure_reason": failure_reason,
+                "min_ranker_confidence": min_confidence if min_confidence is not None else ranker.threshold,
+                "min_ranker_margin": min_margin if min_margin is not None else ranker.margin,
+                "min_validator_confidence": min_validator_confidence,
+                "max_ranker_penalties": max_penalties,
                 "ranker_called": True,
                 "ranker_recovered": bool(chosen and validated),
                 "ranker_validated_recovery": bool(chosen and validated and correct),
@@ -337,21 +408,34 @@ def calibrate_ranker_dataset(
     *,
     confidence_values: list[float],
     margin_values: list[float],
+    validator_confidence_values: list[float],
+    max_penalty_values: list[int],
     max_false_positive_rate: float = 0.02,
 ) -> list[dict[str, Any]]:
     calibration_rows: list[dict[str, Any]] = []
     for confidence in confidence_values:
         for margin in margin_values:
-            eval_rows = evaluate_ranker_dataset(rows, ranker, min_confidence=confidence, min_margin=margin)
-            calibration_rows.append(
-                {
-                    "model": "ranker",
-                    "min_ranker_confidence": confidence,
-                    "min_ranker_margin": margin,
-                    "max_false_positive_rate": max_false_positive_rate,
-                    **summarize_flat_rows(eval_rows),
-                }
-            )
+            for validator_confidence in validator_confidence_values:
+                for max_penalties in max_penalty_values:
+                    eval_rows = evaluate_ranker_dataset(
+                        rows,
+                        ranker,
+                        min_confidence=confidence,
+                        min_margin=margin,
+                        min_validator_confidence=validator_confidence,
+                        max_penalties=max_penalties,
+                    )
+                    calibration_rows.append(
+                        {
+                            "model": "ranker",
+                            "min_ranker_confidence": confidence,
+                            "min_ranker_margin": margin,
+                            "min_validator_confidence": validator_confidence,
+                            "max_ranker_penalties": max_penalties,
+                            "max_false_positive_rate": max_false_positive_rate,
+                            **summarize_flat_rows(eval_rows),
+                        }
+                    )
     return calibration_rows
 
 
@@ -379,6 +463,160 @@ def feature_vector(row: dict[str, Any]) -> dict[str, float]:
         if value:
             features[f"{name}={value}"] = 1.0
     return features
+
+
+def _weighted_feature_mean(vectors: list[tuple[dict[str, float], float]], name: str) -> float:
+    total_weight = sum(weight for _, weight in vectors)
+    if total_weight <= 0:
+        return 0.0
+    return sum(vec.get(name, 0.0) * weight for vec, weight in vectors) / total_weight
+
+
+def _sample_weight(row: dict[str, Any]) -> float:
+    if row.get("sample_weight") is not None:
+        try:
+            return max(0.0, float(row.get("sample_weight") or 0.0))
+        except (TypeError, ValueError):
+            pass
+    if row.get("label"):
+        return 10.0
+    if row.get("hard_negative"):
+        return 6.0
+    return 1.0
+
+
+def _ranker_gate_reason(
+    row: dict[str, Any],
+    *,
+    confidence: float,
+    margin: float,
+    min_confidence: float,
+    min_margin: float,
+    min_validator_confidence: float,
+    max_penalties: int,
+    require_visible: bool,
+) -> str | None:
+    if confidence < min_confidence:
+        return "low_ranker_confidence"
+    if margin < min_margin:
+        return "low_ranker_margin"
+    if row.get("hard_negative"):
+        return "ranker_hard_negative"
+    if row.get("candidate_hidden"):
+        return "ranker_hidden_candidate"
+    if require_visible and not row.get("visible", True):
+        return "ranker_hidden_candidate"
+    if row.get("hard_disqualified") or int(row.get("hard_disqualifier_count") or 0) > 0:
+        return "ranker_validator_disqualified"
+    if not row.get("validation_passed"):
+        return "ranker_validator_rejected"
+    if float(row.get("validator_confidence") or 0.0) < min_validator_confidence:
+        return "low_validator_confidence"
+    if int(row.get("validator_penalty_count") or 0) > max_penalties:
+        return "ranker_penalty_limit"
+    field_reason = _field_specific_gate_reason(row)
+    if field_reason:
+        return field_reason
+    return None
+
+
+def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    selector = str(row.get("candidate_selector") or "").lower()
+    tag = str(row.get("candidate_tag") or "").lower()
+    value = str(row.get("candidate_value") or "").strip()
+    value_lower = value.lower()
+    context = str(row.get("candidate_context") or "").lower()
+    own_terms = set(row.get("own_negative_terms") or [])
+
+    if _is_title_prompt(prompt):
+        if _looks_like_date(value_lower):
+            return "ranker_title_date_candidate"
+        if any(term in selector or term in value_lower for term in {"author", "byline", "bio", "stock", "available", "availability", "install", "price"}):
+            return "ranker_title_context_required"
+        if not (tag in {"h1", "h2", "h3", "title"} or any(term in selector for term in {"title", "headline", "heading"})):
+            return "ranker_title_context_required"
+
+    if "author" in prompt:
+        if _word_count(value) > 4 or any(term in value_lower for term in {" joined ", " newsroom ", " edited "}):
+            return "ranker_author_bio"
+        if not any(term in selector or term in context for term in {"author", "byline", " by ", "edited by"}):
+            return "ranker_author_context_required"
+
+    if "coupon" in prompt or "promo" in prompt:
+        if "no active coupon" in context or "no coupon" in context:
+            return "ranker_coupon_absent_context"
+        if not any(term in selector or term in context for term in {"coupon", "promo"}):
+            return "ranker_coupon_context_required"
+        if not any(char.isalpha() for char in value):
+            return "ranker_coupon_context_required"
+
+    if "summary" in prompt or "description" in prompt:
+        if tag in {"h1", "h2", "h3", "title"} or _word_count(value) < 8:
+            return "ranker_summary_too_short"
+
+    if field_type == "date" or "published" in prompt:
+        if own_terms.intersection({"updated", "joined", "copyright", "commented", "related article"}):
+            return "ranker_date_negative_context"
+        if _is_broad_container(row, value):
+            return "ranker_broad_container"
+
+    if field_type == "price" and "monthly" in prompt and _looks_like_annual_price(value, context):
+        return "ranker_monthly_annual_conflict"
+
+    if "storage" in prompt and "$" in value:
+        return "ranker_mixed_table_value"
+    if _is_broad_container(row, value) and field_type in {"text", "number", "price"}:
+        return "ranker_broad_container"
+    return None
+
+
+def _is_title_prompt(prompt: str) -> bool:
+    return "title" in prompt or "headline" in prompt or "heading" in prompt
+
+
+def _looks_like_date(value: str) -> bool:
+    return bool(value and any(month in value for month in {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}) and any(char.isdigit() for char in value))
+
+
+def _word_count(value: str) -> int:
+    return len([part for part in value.replace("/", " ").split() if part.strip()])
+
+
+def _is_broad_container(row: dict[str, Any], value: str) -> bool:
+    tag = str(row.get("candidate_tag") or "").lower()
+    if tag not in {"html", "body", "main", "article", "section", "table", "tbody", "tr", "div"}:
+        return False
+    text_len = int(row.get("candidate_text_len") or 0)
+    return text_len > max(60, len(value) * 3)
+
+
+def _looks_like_annual_price(value: str, context: str) -> bool:
+    amount = _money_amount(value)
+    if amount is None or amount <= 0:
+        return False
+    nearby = [_money_amount(match) for match in re.findall(r"[$€£¥₹]\s*\d+(?:[,.]\d+)?", context)]
+    for other in nearby:
+        if other is None or other <= 0 or other >= amount:
+            continue
+        ratio = amount / other
+        if 9.0 <= ratio <= 13.0:
+            return True
+    return False
+
+
+def _money_amount(value: str) -> float | None:
+    match = re.search(r"\d+(?:[,.]\d+)?", value.replace(",", ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
 
 
 def _ranker_failure_reason(
@@ -436,9 +674,18 @@ def evaluate_and_write(
     *,
     min_confidence: float | None = None,
     min_margin: float | None = None,
+    min_validator_confidence: float = 0.70,
+    max_penalties: int = 0,
 ) -> list[dict[str, Any]]:
     rows = read_dataset_jsonl(data_path)
     ranker = CandidateRanker.load(model_path)
-    evaluated = evaluate_ranker_dataset(rows, ranker, min_confidence=min_confidence, min_margin=min_margin)
+    evaluated = evaluate_ranker_dataset(
+        rows,
+        ranker,
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+        max_penalties=max_penalties,
+    )
     write_dataset_jsonl(out_path, evaluated)
     return evaluated

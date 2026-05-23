@@ -354,4 +354,47 @@ Exit criteria:
 - ranker-plus-llm qwen3:1.7b call rate <= 15%.
 - cache_false_positive_rate = 0%.
 
-Status: first implementation added.
+Status: implemented, not passed. Initial canary exposed unsafe `ranker-local` false positives.
+
+## M7B: Ranker calibration and safety gates
+
+**Question:** Can the offline ranker recover coverage without silently accepting near-miss candidates?
+
+Deliverables:
+
+- Hard-negative weighted centroid training.
+- Ranker decision gate with explicit reason codes:
+  - `low_ranker_confidence`
+  - `low_ranker_margin`
+  - `ranker_hidden_candidate`
+  - `ranker_validator_disqualified`
+  - `ranker_validator_rejected`
+  - `low_validator_confidence`
+  - `ranker_penalty_limit`
+  - field-aware gates for titles, summaries, authors, coupons, dates, and monthly-vs-annual prices.
+- Calibration sweep over ranker confidence, ranker margin, validator confidence, and max penalty count.
+- `--target-fpr` alias for ranker calibration.
+- Ranker false-positive diagnostics in reports.
+- `ranker-plus-llm` only falls back to the LLM after safe ranker abstentions; unsafe ranker choices return abstention.
+
+Current minimized drift result:
+
+```text
+ranker-local:
+  coverage_rate:       0.769231
+  false_positive_rate: 0.000000
+  model_call_rate:     0.000000
+  ranker_latency_p95:  2.0 ms
+```
+
+Exit criteria:
+
+- ranker-local coverage >= 65%.
+- ranker-local false_positive_rate <= 2%.
+- ranker-local model_call_rate = 0%.
+- ranker-local p95 latency <= 50 ms/field.
+- ranker-plus-llm false_positive_rate <= 2%.
+- ranker-plus-llm coverage >= M6E safe-local coverage.
+- ranker-plus-llm qwen3:1.7b call rate <= 15%.
+
+Status: ranker-local gate passed; live `ranker-plus-llm` evaluation pending local Ollama availability.

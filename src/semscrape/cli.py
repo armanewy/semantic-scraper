@@ -87,6 +87,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         ranker_path=args.ranker,
         min_ranker_confidence=args.min_ranker_confidence,
         min_ranker_margin=args.min_ranker_margin,
+        max_ranker_penalties=args.max_ranker_penalties,
     )
     if args.values_only:
         _print_json(report.values())
@@ -162,6 +163,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             ranker_path=getattr(args, "ranker", None),
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
+            max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
         )
         expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
         if not expected_for_file and getattr(args, "expect_like", None):
@@ -369,6 +371,7 @@ def _run_policy_eval_rows(
             ranker_path=getattr(args, "ranker", None),
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
+            max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
         )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
@@ -390,6 +393,7 @@ def _run_policy_eval_rows(
             ranker_latencies = [item.get("latency_ms") for item in extraction.trace if item.get("stage") == "ranker" and item.get("latency_ms") is not None]
             ranker_error = any(item.get("stage") == "ranker" and item.get("status") == "error" for item in extraction.trace)
             ranker_recovered = extraction.source == "ranker_recovery" and extraction.ok
+            ranker_event = next((item for item in extraction.trace if item.get("stage") == "ranker" and item.get("status") in {"choose", "abstained", "error"}), {})
             cache_attempted = any(item.get("stage") == "cache" and item.get("status") == "attempted" for item in extraction.trace)
             cache_hit = any(item.get("stage") == "cache" and item.get("status") == "hit" for item in extraction.trace)
             cache_rejected = any(
@@ -427,6 +431,9 @@ def _run_policy_eval_rows(
                 "ranker_candidate_id": extraction.candidate_id if extraction.source == "ranker_recovery" else None,
                 "ranker_value": extraction.value if extraction.source == "ranker_recovery" else None,
                 "ranker_selector": extraction.selector if extraction.source == "ranker_recovery" else None,
+                "ranker_confidence": ranker_event.get("confidence"),
+                "ranker_margin": ranker_event.get("margin"),
+                "ranker_reason": ranker_event.get("reason"),
                 "model_confidence": None,
                 "model_reason": None,
                 "strict": True,
@@ -436,7 +443,7 @@ def _run_policy_eval_rows(
                 "decision_margin": None,
                 "validated": extraction.ok,
                 "correct": correct,
-                "model_choice_correct": bool(extraction.source == "model_recovery" and extraction.candidate_id in [item.candidate.id for item in matching]),
+                "model_choice_correct": bool(extraction.source in {"model_recovery", "ranker_recovery"} and extraction.candidate_id in [item.candidate.id for item in matching]),
                 "abstained": extraction.status == "abstained",
                 "false_positive": false_positive,
                 "latency_ms": elapsed_ms,
@@ -464,6 +471,7 @@ def _run_policy_eval_rows(
                 "ranker_false_positive": bool(extraction.source == "ranker_recovery" and false_positive),
                 "ranker_error": ranker_error,
                 "ranker_choice_correct": bool(extraction.source == "ranker_recovery" and extraction.candidate_id in [item.candidate.id for item in matching]),
+                "max_ranker_penalties": getattr(args, "max_ranker_penalties", 0),
                 "cache_attempted": cache_attempted,
                 "cache_hit": cache_hit,
                 "cache_validated_hit": bool(extraction.source == "cache" and extraction.ok),
@@ -627,7 +635,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not rows:
         print("No rows to report", file=sys.stderr)
         return 2
-    is_calibration = "min_confidence" in rows[0] and "coverage_rate" in rows[0]
+    is_calibration = ("min_confidence" in rows[0] or "min_ranker_confidence" in rows[0]) and "coverage_rate" in rows[0]
     text = _calibration_report(rows) if is_calibration else _eval_report(rows)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(text, encoding="utf-8")
@@ -731,7 +739,11 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
     lines.extend(["", "## Worst false positives", ""])
     if false_positives:
         for row in false_positives[:20]:
-            lines.append(f"- `{row['model']}` `{row['fixture']}` `{row['field']}` expected `{row['expected']}` got `{row['model_value']}`")
+            got = row.get("model_value") or row.get("ranker_value") or row.get("proposed_value")
+            ranker_bits = ""
+            if row.get("ranker_confidence") is not None:
+                ranker_bits = f", ranker_conf={float(row['ranker_confidence']):.3f}, ranker_margin={float(row.get('ranker_margin') or 0.0):.3f}"
+            lines.append(f"- `{row['model']}` `{row['fixture']}` `{row['field']}` expected `{row['expected']}` got `{got}`{ranker_bits}")
     else:
         lines.append("None.")
     return "\n".join(lines) + "\n"
@@ -744,27 +756,50 @@ def _calibration_report(rows: list[dict[str, Any]]) -> str:
         rows_by_model.setdefault(row["model"], []).append(row)
     lines.append("## Best coverage at false_positive_rate <= 0.02")
     lines.append("")
-    lines.append("| model | coverage | false positive | validated accuracy | abstention | min_conf | min_margin | min_validator |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    is_ranker = "min_ranker_confidence" in rows[0]
+    if is_ranker:
+        lines.append("| model | coverage | false positive | validated accuracy | abstention | min_ranker_conf | min_ranker_margin | min_validator | max_penalties |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    else:
+        lines.append("| model | coverage | false positive | validated accuracy | abstention | min_conf | min_margin | min_validator |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for model, model_rows in sorted(rows_by_model.items()):
         viable = [row for row in model_rows if row["false_positive_rate"] <= 0.02]
         viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
         if not viable:
-            lines.append(f"| {model} | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+            if is_ranker:
+                lines.append(f"| {model} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+            else:
+                lines.append(f"| {model} | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
             continue
         best = viable[0]
-        lines.append(
-            f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
-            f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
-            f"{best['min_confidence']:.2f} | {best['min_margin']:.2f} | {best['min_validator_confidence']:.2f} |"
-        )
+        if is_ranker:
+            lines.append(
+                f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
+                f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
+                f"{best['min_ranker_confidence']:.2f} | {best['min_ranker_margin']:.2f} | "
+                f"{best['min_validator_confidence']:.2f} | {best['max_ranker_penalties']} |"
+            )
+        else:
+            lines.append(
+                f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
+                f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
+                f"{best['min_confidence']:.2f} | {best['min_margin']:.2f} | {best['min_validator_confidence']:.2f} |"
+            )
     lines.extend(["", "## Top configurations", ""])
     top = sorted(rows, key=lambda row: (row["false_positive_rate"] <= 0.02, row["coverage_rate"], row["validated_accuracy"]), reverse=True)[:20]
     for row in top:
-        lines.append(
-            f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
-            f"conf={row['min_confidence']:.2f}, margin={row['min_margin']:.2f}, validator={row['min_validator_confidence']:.2f}"
-        )
+        if is_ranker:
+            lines.append(
+                f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
+                f"ranker_conf={row['min_ranker_confidence']:.2f}, ranker_margin={row['min_ranker_margin']:.2f}, "
+                f"validator={row['min_validator_confidence']:.2f}, max_penalties={row['max_ranker_penalties']}"
+            )
+        else:
+            lines.append(
+                f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
+                f"conf={row['min_confidence']:.2f}, margin={row['min_margin']:.2f}, validator={row['min_validator_confidence']:.2f}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -858,6 +893,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             ranker=getattr(args, "ranker", None),
             min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
+            max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
             learn=args.learn,
         )
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
@@ -1044,6 +1080,8 @@ def cmd_ranker_eval(args: argparse.Namespace) -> int:
         ranker,
         min_confidence=args.min_ranker_confidence,
         min_margin=args.min_ranker_margin,
+        min_validator_confidence=args.min_validator_confidence,
+        max_penalties=args.max_ranker_penalties,
         model_name="ranker",
     )
     append_jsonl(Path(args.out), evaluated)
@@ -1059,13 +1097,27 @@ def cmd_ranker_calibrate(args: argparse.Namespace) -> int:
         ranker,
         confidence_values=args.min_ranker_confidence,
         margin_values=args.min_ranker_margin,
+        validator_confidence_values=args.min_validator_confidence,
+        max_penalty_values=args.max_ranker_penalties,
         max_false_positive_rate=args.max_false_positive_rate,
     )
     append_calibration_jsonl(Path(args.out), calibration)
-    viable = [row for row in calibration if row["false_positive_rate"] <= args.max_false_positive_rate]
-    viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
-    _print_json({"out": args.out, "rows": len(calibration), "best_under_fpr": viable[:10]})
+    _print_json(
+        {
+            "out": args.out,
+            "rows": len(calibration),
+            "best_under_fpr": _best_ranker_configs(calibration, args.max_false_positive_rate, limit=10),
+            "best_under_fpr_1pct": _best_ranker_configs(calibration, 0.01, limit=10),
+            "best_zero_fpr": _best_ranker_configs(calibration, 0.0, limit=10),
+        }
+    )
     return 0
+
+
+def _best_ranker_configs(rows: list[dict[str, Any]], max_false_positive_rate: float, *, limit: int) -> list[dict[str, Any]]:
+    viable = [row for row in rows if row["false_positive_rate"] <= max_false_positive_rate]
+    viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
+    return viable[:limit]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1091,6 +1143,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--min-validator-confidence", type=float, default=0.70, help="Strict-mode minimum validator confidence")
     extract.add_argument("--min-ranker-confidence", type=float, default=0.70, help="Minimum ranker confidence before choosing")
     extract.add_argument("--min-ranker-margin", type=float, default=0.00, help="Minimum ranker confidence margin over runner-up")
+    extract.add_argument("--max-ranker-penalties", type=int, default=0, help="Maximum validator penalties allowed for ranker choices")
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
     extract.add_argument("--values-only", action="store_true", help="Print only extracted values")
@@ -1123,6 +1176,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--min-validator-confidence", type=float, default=0.70)
     bench.add_argument("--min-ranker-confidence", type=float, default=0.70)
     bench.add_argument("--min-ranker-margin", type=float, default=0.00)
+    bench.add_argument("--max-ranker-penalties", type=int, default=0)
     bench.add_argument("--values-only", action="store_true")
     bench.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
     bench.add_argument("--render", action="store_true")
@@ -1150,6 +1204,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--min-validator-confidence", type=float, default=0.70)
     eval_model.add_argument("--min-ranker-confidence", type=float, default=0.70)
     eval_model.add_argument("--min-ranker-margin", type=float, default=0.00)
+    eval_model.add_argument("--max-ranker-penalties", type=int, default=0)
     eval_model.add_argument("--out", default="runs/model-eval.jsonl", help="JSONL output path")
     eval_model.add_argument("--failures-dir", default="runs/failures", help="Directory for failure artifacts")
     eval_model.add_argument("--ollama-host", default=None)
@@ -1238,6 +1293,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--min-validator-confidence", type=float, default=0.70)
     canary.add_argument("--min-ranker-confidence", type=float, default=0.70)
     canary.add_argument("--min-ranker-margin", type=float, default=0.00)
+    canary.add_argument("--max-ranker-penalties", type=int, default=0)
     canary.set_defaults(func=cmd_canary)
 
     dataset = sub.add_parser("dataset", help="Build and split labeled candidate-ranking datasets")
@@ -1275,14 +1331,18 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_eval.add_argument("--out", required=True)
     ranker_eval.add_argument("--min-ranker-confidence", type=float, default=None)
     ranker_eval.add_argument("--min-ranker-margin", type=float, default=None)
+    ranker_eval.add_argument("--min-validator-confidence", type=float, default=0.70)
+    ranker_eval.add_argument("--max-ranker-penalties", type=int, default=0)
     ranker_eval.set_defaults(func=cmd_ranker_eval)
 
     ranker_calibrate = ranker_sub.add_parser("calibrate", help="Sweep ranker confidence/margin thresholds")
     ranker_calibrate.add_argument("input")
     ranker_calibrate.add_argument("--model", required=True)
-    ranker_calibrate.add_argument("--min-ranker-confidence", nargs="+", type=float, default=[0.40, 0.50, 0.60, 0.70, 0.80, 0.90])
-    ranker_calibrate.add_argument("--min-ranker-margin", nargs="+", type=float, default=[0.00, 0.03, 0.05, 0.10, 0.15])
-    ranker_calibrate.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    ranker_calibrate.add_argument("--min-ranker-confidence", nargs="+", type=float, default=[0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95])
+    ranker_calibrate.add_argument("--min-ranker-margin", nargs="+", type=float, default=[0.00, 0.05, 0.10, 0.15, 0.20, 0.30])
+    ranker_calibrate.add_argument("--min-validator-confidence", nargs="+", type=float, default=[0.50, 0.60, 0.70, 0.80, 0.90])
+    ranker_calibrate.add_argument("--max-ranker-penalties", nargs="+", type=int, default=[0, 1, 2])
+    ranker_calibrate.add_argument("--max-false-positive-rate", "--target-fpr", dest="max_false_positive_rate", type=float, default=0.02)
     ranker_calibrate.add_argument("--out", required=True)
     ranker_calibrate.set_defaults(func=cmd_ranker_calibrate)
 

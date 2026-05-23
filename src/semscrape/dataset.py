@@ -138,7 +138,11 @@ def candidate_dataset_row(
     negative_terms = _negative_terms(field)
     positive_hits = _term_hits(ctx, positive_terms)
     negative_hits = _term_hits(ctx, negative_terms)
+    own_attr_ctx = " ".join([candidate.own_text, candidate.attr_text, candidate.selector or ""])
+    own_negative_hits = _term_hits(own_attr_ctx, negative_terms)
     selector = candidate.selector or ""
+    hard_negative = bool(not label and _is_hard_negative(field, ranked, own_negative_hits))
+    sample_weight = _sample_weight(label=int(label), hard_negative=hard_negative)
     row = {
         "schema_version": 1,
         "spec": spec.name,
@@ -164,17 +168,20 @@ def candidate_dataset_row(
         "rank_position": rank,
         "top_k": top_k,
         "label": int(label),
-        "hard_negative": bool(not label and _is_hard_negative(field, ranked, negative_hits)),
+        "hard_negative": hard_negative,
+        "sample_weight": sample_weight,
         "heuristic_score": float(ranked.score),
         "validator_confidence": float(ranked.validation.score),
         "validation_passed": bool(ranked.validation.passed),
         "validation_error_count": len(ranked.validation.errors),
         "validator_penalty_count": len(ranked.validation.penalties),
+        "hard_disqualifier_count": len(ranked.validation.hard_disqualifiers),
         "hard_disqualified": bool(ranked.validation.hard_disqualifiers),
         "candidate_hidden": bool(candidate.hidden),
         "candidate_depth": int(candidate.depth),
         "candidate_text_len": len(candidate.text),
         "candidate_own_text_len": len(candidate.own_text),
+        "candidate_own_text_ratio": round(len(candidate.own_text) / max(1, len(candidate.text)), 6),
         "candidate_attr_text_len": len(candidate.attr_text),
         "selector_strategy": selector_strategy(selector),
         "selector_quality": selector_quality(selector),
@@ -186,8 +193,10 @@ def candidate_dataset_row(
         "matches_description_terms": _matches_any(ctx, set(_tokens(field.description))),
         "positive_context_hits": len(positive_hits),
         "negative_context_hits": len(negative_hits),
+        "own_negative_context_hits": len(own_negative_hits),
         "positive_terms": positive_hits,
         "negative_terms": negative_hits,
+        "own_negative_terms": own_negative_hits,
         "visible": bool(rendered.get("visible", not candidate.hidden)),
         "in_viewport": bool(rendered.get("is_in_viewport", rendered.get("in_viewport", True))),
         "bbox_area": _bbox_area(bbox),
@@ -251,9 +260,19 @@ def _is_hard_negative(field: FieldSpec, ranked: RankedCandidate, negative_hits: 
         return True
     if negative_hits:
         return True
+    if len(ranked.validation.penalties) >= 2:
+        return True
     if field.kind == "price" and ranked.value and NUMBER_RE.search(ranked.value) and not CURRENCY_RE.search(ranked.value):
         return True
     return False
+
+
+def _sample_weight(*, label: int, hard_negative: bool) -> float:
+    if label:
+        return 10.0
+    if hard_negative:
+        return 6.0
+    return 1.0
 
 
 def _matches_any(haystack: str, needles: set[str]) -> bool:

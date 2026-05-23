@@ -276,12 +276,24 @@ semscrape ranker eval data/test.jsonl \
   --model models/candidate-ranker.json \
   --out runs/ranker-eval.jsonl
 
+semscrape ranker calibrate data/test.jsonl \
+  --model models/candidate-ranker.json \
+  --target-fpr 0.02 \
+  --out runs/ranker-calibration.jsonl
+
+semscrape canary corpus/repro_minimized/manifest-drift-v2.yml \
+  --policy ranker-local \
+  --ranker models/candidate-ranker.json \
+  --out runs/ranker-local.jsonl
+
 semscrape canary corpus/repro_minimized/manifest-drift-v2.yml \
   --policy ranker-plus-llm \
   --ranker models/candidate-ranker.json \
   --model qwen3:1.7b \
   --out runs/ranker-plus-llm.jsonl
 ```
+
+`ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them.
 
 Generate mutated pages and test candidate recall:
 
