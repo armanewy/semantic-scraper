@@ -1,0 +1,13 @@
+fields:
+  title:
+    description: Product title or product name shown to the shopper
+    type: title
+    expected: "Acme Noise-Canceling Headphones"
+  price:
+    description: Current sale price shown to the shopper
+    type: price
+    expected: "$129.99"
+  rating:
+    description: Customer rating value for this product
+    type: rating
+    expected: "4.7 out of 5 stars"

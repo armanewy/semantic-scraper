@@ -1,0 +1,13 @@
+fields:
+  headline:
+    description: Main article headline
+    type: title
+    expected: "City Council Approves New Transit Plan"
+  author:
+    description: Article author byline
+    type: text
+    expected: "Maya Chen"
+  published_at:
+    description: Publication date for the article
+    type: date
+    expected: "2026-05-21"

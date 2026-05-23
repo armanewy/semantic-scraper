@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semscrape"
+version = "0.1.0"
+description = "Local-first semantic scraper repair prototype"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",
+  "PyYAML>=6.0",
+  "requests>=2.31"
+]
+
+[project.scripts]
+semscrape = "semscrape.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["semscrape*"]
