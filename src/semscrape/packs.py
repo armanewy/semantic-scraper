@@ -84,6 +84,15 @@ def _pack_path(name: str) -> Path:
     safe = name.strip().replace("\\", "/").strip("/")
     if not safe or ".." in safe.split("/"):
         raise ValueError(f"Invalid pack name: {name!r}")
+    direct = Path(name)
+    if direct.exists():
+        if direct.is_dir():
+            for filename in ("pack.yml", "pack.yaml"):
+                candidate = direct / filename
+                if candidate.exists():
+                    return candidate
+            raise FileNotFoundError(f"Pack directory has no pack.yml: {name}")
+        return direct
     candidates = [
         Path("packs") / safe / "pack.yml",
         Path("packs") / safe / "pack.yaml",

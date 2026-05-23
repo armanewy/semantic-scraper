@@ -700,4 +700,73 @@ Exit criteria:
 - Domain-pack defaults can be used locally.
 - Existing alpha CLI workflows still pass.
 
-Status: implemented and smoke-tested. The contribution workflow remains local/offline; no cloud ingestion service is included.
+Status: passed. The contribution workflow remains local/offline; no cloud ingestion service is included.
+
+## M12: Alpha Pilot + Domain Pack Release Loop
+
+**Question:** Can real project usage produce privacy-safe evidence that improves a domain pack/ranker release without regressing false-positive safety?
+
+Deliverables:
+
+- Pilot project layout:
+  - `pilots/ecommerce_alpha_001`
+  - `pilots/articles_alpha_001`
+  - `pilots/listings_alpha_001`
+- `semscrape pilot run` for end-to-end local pilot execution.
+- Pilot artifacts:
+  - `runs/summary.json`
+  - `runs/report.md`
+  - `runs/domain-report.md`
+  - local `evidence.db`
+  - local `evidence-bundle.zip`
+- Generated pilot evidence DBs, bundles, and run outputs are ignored by git.
+- `semscrape pack build`.
+- `semscrape pack info`.
+- `semscrape pack release-check`.
+- `semscrape pack compare`.
+- Pack promotion guardrails for:
+  - candidate recall
+  - holdout coverage
+  - holdout false-positive rate
+  - no FPR regression versus baseline
+  - adversarial false-positive rate
+  - model-call rate
+  - ranker schema compatibility
+  - model-card presence
+- First ecommerce pack release candidate:
+  - `packs/ecommerce-v1`
+
+M12 local pilot result:
+
+```text
+pilots run end-to-end: 3
+pilot evidence records: 11
+pilot labeled records: 11
+bundle audit pass rate: 3/3
+intake accepted records: 11
+intake trust levels: 11 gold
+```
+
+M12 ecommerce-v1 release-check result:
+
+```text
+base holdout candidate_recall@40: 1.000000
+base holdout baseline coverage:   1.000000
+base holdout candidate coverage:  1.000000
+candidate false_positive_rate:    0.000000
+candidate model_call_rate:        0.000000
+adversarial false_positive_rate:  0.000000
+promotion: promote_candidate
+```
+
+Exit criteria:
+
+- At least 3 pilot projects run end-to-end locally.
+- Features-only evidence bundles pass privacy audit.
+- Intake accepts valid bundles and rejects unsafe/tampered bundles.
+- ecommerce-v1 improves or matches baseline holdout coverage.
+- ecommerce-v1 false_positive_rate <= 2%.
+- adversarial false_positive_rate = 0%.
+- no unverified production outputs are used as positive training labels.
+
+Status: passed for the local replay alpha-pilot loop. The pack release candidate is evidence-derived from local pilot bundles and release-checked against the current sealed replay holdouts.

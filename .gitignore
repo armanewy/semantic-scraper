@@ -10,3 +10,7 @@ build/
 runs/
 .semscrape/
 corpus/real_local/
+pilots/**/runs/
+pilots/**/evidence.db
+pilots/**/evidence.db-*
+pilots/**/*.zip

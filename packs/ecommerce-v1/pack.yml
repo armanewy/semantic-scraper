@@ -1,0 +1,29 @@
+name: ecommerce-v1
+description: Domain pack built from trusted evidence intake for ecommerce.
+policy: ranker-local
+ranker: ranker.json
+thresholds:
+  min_confidence: 0.75
+  min_margin: 0.15
+  min_validator_confidence: 0.7
+  min_ranker_confidence: 0.7
+  min_ranker_margin: 0.0
+  max_ranker_penalties: 1
+  llm_fallback_policy: recoverable-only
+validators: validators.yml
+supported_fields: supported-fields.yml
+model_card: model-card.md
+metadata:
+  schema_version: 1
+  built_at: '2026-05-23T21:03:45.385071+00:00'
+  source_intake: m12-alpha-pilot-features-only-intake
+  baseline: packs\ecommerce\pack.yml
+  dataset_rows: 180
+  positives: 20
+  hard_negatives: 54
+  release_check:
+    base_holdout_coverage: 1.0
+    base_holdout_false_positive_rate: 0.0
+    model_call_rate: 0.0
+    adversarial_false_positive_rate: 0.0
+    promotion: promote_candidate

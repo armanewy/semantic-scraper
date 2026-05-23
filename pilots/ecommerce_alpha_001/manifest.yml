@@ -1,0 +1,9 @@
+name: ecommerce_alpha_001
+description: External-style ecommerce alpha pilot using a replayed product storefront.
+cases:
+  - id: ecommerce_alpha_001_product
+    bucket: alpha_pilot
+    category: ecommerce
+    group: ecommerce_alpha_001
+    version: rendered
+    path: ../../corpus/ood/near_domain/product_storefront_001/spec.yml

@@ -1,0 +1,9 @@
+name: listings_alpha_001
+description: External-style listings alpha pilot with sponsored-result and coupon traps.
+cases:
+  - id: listings_alpha_001_market
+    bucket: alpha_pilot
+    category: listings
+    group: listings_alpha_001
+    version: rendered
+    path: ../../corpus/ood/near_domain/listing_market_001/spec.yml

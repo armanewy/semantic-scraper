@@ -1,0 +1,13 @@
+supported_fields:
+  - title
+  - product_title
+  - price
+  - current_price
+  - sale_price
+  - rating
+  - availability
+known_traps:
+  - list price versus current price
+  - shipping and tax values near price
+  - recommended or sponsored product cards
+  - hidden mobile/desktop duplicate product blocks

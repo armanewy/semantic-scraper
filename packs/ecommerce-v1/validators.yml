@@ -1,0 +1,18 @@
+field_presets:
+  product_title:
+    type: text
+    validators:
+      min_length: 3
+      max_length: 160
+      regex_not: ["Sponsored", "Recommended", "Related"]
+  current_price:
+    type: price
+    validators:
+      require_currency: true
+      not_contains: ["shipping", "tax", "installment"]
+  availability:
+    type: text
+    validators:
+      min_length: 2
+      max_length: 100
+      regex_not: ["Shipping from"]

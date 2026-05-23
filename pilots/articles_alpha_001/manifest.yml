@@ -1,0 +1,9 @@
+name: articles_alpha_001
+description: External-style article alpha pilot using a replayed blog/news template.
+cases:
+  - id: articles_alpha_001_blog
+    bucket: alpha_pilot
+    category: articles
+    group: articles_alpha_001
+    version: rendered
+    path: ../../corpus/ood/near_domain/article_blog_001/spec.yml

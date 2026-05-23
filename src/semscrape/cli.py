@@ -5,7 +5,9 @@ import glob
 import importlib.util
 import json
 import platform
+import shutil
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +51,7 @@ from .evidence import (
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
-from .packs import apply_pack_to_args
+from .packs import apply_pack_to_args, load_pack
 from .ranker import (
     CandidateRanker,
     calibrate_ranker_dataset,
@@ -1124,6 +1126,12 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_canary(args: argparse.Namespace) -> int:
+    result = _run_canary(args)
+    _print_json(result)
+    return 0
+
+
+def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
     _apply_pack_defaults(args)
     _apply_policy_defaults(args)
     rows = []
@@ -1206,16 +1214,13 @@ def cmd_canary(args: argparse.Namespace) -> int:
     append_jsonl(out_path, rows)
     summary = summarize_rows([row for row in rows if row.get("field") is not None])
     render_failure_rate = render_failures / len(cases) if cases else 0.0
-    _print_json(
-        {
-            "out": str(out_path),
-            "cases": len(cases),
-            "render_failure_rate": render_failure_rate,
-            "timeout_rate": _timeout_rate(rows),
-            "summary": summary,
-        }
-    )
-    return 0
+    return {
+        "out": str(out_path),
+        "cases": len(cases),
+        "render_failure_rate": render_failure_rate,
+        "timeout_rate": _timeout_rate(rows),
+        "summary": summary,
+    }
 
 
 def _canary_cases(paths: list[str]) -> list[dict[str, Any]]:
@@ -1389,6 +1394,210 @@ def cmd_evidence_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pilot_run(args: argparse.Namespace) -> int:
+    project = Path(args.project)
+    manifest = project / "manifest.yml"
+    if not manifest.exists():
+        raise CliError(f"Pilot project has no manifest.yml: {project}", 2)
+    runs_dir = project / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    evidence_db = Path(args.evidence_db) if args.evidence_db else project / "evidence.db"
+    if args.record_evidence and evidence_db.exists() and not args.append_evidence:
+        evidence_db.unlink()
+    canary_out = runs_dir / "canary.jsonl"
+    report_out = runs_dir / "report.md"
+    summary_out = runs_dir / "summary.json"
+    domain_out = runs_dir / "domain-report.md"
+    bundle_out = project / "evidence-bundle.zip"
+    failures_dir = runs_dir / "failures"
+    _delete_file(canary_out)
+    _delete_file(bundle_out)
+    canary_args = _canary_namespace(
+        specs=[str(manifest)],
+        policy=args.policy,
+        pack=args.pack,
+        out=str(canary_out),
+        failures_dir=str(failures_dir),
+        record_evidence=args.record_evidence,
+        evidence_db=str(evidence_db),
+        evidence_privacy=args.evidence_privacy,
+        top_k=args.top_k,
+        live=args.live,
+    )
+    canary_result = _run_canary(canary_args)
+    rows = read_jsonl(canary_out) if canary_out.exists() else []
+    field_rows = [row for row in rows if row.get("field") is not None]
+    metrics = _first_metrics(field_rows)
+    domain_out.write_text(_domain_report(field_rows) if field_rows else "# semscrape domain envelope\n\nNo field rows.\n", encoding="utf-8", newline="\n")
+    evidence_stats = EvidenceStore(evidence_db).stats() if args.record_evidence else {}
+    bundle_result = None
+    audit_result = None
+    if args.record_evidence:
+        bundle_result = create_evidence_bundle(
+            evidence_db,
+            bundle_out,
+            privacy=args.bundle_privacy,
+            min_trust=args.min_trust,
+            only_labeled=args.only_labeled,
+        )
+        audit_result = audit_evidence_bundle(bundle_out)
+    summary = {
+        "project": str(project),
+        "manifest": str(manifest),
+        "policy": args.policy,
+        "pack": args.pack,
+        "pilot_cases": canary_result["cases"],
+        "fields_attempted": int(metrics.get("rows", 0)),
+        "ranker_local_coverage": metrics.get("coverage_rate", 0.0),
+        "false_positive_rate": metrics.get("false_positive_rate", 0.0),
+        "abstention_rate": metrics.get("abstention_rate", 0.0),
+        "candidate_recall_at_40": metrics.get("candidate_recall_at_k", 0.0),
+        "required_field_success_rate": metrics.get("coverage_rate", 0.0),
+        "evidence_records_created": evidence_stats.get("records", 0),
+        "labeled_records_created": evidence_stats.get("labeled", 0),
+        "bundle_audit_passed": bool(audit_result and audit_result.get("ok")),
+        "bundle": str(bundle_out) if bundle_result else None,
+        "canary": canary_result,
+    }
+    summary_out.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    report_out.write_text(_pilot_report(summary, evidence_stats, audit_result), encoding="utf-8", newline="\n")
+    _print_json({"summary": str(summary_out), "report": str(report_out), "domain_report": str(domain_out), **summary})
+    return 0
+
+
+def cmd_pack_info(args: argparse.Namespace) -> int:
+    try:
+        pack = load_pack(args.pack)
+    except (FileNotFoundError, ValueError) as exc:
+        raise CliError(str(exc), 2) from exc
+    raw = yaml.safe_load(pack.path.read_text(encoding="utf-8")) or {}
+    ranker_info: dict[str, Any] | None = None
+    if pack.ranker:
+        try:
+            ranker_raw = json.loads(Path(pack.ranker).read_text(encoding="utf-8"))
+            ranker_info = {
+                "path": pack.ranker,
+                "schema_version": ranker_raw.get("schema_version"),
+                "type": ranker_raw.get("type"),
+                "feature_count": len(ranker_raw.get("weights") or {}),
+                "threshold": ranker_raw.get("threshold"),
+                "margin": ranker_raw.get("margin"),
+            }
+        except Exception as exc:
+            ranker_info = {"path": pack.ranker, "error": str(exc)}
+    _print_json(
+        {
+            "name": pack.name,
+            "path": str(pack.path),
+            "policy": pack.policy,
+            "ranker": ranker_info,
+            "thresholds": raw.get("thresholds") or {},
+            "validators": _pack_optional_path(pack.path, raw.get("validators")),
+            "supported_fields": _pack_optional_path(pack.path, raw.get("supported_fields")),
+            "model_card": _pack_optional_path(pack.path, raw.get("model_card")),
+        }
+    )
+    return 0
+
+
+def cmd_pack_build(args: argparse.Namespace) -> int:
+    try:
+        baseline = load_pack(args.baseline)
+    except (FileNotFoundError, ValueError) as exc:
+        raise CliError(str(exc), 2) from exc
+    out_dir = Path(args.out)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise CliError(f"Pack output must be a directory: {out_dir}", 2)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    baseline_dir = baseline.path.parent
+    for filename in ("validators.yml", "supported-fields.yml", "thresholds.yml"):
+        source = baseline_dir / filename
+        if source.exists():
+            shutil.copy2(source, out_dir / filename)
+    dataset_path = out_dir / "_candidate-ranking.tmp.jsonl"
+    dataset_summary = write_dataset_from_evidence_export(args.from_intake, dataset_path)
+    rows = read_dataset_jsonl(dataset_path)
+    dataset_summary.pop("out", None)
+    dataset_summary["source_intake"] = str(args.from_intake)
+    try:
+        ranker = CandidateRanker.train(rows, threshold=args.threshold, margin=args.margin)
+    except Exception as exc:
+        raise CliError(f"Could not train pack ranker from intake evidence: {exc}", 2) from exc
+    finally:
+        _delete_file(dataset_path)
+    ranker.metadata = {
+        **(ranker.metadata or {}),
+        "pack": out_dir.name,
+        "baseline_pack": str(baseline.path),
+        "source_intake": str(args.from_intake),
+        "built_at": datetime.now(UTC).isoformat(),
+    }
+    ranker_path = out_dir / "ranker.json"
+    ranker.save(ranker_path)
+    pack_yaml = {
+        "name": out_dir.name,
+        "description": f"Domain pack built from trusted evidence intake for {baseline.name}.",
+        "policy": args.policy or baseline.policy or "ranker-local",
+        "ranker": "ranker.json",
+        "thresholds": _pack_thresholds_dict(baseline),
+        "validators": "validators.yml",
+        "supported_fields": "supported-fields.yml",
+        "model_card": "model-card.md",
+        "metadata": {
+            "schema_version": 1,
+            "built_at": datetime.now(UTC).isoformat(),
+            "source_intake": str(args.from_intake),
+            "baseline": str(baseline.path),
+            "dataset_rows": dataset_summary["rows"],
+            "positives": dataset_summary["positives"],
+            "hard_negatives": dataset_summary["hard_negatives"],
+        },
+    }
+    (out_dir / "pack.yml").write_text(yaml.safe_dump(pack_yaml, sort_keys=False), encoding="utf-8", newline="\n")
+    (out_dir / "model-card.md").write_text(_pack_model_card(out_dir.name, baseline.name, dataset_summary, ranker), encoding="utf-8", newline="\n")
+    _print_json({"out": str(out_dir), "ranker": str(ranker_path), "dataset": dataset_summary})
+    return 0
+
+
+def cmd_pack_release_check(args: argparse.Namespace) -> int:
+    try:
+        result = _pack_release_check(args.baseline, args.pack, args.holdout, args.adversarial, args.out, args)
+    except (FileNotFoundError, ValueError) as exc:
+        raise CliError(str(exc), 2) from exc
+    _print_json(result)
+    return 0
+
+
+def cmd_pack_compare(args: argparse.Namespace) -> int:
+    release_path = Path(args.out).with_suffix(".release-check.json")
+    result = _pack_release_check(args.baseline, args.candidate, args.holdout, args.adversarial, release_path, args)
+    lines = [
+        "# semscrape pack comparison",
+        "",
+        f"- baseline: `{args.baseline}`",
+        f"- candidate: `{args.candidate}`",
+        f"- release_check_passed: `{result['passed']}`",
+        f"- promotion: `{result['promotion']}`",
+        "",
+        "## Metrics",
+        "",
+        "| pack | coverage | false positive | candidate recall | model call |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for label, metrics in (("baseline", result["baseline"]), ("candidate", result["candidate"]), ("adversarial", result["adversarial"])):
+        lines.append(
+            f"| {label} | {metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
+            f"{metrics.get('candidate_recall_at_k', 0.0):.3f} | {metrics.get('model_call_rate', 0.0):.3f} |"
+        )
+    lines.extend(["", "## Gates", ""])
+    for name, passed in result["gates"].items():
+        lines.append(f"- {name}: `{passed}`")
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "release_check": str(release_path), "passed": result["passed"]})
+    return 0
+
+
 def cmd_ranker_model_card(args: argparse.Namespace) -> int:
     try:
         ranker = CandidateRanker.load(args.model)
@@ -1526,6 +1735,235 @@ def _first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     field_rows = [row for row in rows if row.get("field") is not None]
     summary = summarize_rows(field_rows)
     return next(iter(summary.values())) if summary else {}
+
+
+def _canary_namespace(
+    *,
+    specs: list[str],
+    policy: str = "ranker-local",
+    pack: str | None = None,
+    out: str,
+    failures_dir: str,
+    record_evidence: bool = False,
+    evidence_db: str = DEFAULT_EVIDENCE_DB,
+    evidence_privacy: str = "redacted",
+    top_k: int = 40,
+    live: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        specs=specs,
+        policy=policy,
+        pack=pack,
+        model=None,
+        ranker=None,
+        render=False,
+        live=live,
+        wait_for="body",
+        top_k=top_k,
+        out=out,
+        failures_dir=failures_dir,
+        learn=False,
+        cache_dir=None,
+        ollama_host=None,
+        min_confidence=0.75,
+        min_margin=0.15,
+        min_validator_confidence=0.70,
+        min_ranker_confidence=0.70,
+        min_ranker_margin=0.00,
+        max_ranker_penalties=0,
+        llm_fallback_policy="recoverable-only",
+        record_evidence=record_evidence,
+        evidence_db=evidence_db,
+        evidence_privacy=evidence_privacy,
+        _policy_explicit=pack is None,
+        _strict_explicit=False,
+        _use_llm_explicit=False,
+        _model_on_abstain_only_explicit=False,
+        _llm_fallback_policy_explicit=False,
+        _min_confidence_explicit=False,
+        _min_margin_explicit=False,
+        _min_validator_confidence_explicit=False,
+        _min_ranker_confidence_explicit=False,
+        _min_ranker_margin_explicit=False,
+        _max_ranker_penalties_explicit=False,
+    )
+
+
+def _delete_file(path: str | Path) -> None:
+    target = Path(path)
+    if target.exists() and target.is_file():
+        target.unlink()
+
+
+def _pilot_report(summary: dict[str, Any], evidence_stats: dict[str, Any], audit_result: dict[str, Any] | None) -> str:
+    lines = [
+        "# semscrape pilot report",
+        "",
+        "## Summary",
+        "",
+        f"- project: `{summary['project']}`",
+        f"- policy: `{summary['policy']}`",
+        f"- pack: `{summary.get('pack') or 'none'}`",
+        f"- pilot_cases: `{summary['pilot_cases']}`",
+        f"- fields_attempted: `{summary['fields_attempted']}`",
+        f"- coverage: `{summary['ranker_local_coverage']:.6f}`",
+        f"- false_positive_rate: `{summary['false_positive_rate']:.6f}`",
+        f"- candidate_recall_at_40: `{summary['candidate_recall_at_40']:.6f}`",
+        f"- abstention_rate: `{summary['abstention_rate']:.6f}`",
+        "",
+        "## Evidence",
+        "",
+        f"- records: `{evidence_stats.get('records', 0)}`",
+        f"- labeled: `{evidence_stats.get('labeled', 0)}`",
+        f"- false_positives: `{evidence_stats.get('false_positives', 0)}`",
+        f"- bundle_audit_passed: `{bool(audit_result and audit_result.get('ok'))}`",
+    ]
+    if audit_result:
+        lines.extend(["", "## Privacy Audit", ""])
+        report = audit_result.get("privacy_report") or {}
+        for key in sorted(report):
+            lines.append(f"- {key}: `{report[key]}`")
+    return "\n".join(lines) + "\n"
+
+
+def _pack_optional_path(pack_path: Path, value: Any) -> str | None:
+    if not value:
+        return None
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = pack_path.parent / path
+    return str(path) if path.exists() else None
+
+
+def _pack_thresholds_dict(pack: Any) -> dict[str, Any]:
+    return {
+        "min_confidence": pack.min_confidence,
+        "min_margin": pack.min_margin,
+        "min_validator_confidence": pack.min_validator_confidence,
+        "min_ranker_confidence": pack.min_ranker_confidence,
+        "min_ranker_margin": pack.min_ranker_margin,
+        "max_ranker_penalties": pack.max_ranker_penalties,
+        "llm_fallback_policy": pack.llm_fallback_policy,
+    }
+
+
+def _pack_model_card(name: str, baseline: str, dataset_summary: dict[str, Any], ranker: CandidateRanker) -> str:
+    return "\n".join(
+        [
+            f"# {name}",
+            "",
+            "## Summary",
+            "",
+            f"- baseline_pack: `{baseline}`",
+            "- ranker_type: `semscrape_candidate_ranker`",
+            "- schema_version: `1`",
+            f"- feature_count: `{len(ranker.weights)}`",
+            f"- threshold: `{ranker.threshold}`",
+            f"- margin: `{ranker.margin}`",
+            "",
+            "## Training Evidence",
+            "",
+            f"- candidate_rows: `{dataset_summary['rows']}`",
+            f"- positives: `{dataset_summary['positives']}`",
+            f"- hard_negatives: `{dataset_summary['hard_negatives']}`",
+            "",
+            "## Known Limits",
+            "",
+            "- Release checks describe local replay suites, not arbitrary live web pages.",
+            "- Abstention is expected outside the demonstrated domain envelope.",
+            "- Unverified production evidence is excluded from default training exports.",
+            "",
+        ]
+    )
+
+
+def _pack_release_check(
+    baseline_pack: str,
+    candidate_pack: str,
+    holdout: str,
+    adversarial: str,
+    out: str | Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    out_path = Path(out)
+    run_dir = out_path.parent / f"{out_path.stem}-runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    baseline_run = run_dir / "baseline-holdout.jsonl"
+    candidate_run = run_dir / "candidate-holdout.jsonl"
+    adversarial_run = run_dir / "candidate-adversarial.jsonl"
+    for path in (baseline_run, candidate_run, adversarial_run):
+        _delete_file(path)
+    baseline_result = _run_canary(
+        _canary_namespace(specs=[holdout], pack=baseline_pack, out=str(baseline_run), failures_dir=str(run_dir / "baseline-failures"))
+    )
+    candidate_result = _run_canary(
+        _canary_namespace(specs=[holdout], pack=candidate_pack, out=str(candidate_run), failures_dir=str(run_dir / "candidate-failures"))
+    )
+    adversarial_result = _run_canary(
+        _canary_namespace(specs=[adversarial], pack=candidate_pack, out=str(adversarial_run), failures_dir=str(run_dir / "adversarial-failures"))
+    )
+    baseline_metrics = _first_metrics(read_jsonl(baseline_run))
+    candidate_metrics = _first_metrics(read_jsonl(candidate_run))
+    adversarial_metrics = _first_metrics(read_jsonl(adversarial_run))
+    schema_compatible = _pack_ranker_schema(baseline_pack) == _pack_ranker_schema(candidate_pack)
+    model_card_exists = _pack_model_card_exists(candidate_pack)
+    gates = {
+        "candidate_recall": float(candidate_metrics.get("candidate_recall_at_k", 0.0)) >= getattr(args, "min_candidate_recall", 0.95),
+        "coverage_floor": float(candidate_metrics.get("coverage_rate", 0.0)) >= getattr(args, "min_coverage", 0.75),
+        "coverage_not_regressed": float(candidate_metrics.get("coverage_rate", 0.0)) + 1e-9 >= float(baseline_metrics.get("coverage_rate", 0.0)),
+        "false_positive_rate": float(candidate_metrics.get("false_positive_rate", 1.0)) <= getattr(args, "max_false_positive_rate", 0.02),
+        "fpr_not_regressed": float(candidate_metrics.get("false_positive_rate", 1.0)) <= float(baseline_metrics.get("false_positive_rate", 0.0)) + getattr(args, "max_fpr_regression", 0.0),
+        "adversarial_false_positive_rate": float(adversarial_metrics.get("false_positive_rate", 1.0)) <= getattr(args, "max_adversarial_false_positive_rate", 0.0),
+        "model_call_rate": float(candidate_metrics.get("model_call_rate", 1.0)) <= getattr(args, "max_model_call_rate", 0.0),
+        "feature_schema_compatible": schema_compatible,
+        "model_card_exists": model_card_exists,
+    }
+    result = {
+        "passed": all(gates.values()),
+        "baseline_pack": baseline_pack,
+        "candidate_pack": candidate_pack,
+        "holdout": holdout,
+        "adversarial_manifest": adversarial,
+        "runs": {
+            "baseline_holdout": str(baseline_run),
+            "candidate_holdout": str(candidate_run),
+            "candidate_adversarial": str(adversarial_run),
+        },
+        "baseline": baseline_metrics,
+        "candidate": candidate_metrics,
+        "adversarial": adversarial_metrics,
+        "canary_results": {
+            "baseline": baseline_result,
+            "candidate": candidate_result,
+            "adversarial": adversarial_result,
+        },
+        "gates": gates,
+        "promotion": "promote_candidate" if all(gates.values()) else "keep_baseline",
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    return result
+
+
+def _pack_ranker_schema(pack_ref: str) -> tuple[Any, Any]:
+    try:
+        pack = load_pack(pack_ref)
+        if not pack.ranker:
+            return None, None
+        raw = json.loads(Path(pack.ranker).read_text(encoding="utf-8"))
+        return raw.get("type"), raw.get("schema_version")
+    except Exception:
+        return None, None
+
+
+def _pack_model_card_exists(pack_ref: str) -> bool:
+    try:
+        pack = load_pack(pack_ref)
+        raw = yaml.safe_load(pack.path.read_text(encoding="utf-8")) or {}
+        model_card = _pack_optional_path(pack.path, raw.get("model_card"))
+        return bool(model_card and Path(model_card).exists())
+    except Exception:
+        return False
 
 
 def _load_failure_rows(path: str) -> list[dict[str, Any]]:
@@ -1862,6 +2300,63 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("path")
     init.add_argument("--force", action="store_true", help="Overwrite template files if they already exist")
     init.set_defaults(func=cmd_init)
+
+    pilot = sub.add_parser("pilot", help="Run local alpha pilot projects")
+    pilot_sub = pilot.add_subparsers(dest="pilot_cmd", required=True)
+    pilot_run = pilot_sub.add_parser("run", help="Run a pilot project end to end")
+    pilot_run.add_argument("project")
+    pilot_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local")
+    pilot_run.add_argument("--pack", default=None, help="Domain pack name or path")
+    pilot_run.add_argument("--top-k", type=int, default=40)
+    pilot_run.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
+    pilot_run.add_argument("--record-evidence", action=argparse.BooleanOptionalAction, default=True)
+    pilot_run.add_argument("--append-evidence", action="store_true", help="Append to an existing pilot evidence DB instead of starting clean")
+    pilot_run.add_argument("--evidence-db", default=None)
+    pilot_run.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted")
+    pilot_run.add_argument("--bundle-privacy", choices=sorted(PRIVACY_MODES), default="features-only")
+    pilot_run.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
+    pilot_run.add_argument("--only-labeled", action="store_true")
+    pilot_run.set_defaults(func=cmd_pilot_run)
+
+    pack = sub.add_parser("pack", help="Build, inspect, and release-check domain packs")
+    pack_sub = pack.add_subparsers(dest="pack_cmd", required=True)
+    pack_info = pack_sub.add_parser("info", help="Show domain pack metadata")
+    pack_info.add_argument("pack")
+    pack_info.set_defaults(func=cmd_pack_info)
+    pack_build = pack_sub.add_parser("build", help="Build a domain pack from trusted intake evidence")
+    pack_build.add_argument("baseline", help="Baseline pack name or path")
+    pack_build.add_argument("--from-intake", required=True, help="Trusted evidence JSONL from evidence intake")
+    pack_build.add_argument("--out", required=True, help="Output pack directory")
+    pack_build.add_argument("--threshold", type=float, default=0.70)
+    pack_build.add_argument("--margin", type=float, default=0.00)
+    pack_build.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    pack_build.set_defaults(func=cmd_pack_build)
+    pack_release = pack_sub.add_parser("release-check", help="Run pack promotion guardrails")
+    pack_release.add_argument("pack", help="Candidate pack name or path")
+    pack_release.add_argument("--baseline", required=True, help="Baseline pack name or path")
+    pack_release.add_argument("--holdout", default="corpus/base_holdout/manifest.yml")
+    pack_release.add_argument("--adversarial", default="corpus/adversarial_holdout/manifest.yml")
+    pack_release.add_argument("--out", required=True)
+    pack_release.add_argument("--min-candidate-recall", type=float, default=0.95)
+    pack_release.add_argument("--min-coverage", type=float, default=0.75)
+    pack_release.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    pack_release.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    pack_release.add_argument("--max-model-call-rate", type=float, default=0.0)
+    pack_release.add_argument("--max-fpr-regression", type=float, default=0.0)
+    pack_release.set_defaults(func=cmd_pack_release_check)
+    pack_compare = pack_sub.add_parser("compare", help="Compare two packs with release-check metrics")
+    pack_compare.add_argument("baseline")
+    pack_compare.add_argument("candidate")
+    pack_compare.add_argument("--holdout", default="corpus/base_holdout/manifest.yml")
+    pack_compare.add_argument("--adversarial", default="corpus/adversarial_holdout/manifest.yml")
+    pack_compare.add_argument("--out", required=True)
+    pack_compare.add_argument("--min-candidate-recall", type=float, default=0.95)
+    pack_compare.add_argument("--min-coverage", type=float, default=0.75)
+    pack_compare.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    pack_compare.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    pack_compare.add_argument("--max-model-call-rate", type=float, default=0.0)
+    pack_compare.add_argument("--max-fpr-regression", type=float, default=0.0)
+    pack_compare.set_defaults(func=cmd_pack_compare)
 
     inspect = sub.add_parser("inspect", help="Show ranked candidates for one field")
     inspect.add_argument("spec")

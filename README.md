@@ -523,6 +523,43 @@ semscrape canary corpus/base_holdout/manifest.yml \
 
 The initial `ecommerce` pack resolves to the packaged default ranker and conservative `ranker-local` thresholds. Packs are local files today; they are the foundation for future domain-specific rankers, validators, thresholds, and model cards.
 
+## Alpha Pilots And Pack Releases
+
+Pilot projects are local external-style usage cases. A pilot run executes a manifest, records evidence, creates a privacy-safe bundle, audits it, and writes summary/report artifacts:
+
+```bash
+semscrape pilot run pilots/ecommerce_alpha_001 --pack ecommerce
+semscrape pilot run pilots/articles_alpha_001 --policy ranker-local
+semscrape pilot run pilots/listings_alpha_001 --policy ranker-local
+```
+
+Generated pilot evidence DBs, bundles, and run outputs are ignored by git. The checked-in pilot directories keep only the manifest, expected values, and instructions.
+
+The local pack release loop is:
+
+```bash
+semscrape evidence intake \
+  pilots/ecommerce_alpha_001/evidence-bundle.zip \
+  pilots/articles_alpha_001/evidence-bundle.zip \
+  pilots/listings_alpha_001/evidence-bundle.zip \
+  --out runs/m12/pilot-intake.jsonl
+
+semscrape pack build ecommerce \
+  --from-intake runs/m12/pilot-intake.jsonl \
+  --out packs/ecommerce-v1
+
+semscrape pack release-check packs/ecommerce-v1 \
+  --baseline packs/ecommerce \
+  --holdout corpus/base_holdout/manifest.yml \
+  --adversarial corpus/adversarial_holdout/manifest.yml \
+  --out runs/m12/ecommerce-v1-release-check.json
+
+semscrape pack compare packs/ecommerce packs/ecommerce-v1 \
+  --out runs/m12/ecommerce-pack-compare.md
+```
+
+`pack release-check` runs baseline and candidate packs against the sealed base holdout, then runs the candidate against the adversarial holdout. Promotion requires no false-positive regression, adversarial false-positive rate of zero, model-call rate of zero, feature-schema compatibility, and a model card.
+
 Run the M8C OOD hardening workflow:
 
 ```bash
