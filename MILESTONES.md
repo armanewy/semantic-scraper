@@ -385,6 +385,12 @@ ranker-local:
   false_positive_rate: 0.000000
   model_call_rate:     0.000000
   ranker_latency_p95:  2.0 ms
+
+ranker-plus-llm qwen3:1.7b:
+  coverage_rate:       0.846154
+  false_positive_rate: 0.000000
+  model_call_rate:     0.211538
+  model_latency_p95:   16861.0 ms
 ```
 
 Exit criteria:
@@ -397,4 +403,4 @@ Exit criteria:
 - ranker-plus-llm coverage >= M6E safe-local coverage.
 - ranker-plus-llm qwen3:1.7b call rate <= 15%.
 
-Status: ranker-local gate passed; live `ranker-plus-llm` evaluation pending local Ollama availability.
+Status: ranker-local gate passed. Live `ranker-plus-llm` with `qwen3:1.7b` improved coverage with zero false positives, but still misses the qwen call-rate target, so the hybrid gate remains open.

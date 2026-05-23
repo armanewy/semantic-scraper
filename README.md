@@ -47,7 +47,7 @@ This repo is a working milestone-1/milestone-2 project:
 - Replayable rendered-page snapshots and real-page canary evaluation are included.
 - Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
 
-The Ollama integration is implemented but should be validated on your machine because this sandbox does not run an Ollama daemon.
+The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
 ## Install
 
@@ -545,7 +545,7 @@ LLM strict coverage >= heuristic strict
 
 ### Milestone 5 — Local model bakeoff and threshold calibration
 
-Status: calibration/report tooling implemented, needs local Ollama models.
+Status: calibration/report tooling implemented and validated locally with Ollama models.
 
 Goal: Determine whether local models recover coverage from strict-mode abstentions without reintroducing false positives.
 
