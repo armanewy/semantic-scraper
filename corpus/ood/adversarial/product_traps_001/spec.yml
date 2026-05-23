@@ -1,0 +1,32 @@
+name: ood_product_traps_001
+fields:
+  - name: title
+    type: text
+    description: Main product title. The current product title is absent in this snapshot.
+    required: false
+    hints: [product name, main title, h1]
+    validators:
+      min_length: 6
+      max_length: 80
+      regex_not: ["Sponsored", "Recommended"]
+  - name: price
+    type: price
+    description: Current purchase price. The current purchase price is absent in this snapshot.
+    required: false
+    hints: [current price, sale price, buy box]
+    validators:
+      require_currency: true
+      regex_not: ["\\$59\\.00", "\\$6\\.00", "\\$20\\.00"]
+  - name: availability
+    type: text
+    description: Current stock availability. The current availability is absent in this snapshot.
+    required: false
+    hints: [stock, availability]
+    validators:
+      min_length: 4
+      max_length: 40
+benchmarks:
+  rendered.html:
+    title:
+    price:
+    availability:

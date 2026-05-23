@@ -533,6 +533,9 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     context = str(row.get("candidate_context") or "").lower()
     own_terms = set(row.get("own_negative_terms") or [])
 
+    if "first organic" in prompt and _looks_like_later_repeated_result(selector):
+        return "ranker_non_first_organic_candidate"
+
     if _is_title_prompt(prompt):
         if _looks_like_date(value_lower):
             return "ranker_title_date_candidate"
@@ -570,6 +573,11 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
 
     if "storage" in prompt and "$" in value:
         return "ranker_mixed_table_value"
+    if any(term in prompt for term in {"availability", "stock"}):
+        if "$" in value or "shipping from" in value_lower:
+            return "ranker_availability_price_candidate"
+        if not any(term in value_lower for term in {"stock", "ship", "available", "sold out", "backorder"}):
+            return "ranker_availability_context_required"
     if _is_broad_container(row, value) and field_type in {"text", "number", "price"}:
         return "ranker_broad_container"
     return None
@@ -581,6 +589,11 @@ def _is_title_prompt(prompt: str) -> bool:
 
 def _looks_like_date(value: str) -> bool:
     return bool(value and any(month in value for month in {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}) and any(char.isdigit() for char in value))
+
+
+def _looks_like_later_repeated_result(selector: str) -> bool:
+    indexes = [int(match) for match in re.findall(r"(?:article|section|li):nth-of-type\((\d+)\)", selector)]
+    return bool(indexes and max(indexes) >= 3)
 
 
 def _word_count(value: str) -> int:

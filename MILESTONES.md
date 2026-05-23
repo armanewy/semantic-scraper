@@ -440,3 +440,49 @@ Exit criteria:
 - qwen fallback yield >= 55%.
 
 Status: passed on minimized drift canary.
+
+## M8A: Out-of-distribution canary suite
+
+**Question:** Does semscrape remain safe on unseen templates and adversarial drift?
+
+Deliverables:
+
+- `corpus/ood/manifest.yml` with in-domain holdout, near-domain, far-domain, and adversarial buckets.
+- Replay-only OOD cases with committed `spec.yml` and `rendered.html` files.
+- Bucket metadata in canary rows.
+- Field type metadata in canary rows.
+- `semscrape report-domain` for bucketed domain-envelope reports.
+- Narrow safety gates for non-first organic result candidates, availability-price confusion, and ad-region fallback suppression.
+
+Current OOD canary result:
+
+```text
+ranker-local:
+  coverage_rate:       0.666667
+  false_positive_rate: 0.000000
+  model_call_rate:     0.000000
+
+ranker-plus-llm qwen3:1.7b:
+  coverage_rate:       0.703704
+  false_positive_rate: 0.000000
+  model_call_rate:     0.074074
+```
+
+Domain-envelope highlights:
+
+```text
+in_domain_holdout ranker-local coverage: 0.857
+near_domain ranker-local coverage:      0.818
+far_domain ranker-local coverage:       1.000
+adversarial false_positive_rate:        0.000
+```
+
+Exit criteria:
+
+- in-domain holdout ranker-local coverage >= 75%.
+- near-domain ranker-local coverage >= 60%.
+- all buckets false_positive_rate <= 2%.
+- adversarial false_positive_rate = 0%.
+- hybrid improves coverage over ranker-local without exceeding 15% qwen call rate.
+
+Status: passed on initial OOD canary corpus.

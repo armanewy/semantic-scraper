@@ -1,0 +1,30 @@
+name: ood_article_traps_001
+fields:
+  - name: title
+    type: text
+    description: Main article headline. The article headline is absent in this snapshot.
+    required: false
+    hints: [headline, article title, h1]
+    validators:
+      min_length: 8
+      max_length: 120
+      regex_not: ["Related", "Navigation"]
+  - name: author
+    type: text
+    description: Article byline author. The article author is absent in this snapshot.
+    required: false
+    hints: [byline, author, reporter]
+    validators:
+      min_length: 4
+      max_length: 60
+      regex_not: ["Editor", "Staff"]
+  - name: published_at
+    type: date
+    description: Original publication date. The original publication date is absent in this snapshot.
+    required: false
+    hints: [published, publication date, datePublished]
+benchmarks:
+  rendered.html:
+    title:
+    author:
+    published_at:

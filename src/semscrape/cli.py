@@ -413,10 +413,12 @@ def _run_policy_eval_rows(
                 "case_id": getattr(args, "case_id", None),
                 "group": getattr(args, "group", None),
                 "version": getattr(args, "version", None),
+                "bucket": getattr(args, "bucket", None),
                 "category": getattr(args, "category", None),
                 "spec": spec.name,
                 "fixture": input_ref,
                 "field": field.name,
+                "field_type": field.kind,
                 "model": model,
                 "policy": getattr(args, "policy", "safe-local"),
                 "top_k": args.top_k,
@@ -668,6 +670,20 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report_domain(args: argparse.Namespace) -> int:
+    rows: list[dict[str, Any]] = []
+    for path in _expand_paths(args.inputs):
+        rows.extend(read_jsonl(path))
+    rows = [row for row in rows if row.get("field") is not None]
+    if not rows:
+        print("No field rows to report", file=sys.stderr)
+        return 2
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_domain_report(rows), encoding="utf-8")
+    print(f"wrote {args.out}")
+    return 0
+
+
 def cmd_fallback_audit(args: argparse.Namespace) -> int:
     rows = read_jsonl(args.input)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -768,6 +784,64 @@ def _fallback_audit_report(rows: list[dict[str, Any]]) -> str:
             f"{_fallback_outcome(row)} | {str(bool(row.get('model_validated_recovery'))).lower()} | `{value}` |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _domain_report(rows: list[dict[str, Any]]) -> str:
+    lines = ["# semscrape domain envelope", ""]
+    lines.append("## Bucket Metrics")
+    lines.append("")
+    lines.append("| bucket | model | rows | coverage | false positive | candidate recall | model call | ranker call | fallback yield |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    buckets = sorted({_row_bucket(row) for row in rows})
+    models = sorted({str(row.get("model") or "unknown") for row in rows})
+    for bucket in buckets:
+        bucket_rows = [row for row in rows if _row_bucket(row) == bucket]
+        for model in models:
+            subset = [row for row in bucket_rows if str(row.get("model") or "unknown") == model]
+            if not subset:
+                continue
+            metrics = next(iter(summarize_rows(subset).values()))
+            lines.append(
+                f"| {bucket} | {model} | {metrics['rows']} | {metrics['coverage_rate']:.3f} | "
+                f"{metrics['false_positive_rate']:.3f} | {metrics['candidate_recall_at_k']:.3f} | "
+                f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('ranker_call_rate', 0.0):.3f} | "
+                f"{metrics.get('llm_fallback_yield', 0.0):.3f} |"
+            )
+
+    lines.extend(["", "## Field Type Metrics", ""])
+    lines.append("| field type | model | rows | coverage | false positive | abstention | candidate recall |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    field_types = sorted({str(row.get("field_type") or "unknown") for row in rows})
+    for field_type in field_types:
+        type_rows = [row for row in rows if str(row.get("field_type") or "unknown") == field_type]
+        for model in models:
+            subset = [row for row in type_rows if str(row.get("model") or "unknown") == model]
+            if not subset:
+                continue
+            metrics = next(iter(summarize_rows(subset).values()))
+            lines.append(
+                f"| {field_type} | {model} | {metrics['rows']} | {metrics['coverage_rate']:.3f} | "
+                f"{metrics['false_positive_rate']:.3f} | {metrics['abstention_rate']:.3f} | {metrics['candidate_recall_at_k']:.3f} |"
+            )
+
+    lines.extend(["", "## Failure Reasons", ""])
+    for bucket in buckets:
+        lines.append(f"### {bucket}")
+        bucket_rows = [row for row in rows if _row_bucket(row) == bucket]
+        for model in models:
+            subset = [row for row in bucket_rows if str(row.get("model") or "unknown") == model]
+            if not subset:
+                continue
+            metrics = next(iter(summarize_rows(subset).values()))
+            reasons = metrics.get("failure_reasons") or {}
+            reason_text = ", ".join(f"{reason}: {count}" for reason, count in sorted(reasons.items())) if reasons else "none"
+            lines.append(f"- `{model}`: {reason_text}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _row_bucket(row: dict[str, Any]) -> str:
+    return str(row.get("bucket") or row.get("category") or "unbucketed")
 
 
 def _fallback_outcome(row: dict[str, Any]) -> str:
@@ -962,6 +1036,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
                 "case_id": case["id"],
                 "group": case.get("group") or case["id"],
                 "version": case.get("version"),
+                "bucket": case.get("bucket"),
                 "category": case.get("category"),
                 "spec": spec.name,
                 "fixture": input_ref,
@@ -993,6 +1068,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             case_id=case["id"],
             group=case.get("group") or case["id"],
             version=case.get("version"),
+            bucket=case.get("bucket"),
             category=case.get("category"),
             top_k=args.top_k,
             ollama_host=args.ollama_host,
@@ -1012,6 +1088,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             row["case_id"] = case["id"]
             row["group"] = case.get("group") or case["id"]
             row["version"] = case.get("version")
+            row["bucket"] = case.get("bucket")
             row["category"] = case.get("category")
         rows.extend(case_rows)
 
@@ -1357,6 +1434,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--cross-version", action="store_true", help="Label right-side metrics as cross-version transfer metrics")
     compare.add_argument("--out", required=True)
     compare.set_defaults(func=cmd_compare)
+
+    report_domain = sub.add_parser("report-domain", help="Generate a bucketed domain-envelope report from canary/eval JSONL")
+    report_domain.add_argument("inputs", nargs="+", help="Canary/eval JSONL files. Globs are expanded by semscrape.")
+    report_domain.add_argument("--out", required=True)
+    report_domain.set_defaults(func=cmd_report_domain)
 
     fallback = sub.add_parser("fallback", help="Inspect LLM fallback calls")
     fallback_sub = fallback.add_subparsers(dest="fallback_cmd", required=True)

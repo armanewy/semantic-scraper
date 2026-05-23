@@ -543,7 +543,24 @@ def _field_fallback_block_reason(field: FieldSpec, eligible: list[RankedCandidat
             if ("coupon" in ctx or "promo" in ctx) and "no active coupon" not in ctx and re.search(r"[A-Za-z]", value):
                 return None
         return "coupon_absent_context"
+    if "availability" in field_key or "stock" in field_key:
+        if all(_candidate_in_ad_region(item) for item in eligible):
+            return "fallback_ad_region"
     return None
+
+
+def _candidate_in_ad_region(item: RankedCandidate) -> bool:
+    ctx = " ".join(
+        [
+            item.candidate.selector,
+            item.candidate.own_text,
+            item.candidate.attr_text,
+            item.candidate.parent_text,
+            item.candidate.before_text,
+            item.candidate.after_text,
+        ]
+    ).lower()
+    return any(term in ctx for term in {"sponsored", "recommended", " ad ", ".ad", " advertisement"})
 
 
 def extract_field(

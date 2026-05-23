@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from semscrape.cli import cmd_canary, cmd_failures_summarize
+from semscrape.cli import cmd_canary, cmd_failures_summarize, cmd_report_domain
 from semscrape.snapshot import create_snapshot
 
 
@@ -115,3 +115,25 @@ def test_failures_summarize_reads_result_artifacts(tmp_path, capsys):
     assert cmd_failures_summarize(Args()) == 0
     captured = capsys.readouterr().out
     assert "model_abstained_too_often" in captured
+
+
+def test_report_domain_groups_by_bucket(tmp_path):
+    data = tmp_path / "rows.jsonl"
+    data.write_text(
+        "\n".join(
+            [
+                '{"bucket":"near_domain","model":"ranker","field":"price","field_type":"price","expected_present":true,"candidate_present":true,"model_choice_correct":true,"abstained":false,"validated":true,"correct":true,"false_positive":false,"latency_ms":1,"prompt_chars":0,"model_agreement_vs_heuristic":false,"failure_reason":null}',
+                '{"bucket":"adversarial","model":"ranker","field":"price","field_type":"price","expected_present":false,"candidate_present":false,"model_choice_correct":false,"abstained":true,"validated":false,"correct":false,"false_positive":false,"latency_ms":1,"prompt_chars":0,"model_agreement_vs_heuristic":false,"failure_reason":"ranker_abstained"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    class Args:
+        inputs = [str(data)]
+        out = str(tmp_path / "domain.md")
+
+    assert cmd_report_domain(Args()) == 0
+    report = Path(Args.out).read_text(encoding="utf-8")
+    assert "near_domain" in report
+    assert "adversarial" in report

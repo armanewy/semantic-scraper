@@ -1,0 +1,26 @@
+name: ood_event_page_001
+fields:
+  - name: event_title
+    type: text
+    description: Main event name, not venue name or related event.
+    hints: [event title, h1, event name]
+    validators:
+      min_length: 6
+      max_length: 100
+      regex_not: ["Related"]
+  - name: event_date
+    type: date
+    description: Event date, not ticket sale date or updated date.
+    hints: [event date, date, starts]
+  - name: ticket_price
+    type: price
+    description: Standard admission ticket price, not VIP price or service fee.
+    hints: [standard ticket, admission, price]
+    validators:
+      require_currency: true
+      regex_not: ["12\\.00", "99\\.00"]
+benchmarks:
+  rendered.html:
+    event_title: Open Data Summit
+    event_date: June 18, 2026
+    ticket_price: $49.00

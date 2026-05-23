@@ -1,0 +1,29 @@
+name: ood_product_storefront_001
+fields:
+  - name: title
+    type: text
+    description: Main product title, not breadcrumb, recommendation, or page title.
+    hints: [product name, main title, h1]
+    validators:
+      min_length: 6
+      max_length: 80
+      not_contains: [Sponsored, Bundle]
+  - name: price
+    type: price
+    description: Current purchase price, not financing, shipping, list, or bundle price.
+    hints: [current price, sale price, buy box]
+    validators:
+      require_currency: true
+      regex_not: ["\\$4\\.99", "\\$219\\.00", "\\$19\\.00"]
+  - name: availability
+    type: text
+    description: Current stock or shipping availability.
+    hints: [stock, availability, delivery]
+    validators:
+      min_length: 4
+      max_length: 40
+benchmarks:
+  rendered.html:
+    title: Ember Ceramic Kettle
+    price: $179.00
+    availability: In stock

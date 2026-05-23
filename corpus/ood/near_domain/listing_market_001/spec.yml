@@ -1,0 +1,36 @@
+name: ood_listing_market_001
+fields:
+  - name: first_organic_title
+    type: text
+    description: Title of the first organic search result, not sponsored or ad result.
+    hints: [organic result, first result, title]
+    validators:
+      min_length: 6
+      max_length: 80
+      regex_not: ["Sponsored", "Ad"]
+  - name: first_organic_price
+    type: price
+    description: Price of the first organic result, not sponsored listing or shipping.
+    hints: [organic price, result price]
+    validators:
+      require_currency: true
+      regex_not: ["44\\.00", "7\\.00"]
+  - name: first_organic_rating
+    type: number
+    description: Rating of the first organic result.
+    hints: [rating, stars]
+    validators:
+      regex: ["^4\\.6$"]
+  - name: coupon_code
+    type: text
+    required: false
+    description: Coupon code shown on the first organic result. This may be absent.
+    hints: [coupon, promo code]
+    validators:
+      max_length: 20
+benchmarks:
+  rendered.html:
+    first_organic_title: Meridian Travel Tote
+    first_organic_price: $72.00
+    first_organic_rating: "4.6"
+    coupon_code: TOTE15
