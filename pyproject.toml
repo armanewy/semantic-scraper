@@ -25,6 +25,10 @@ dev = [
 render = [
   "playwright>=1.44.0",
 ]
+ranker = [
+  "scikit-learn>=1.4.0",
+  "joblib>=1.4.0",
+]
 
 [project.scripts]
 semscrape = "semscrape.cli:main"

@@ -45,6 +45,7 @@ This repo is a working milestone-1/milestone-2 project:
 - Optional local Ollama candidate chooser is included.
 - Optional Playwright rendering is included for JavaScript pages.
 - Replayable rendered-page snapshots and real-page canary evaluation are included.
+- Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
 
 The Ollama integration is implemented but should be validated on your machine because this sandbox does not run an Ollama daemon.
 
@@ -253,6 +254,33 @@ Generate a Markdown report from eval or calibration output:
 
 ```bash
 semscrape report runs/calibration.jsonl --out runs/calibration.md
+```
+
+Build a tiny offline candidate ranker from replay fixtures:
+
+```bash
+semscrape dataset build corpus/repro_minimized/manifest-drift-v1.yml \
+  corpus/repro_minimized/manifest-drift-v2.yml \
+  --top-k 40 \
+  --out data/candidate-ranking.jsonl
+
+semscrape dataset split data/candidate-ranking.jsonl \
+  --by group \
+  --train-out data/train.jsonl \
+  --test-out data/test.jsonl
+
+semscrape ranker train data/train.jsonl \
+  --out models/candidate-ranker.json
+
+semscrape ranker eval data/test.jsonl \
+  --model models/candidate-ranker.json \
+  --out runs/ranker-eval.jsonl
+
+semscrape canary corpus/repro_minimized/manifest-drift-v2.yml \
+  --policy ranker-plus-llm \
+  --ranker models/candidate-ranker.json \
+  --model qwen3:1.7b \
+  --out runs/ranker-plus-llm.jsonl
 ```
 
 Generate mutated pages and test candidate recall:

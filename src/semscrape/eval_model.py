@@ -284,6 +284,11 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         model_validated_recovery = [row for row in model_rows if row.get("model_validated_recovery")]
         model_false_positive = [row for row in model_rows if row.get("model_false_positive")]
         model_latencies = [row["model_latency_ms"] for row in model_rows if row.get("model_latency_ms") is not None]
+        ranker_called = [row for row in model_rows if row.get("ranker_called")]
+        ranker_validated_recovery = [row for row in model_rows if row.get("ranker_validated_recovery")]
+        ranker_false_positive = [row for row in model_rows if row.get("ranker_false_positive")]
+        ranker_error_rows = [row for row in model_rows if row.get("ranker_error")]
+        ranker_latencies = [row["ranker_latency_ms"] for row in model_rows if row.get("ranker_latency_ms") is not None]
         cache_attempts = [row for row in model_rows if row.get("cache_attempted")]
         cache_hits = [row for row in model_rows if row.get("cache_hit")]
         cache_validated_hits = [row for row in model_rows if row.get("cache_validated_hit")]
@@ -310,6 +315,11 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "model_recovery_rate": _rate(len(model_validated_recovery), len(heuristic_abstained)),
             "model_validated_recovery_rate": _rate(len(model_validated_recovery), len(model_called)),
             "model_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "ranker_call_rate": _rate(len(ranker_called), len(model_rows)),
+            "ranker_recovery_rate": _rate(len(ranker_validated_recovery), len(ranker_called)),
+            "ranker_false_positive_rate": _rate(len(ranker_false_positive), len(ranker_called)),
+            "ranker_error_rate": _rate(len(ranker_error_rows), len(model_rows)),
+            "qwen_calls_avoided_by_ranker": sum(int(bool(row.get("ranker_validated_recovery"))) for row in model_rows),
             "cache_attempts": len(cache_attempts),
             "cache_hit_rate": _rate(len(cache_hits), len(cache_attempts)),
             "cache_validated_hit_rate": _rate(len(cache_validated_hits), len(model_rows)),
@@ -326,6 +336,8 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "end_to_end_latency_p95": _percentile(latencies, 95),
             "model_latency_p50": _percentile(model_latencies, 50),
             "model_latency_p95": _percentile(model_latencies, 95),
+            "ranker_latency_p50": _percentile(ranker_latencies, 50),
+            "ranker_latency_p95": _percentile(ranker_latencies, 95),
             "prompt_chars_per_field": round(sum(prompt_chars) / len(prompt_chars), 2) if prompt_chars else 0.0,
             "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in model_rows), len(model_rows)),
             "failure_reasons": dict(_counts(row["failure_reason"] for row in model_rows if row["failure_reason"])),

@@ -10,6 +10,12 @@ from typing import Any
 import yaml
 
 from .cache import SelectorCache
+from .dataset import (
+    build_candidate_dataset_rows,
+    read_dataset_jsonl,
+    split_dataset_rows,
+    write_dataset_jsonl,
+)
 from .dom import generate_candidates
 from .drift import DRIFT_PROFILES, write_drift
 from .eval_model import (
@@ -25,6 +31,12 @@ from .eval_model import (
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
+from .ranker import (
+    CandidateRanker,
+    calibrate_ranker_dataset,
+    evaluate_ranker_dataset,
+    train_ranker_from_jsonl,
+)
 from .render import enrich_candidates_from_rendered_page, fetch_url, render_url
 from .snapshot import create_snapshot
 from .spec import load_spec
@@ -72,6 +84,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
         policy=args.policy,
         model_on_abstain_only=args.model_on_abstain_only,
         learn=args.learn,
+        ranker_path=args.ranker,
+        min_ranker_confidence=args.min_ranker_confidence,
+        min_ranker_margin=args.min_ranker_margin,
     )
     if args.values_only:
         _print_json(report.values())
@@ -144,6 +159,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             policy=args.policy,
             model_on_abstain_only=args.model_on_abstain_only,
             learn=False,
+            ranker_path=getattr(args, "ranker", None),
+            min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
+            min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
         )
         expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
         if not expected_for_file and getattr(args, "expect_like", None):
@@ -290,7 +308,7 @@ def _run_eval_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list
             expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
             if not expected_for_file and args.expect_like:
                 expected_for_file = spec.benchmarks.get(args.expect_like, {})
-            if getattr(args, "policy", None) == "safe-local":
+            if getattr(args, "policy", None) in {"safe-local", "ranker-local", "ranker-plus-llm"}:
                 rows.extend(_run_policy_eval_rows(args, spec, input_ref, html, expected_for_file, failures_dir))
             else:
                 for field in spec.fields:
@@ -337,8 +355,8 @@ def _run_policy_eval_rows(
             html,
             input_name=basename_key(input_ref),
             cache=cache,
-            use_llm=model != "heuristic",
-            model=model if model != "heuristic" else "qwen3:1.7b",
+            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") != "ranker-local",
+            model=model if model not in {"heuristic", "ranker"} else "qwen3:1.7b",
             ollama_host=args.ollama_host,
             top_k=args.top_k,
             strict=True,
@@ -348,6 +366,9 @@ def _run_policy_eval_rows(
             policy=getattr(args, "policy", "safe-local"),
             model_on_abstain_only=True,
             learn=bool(getattr(args, "learn", False)),
+            ranker_path=getattr(args, "ranker", None),
+            min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
+            min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
         )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
@@ -365,6 +386,10 @@ def _run_policy_eval_rows(
             heuristic_accepted = any(item.get("stage") == "strict_heuristic" and item.get("status") == "accepted" for item in extraction.trace)
             heuristic_abstained = any(item.get("stage") == "strict_heuristic" and item.get("status") == "abstained" for item in extraction.trace)
             model_error = any(item.get("stage") == "local_model" and item.get("status") == "error" for item in extraction.trace)
+            ranker_called = any(item.get("stage") == "ranker" for item in extraction.trace)
+            ranker_latencies = [item.get("latency_ms") for item in extraction.trace if item.get("stage") == "ranker" and item.get("latency_ms") is not None]
+            ranker_error = any(item.get("stage") == "ranker" and item.get("status") == "error" for item in extraction.trace)
+            ranker_recovered = extraction.source == "ranker_recovery" and extraction.ok
             cache_attempted = any(item.get("stage") == "cache" and item.get("status") == "attempted" for item in extraction.trace)
             cache_hit = any(item.get("stage") == "cache" and item.get("status") == "hit" for item in extraction.trace)
             cache_rejected = any(
@@ -384,7 +409,7 @@ def _run_policy_eval_rows(
                 "fixture": input_ref,
                 "field": field.name,
                 "model": model,
-                "policy": "safe-local",
+                "policy": getattr(args, "policy", "safe-local"),
                 "top_k": args.top_k,
                 "expected": expected,
                 "expected_present": expected_present,
@@ -399,6 +424,9 @@ def _run_policy_eval_rows(
                 "model_candidate_id": extraction.candidate_id if extraction.source == "model_recovery" else None,
                 "model_value": extraction.value if extraction.source == "model_recovery" else None,
                 "model_selector": extraction.selector if extraction.source == "model_recovery" else None,
+                "ranker_candidate_id": extraction.candidate_id if extraction.source == "ranker_recovery" else None,
+                "ranker_value": extraction.value if extraction.source == "ranker_recovery" else None,
+                "ranker_selector": extraction.selector if extraction.source == "ranker_recovery" else None,
                 "model_confidence": None,
                 "model_reason": None,
                 "strict": True,
@@ -413,6 +441,7 @@ def _run_policy_eval_rows(
                 "false_positive": false_positive,
                 "latency_ms": elapsed_ms,
                 "model_latency_ms": model_latencies[0] if model_latencies else None,
+                "ranker_latency_ms": ranker_latencies[0] if ranker_latencies else None,
                 "prompt_chars": 0,
                 "model_agreement_vs_heuristic": False,
                 "validation_errors": extraction.validation_errors,
@@ -429,6 +458,12 @@ def _run_policy_eval_rows(
                 "model_validated_recovery": bool(model_recovered and correct),
                 "model_false_positive": bool(extraction.source == "model_recovery" and false_positive),
                 "model_error": model_error,
+                "ranker_called": ranker_called,
+                "ranker_recovered": ranker_recovered,
+                "ranker_validated_recovery": bool(ranker_recovered and correct),
+                "ranker_false_positive": bool(extraction.source == "ranker_recovery" and false_positive),
+                "ranker_error": ranker_error,
+                "ranker_choice_correct": bool(extraction.source == "ranker_recovery" and extraction.candidate_id in [item.candidate.id for item in matching]),
                 "cache_attempted": cache_attempted,
                 "cache_hit": cache_hit,
                 "cache_validated_hit": bool(extraction.source == "cache" and extraction.ok),
@@ -436,8 +471,8 @@ def _run_policy_eval_rows(
                 "cache_rejection_reason": cache_event.get("reason") if cache_rejected else None,
                 "selector_strategy": cache_event.get("strategy"),
                 "cache_false_positive": bool(extraction.source == "cache" and false_positive),
-                "learned_selector": bool(getattr(args, "learn", False) and extraction.ok and extraction.source in {"heuristic", "model_recovery", "llm"}),
-                "model_call_avoided": bool(cache_hit or heuristic_accepted),
+                "learned_selector": bool(getattr(args, "learn", False) and extraction.ok and extraction.source in {"heuristic", "model_recovery", "ranker_recovery", "llm"}),
+                "model_call_avoided": bool(cache_hit or heuristic_accepted or ranker_recovered),
                 "hidden_candidate_chosen": hidden_candidate,
                 "hidden_candidate_rejected": bool(hidden_candidate and not extraction.ok),
                 "visible_candidate_accepted": bool(extraction.ok and not hidden_candidate),
@@ -461,7 +496,9 @@ def _policy_failure_reason(extraction, expected_present: bool, candidate_present
     if not expected_present and extraction.ok:
         return "false_positive_missing_field"
     if extraction.ok and not correct:
-        return "model_chose_wrong_candidate" if extraction.source == "model_recovery" else "heuristic_chose_wrong_candidate"
+        if extraction.source == "model_recovery":
+            return "model_chose_wrong_candidate"
+        return "ranker_chose_wrong_candidate" if extraction.source == "ranker_recovery" else "heuristic_chose_wrong_candidate"
     return None
 
 
@@ -485,6 +522,8 @@ def _triage_failure_reason(row: dict[str, Any]) -> str | None:
         return "model_abstained_too_often"
     if reason == "model_chose_wrong_candidate":
         return "model_chose_wrong_candidate"
+    if reason == "ranker_chose_wrong_candidate":
+        return "ranker_chose_wrong_candidate"
     if reason == "heuristic_chose_wrong_candidate":
         return "model_chose_wrong_candidate" if row.get("model_called") else "candidate_present_but_ranked_too_low"
     return reason
@@ -500,7 +539,7 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
     if defaults is None:
         raise ValueError(f"Unknown policy {policy!r}; expected one of {', '.join(sorted(POLICY_DEFAULTS))}")
     args.policy = policy
-    if policy in {"safe-local", "aggressive"}:
+    if policy in {"safe-local", "aggressive", "ranker-plus-llm"}:
         args.model = getattr(args, "model", None) or "qwen3:1.7b"
     if not getattr(args, "_strict_explicit", False):
         args.strict = bool(defaults["strict"])
@@ -655,15 +694,16 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
     lines = ["# semscrape model evaluation", ""]
     lines.append("## Overall metrics")
     lines.append("")
-    lines.append("| model | coverage | false positive | validated accuracy | abstention | model call | model recovery | selector reuse | cache fp | model error | model p50 ms | e2e p95 ms |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| model | coverage | false positive | validated accuracy | abstention | model call | ranker call | model recovery | ranker recovery | selector reuse | cache fp | model error | ranker p95 ms | model p50 ms | e2e p95 ms |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for model, metrics in summary.items():
         lines.append(
             f"| {model} | {metrics['coverage_rate']:.3f} | {metrics['false_positive_rate']:.3f} | "
             f"{metrics['validated_accuracy']:.3f} | {metrics['abstention_rate']:.3f} | "
-            f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('model_recovery_rate', 0.0):.3f} | "
+            f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('ranker_call_rate', 0.0):.3f} | "
+            f"{metrics.get('model_recovery_rate', 0.0):.3f} | {metrics.get('ranker_recovery_rate', 0.0):.3f} | "
             f"{metrics.get('selector_reuse_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
-            f"{metrics['model_error_rate']:.3f} | {metrics.get('model_latency_p50', 0.0):.1f} | "
+            f"{metrics['model_error_rate']:.3f} | {metrics.get('ranker_latency_p95', 0.0):.1f} | {metrics.get('model_latency_p50', 0.0):.1f} | "
             f"{metrics.get('end_to_end_latency_p95', metrics['latency_ms_per_field']):.1f} |"
         )
     lines.extend(["", "## Selector strategies", ""])
@@ -795,7 +835,12 @@ def cmd_canary(args: argparse.Namespace) -> int:
             continue
 
         expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
-        model = args.model or ("qwen3:1.7b" if args.policy == "safe-local" else "heuristic")
+        if args.policy == "ranker-local":
+            model = args.model or "ranker"
+        elif args.policy in {"safe-local", "ranker-plus-llm"}:
+            model = args.model or "qwen3:1.7b"
+        else:
+            model = args.model or "heuristic"
         cache_path = _canary_cache_path(args, case)
         eval_args = argparse.Namespace(
             models=[model],
@@ -810,6 +855,9 @@ def cmd_canary(args: argparse.Namespace) -> int:
             min_margin=args.min_margin,
             min_validator_confidence=args.min_validator_confidence,
             cache_path=cache_path,
+            ranker=getattr(args, "ranker", None),
+            min_ranker_confidence=getattr(args, "min_ranker_confidence", 0.70),
+            min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             learn=args.learn,
         )
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
@@ -943,6 +991,83 @@ def _load_failure_rows(path: str) -> list[dict[str, Any]]:
     return rows
 
 
+def cmd_dataset_build(args: argparse.Namespace) -> int:
+    rows: list[dict[str, Any]] = []
+    cases = _canary_cases(args.paths)
+    for case in cases:
+        spec_path = case["path"]
+        spec = load_spec(spec_path)
+        input_ref = _canary_input_for_case(case, spec, live=bool(args.live or args.render))
+        html = _load_input(input_ref, render=_is_url(input_ref), wait_for=args.wait_for)
+        expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
+        rows.extend(
+            build_candidate_dataset_rows(
+                spec=spec,
+                input_ref=input_ref,
+                html=html,
+                expected_for_file=expected_for_file,
+                case_id=case.get("id"),
+                group=case.get("group") or case.get("id"),
+                version=case.get("version"),
+                category=case.get("category"),
+                top_k=args.top_k,
+            )
+        )
+    write_dataset_jsonl(args.out, rows)
+    positives = sum(int(bool(row.get("label"))) for row in rows)
+    hard_negatives = sum(int(bool(row.get("hard_negative"))) for row in rows)
+    _print_json({"out": args.out, "rows": len(rows), "positives": positives, "hard_negatives": hard_negatives})
+    return 0
+
+
+def cmd_dataset_split(args: argparse.Namespace) -> int:
+    rows = read_dataset_jsonl(args.input)
+    train, test = split_dataset_rows(rows, by=args.by, train_ratio=args.train_ratio, seed=args.seed)
+    write_dataset_jsonl(args.train_out, train)
+    write_dataset_jsonl(args.test_out, test)
+    _print_json({"train_out": args.train_out, "test_out": args.test_out, "train_rows": len(train), "test_rows": len(test), "split_by": args.by})
+    return 0
+
+
+def cmd_ranker_train(args: argparse.Namespace) -> int:
+    ranker = train_ranker_from_jsonl(args.input, threshold=args.min_ranker_confidence, margin=args.min_ranker_margin)
+    ranker.save(args.out)
+    _print_json({"out": args.out, "metadata": ranker.metadata, "features": len(ranker.weights), "threshold": ranker.threshold, "margin": ranker.margin})
+    return 0
+
+
+def cmd_ranker_eval(args: argparse.Namespace) -> int:
+    rows = read_dataset_jsonl(args.input)
+    ranker = CandidateRanker.load(args.model)
+    evaluated = evaluate_ranker_dataset(
+        rows,
+        ranker,
+        min_confidence=args.min_ranker_confidence,
+        min_margin=args.min_ranker_margin,
+        model_name="ranker",
+    )
+    append_jsonl(Path(args.out), evaluated)
+    _print_json({"out": args.out, "summary": summarize_rows(evaluated)})
+    return 0
+
+
+def cmd_ranker_calibrate(args: argparse.Namespace) -> int:
+    rows = read_dataset_jsonl(args.input)
+    ranker = CandidateRanker.load(args.model)
+    calibration = calibrate_ranker_dataset(
+        rows,
+        ranker,
+        confidence_values=args.min_ranker_confidence,
+        margin_values=args.min_ranker_margin,
+        max_false_positive_rate=args.max_false_positive_rate,
+    )
+    append_calibration_jsonl(Path(args.out), calibration)
+    viable = [row for row in calibration if row["false_positive_rate"] <= args.max_false_positive_rate]
+    viable.sort(key=lambda row: (row["coverage_rate"], row["validated_accuracy"]), reverse=True)
+    _print_json({"out": args.out, "rows": len(calibration), "best_under_fpr": viable[:10]})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = ExplicitDefaultsParser(
         prog="semscrape",
@@ -955,6 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("input")
     extract.add_argument("--no-llm", action="store_true", help="Do not call the local Ollama model")
     extract.add_argument("--model", default=None, help="Ollama model name")
+    extract.add_argument("--ranker", default=None, help="Path to a trained semscrape candidate-ranker JSON model")
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
@@ -963,6 +1089,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
     extract.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
     extract.add_argument("--min-validator-confidence", type=float, default=0.70, help="Strict-mode minimum validator confidence")
+    extract.add_argument("--min-ranker-confidence", type=float, default=0.70, help="Minimum ranker confidence before choosing")
+    extract.add_argument("--min-ranker-margin", type=float, default=0.00, help="Minimum ranker confidence margin over runner-up")
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
     extract.add_argument("--values-only", action="store_true", help="Print only extracted values")
@@ -984,6 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("inputs", nargs="+")
     bench.add_argument("--no-llm", action="store_true")
     bench.add_argument("--model", default=None)
+    bench.add_argument("--ranker", default=None)
     bench.add_argument("--ollama-host", default=None)
     bench.add_argument("--top-k", type=int, default=40)
     bench.add_argument("--strict", action="store_true")
@@ -992,6 +1121,8 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--min-confidence", type=float, default=0.75)
     bench.add_argument("--min-margin", type=float, default=0.15)
     bench.add_argument("--min-validator-confidence", type=float, default=0.70)
+    bench.add_argument("--min-ranker-confidence", type=float, default=0.70)
+    bench.add_argument("--min-ranker-margin", type=float, default=0.00)
     bench.add_argument("--values-only", action="store_true")
     bench.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
     bench.add_argument("--render", action="store_true")
@@ -1011,11 +1142,14 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("paths", nargs="+", help="YAML specs and optional HTML inputs. Globs are expanded by semscrape.")
     eval_model.add_argument("--models", nargs="+", required=True, help="Ollama model names, or 'heuristic' for a no-LLM baseline")
     eval_model.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    eval_model.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker-local/ranker-plus-llm policies")
     eval_model.add_argument("--top-k", type=int, default=40)
     eval_model.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
     eval_model.add_argument("--min-confidence", type=float, default=0.75)
     eval_model.add_argument("--min-margin", type=float, default=0.15)
     eval_model.add_argument("--min-validator-confidence", type=float, default=0.70)
+    eval_model.add_argument("--min-ranker-confidence", type=float, default=0.70)
+    eval_model.add_argument("--min-ranker-margin", type=float, default=0.00)
     eval_model.add_argument("--out", default="runs/model-eval.jsonl", help="JSONL output path")
     eval_model.add_argument("--failures-dir", default="runs/failures", help="Directory for failure artifacts")
     eval_model.add_argument("--ollama-host", default=None)
@@ -1089,6 +1223,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("specs", nargs="+")
     canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
     canary.add_argument("--model", default=None)
+    canary.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker policies")
     canary.add_argument("--render", action="store_true", help="Deprecated alias for --live")
     canary.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
     canary.add_argument("--wait-for", default="body")
@@ -1101,7 +1236,55 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--min-confidence", type=float, default=0.75)
     canary.add_argument("--min-margin", type=float, default=0.15)
     canary.add_argument("--min-validator-confidence", type=float, default=0.70)
+    canary.add_argument("--min-ranker-confidence", type=float, default=0.70)
+    canary.add_argument("--min-ranker-margin", type=float, default=0.00)
     canary.set_defaults(func=cmd_canary)
+
+    dataset = sub.add_parser("dataset", help="Build and split labeled candidate-ranking datasets")
+    dataset_sub = dataset.add_subparsers(dest="dataset_cmd", required=True)
+    dataset_build = dataset_sub.add_parser("build", help="Build candidate-ranking JSONL from specs/manifests")
+    dataset_build.add_argument("paths", nargs="+", help="Spec paths or manifest paths")
+    dataset_build.add_argument("--top-k", type=int, default=40)
+    dataset_build.add_argument("--out", required=True)
+    dataset_build.add_argument("--render", action="store_true", help="Deprecated alias for --live")
+    dataset_build.add_argument("--live", action="store_true", help="Render live URLs when replay HTML is unavailable")
+    dataset_build.add_argument("--wait-for", default="body")
+    dataset_build.set_defaults(func=cmd_dataset_build)
+
+    dataset_split = dataset_sub.add_parser("split", help="Group-aware split of candidate-ranking JSONL")
+    dataset_split.add_argument("input")
+    dataset_split.add_argument("--by", default="group")
+    dataset_split.add_argument("--train-ratio", type=float, default=0.8)
+    dataset_split.add_argument("--seed", type=int, default=17)
+    dataset_split.add_argument("--train-out", required=True)
+    dataset_split.add_argument("--test-out", required=True)
+    dataset_split.set_defaults(func=cmd_dataset_split)
+
+    ranker = sub.add_parser("ranker", help="Train/evaluate a tiny offline candidate ranker")
+    ranker_sub = ranker.add_subparsers(dest="ranker_cmd", required=True)
+    ranker_train = ranker_sub.add_parser("train", help="Train a tiny centroid-delta ranker")
+    ranker_train.add_argument("input", help="Candidate-ranking train JSONL")
+    ranker_train.add_argument("--out", required=True)
+    ranker_train.add_argument("--min-ranker-confidence", type=float, default=0.70)
+    ranker_train.add_argument("--min-ranker-margin", type=float, default=0.00)
+    ranker_train.set_defaults(func=cmd_ranker_train)
+
+    ranker_eval = ranker_sub.add_parser("eval", help="Evaluate a trained ranker on candidate-ranking JSONL")
+    ranker_eval.add_argument("input")
+    ranker_eval.add_argument("--model", required=True)
+    ranker_eval.add_argument("--out", required=True)
+    ranker_eval.add_argument("--min-ranker-confidence", type=float, default=None)
+    ranker_eval.add_argument("--min-ranker-margin", type=float, default=None)
+    ranker_eval.set_defaults(func=cmd_ranker_eval)
+
+    ranker_calibrate = ranker_sub.add_parser("calibrate", help="Sweep ranker confidence/margin thresholds")
+    ranker_calibrate.add_argument("input")
+    ranker_calibrate.add_argument("--model", required=True)
+    ranker_calibrate.add_argument("--min-ranker-confidence", nargs="+", type=float, default=[0.40, 0.50, 0.60, 0.70, 0.80, 0.90])
+    ranker_calibrate.add_argument("--min-ranker-margin", nargs="+", type=float, default=[0.00, 0.03, 0.05, 0.10, 0.15])
+    ranker_calibrate.add_argument("--max-false-positive-rate", type=float, default=0.02)
+    ranker_calibrate.add_argument("--out", required=True)
+    ranker_calibrate.set_defaults(func=cmd_ranker_calibrate)
 
     failures = sub.add_parser("failures", help="Inspect failure artifacts")
     failure_sub = failures.add_subparsers(dest="failure_cmd", required=True)

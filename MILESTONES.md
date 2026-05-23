@@ -329,3 +329,29 @@ Exit criteria:
 - Works fully offline.
 
 Status: not started.
+
+## M7A: Tiny candidate ranker
+
+**Question:** Can a lightweight offline ranker replace most qwen3:1.7b recovery calls while preserving low false positives?
+
+Deliverables:
+
+- Candidate-ranking dataset builder: `semscrape dataset build`.
+- Group-aware train/test split: `semscrape dataset split`.
+- Hard-negative features for near-miss values such as shipping prices, list prices, sponsored titles, hidden duplicates, and wrong table cells.
+- Tiny centroid-delta ranker: `semscrape ranker train`.
+- Ranker evaluation and calibration: `semscrape ranker eval` and `semscrape ranker calibrate`.
+- Runtime policies: `ranker-local` and `ranker-plus-llm`.
+- Ranker metrics in eval/canary summaries.
+
+Exit criteria:
+
+- ranker-local coverage >= 70%.
+- ranker-local false_positive_rate <= 2%.
+- ranker-local model_call_rate = 0%.
+- ranker-local p95 latency <= 50 ms/field.
+- ranker-plus-llm coverage >= M6E safe-local coverage.
+- ranker-plus-llm qwen3:1.7b call rate <= 15%.
+- cache_false_positive_rate = 0%.
+
+Status: first implementation added.

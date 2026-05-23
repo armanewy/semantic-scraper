@@ -13,6 +13,7 @@ from .dom import element_to_candidate, generate_candidates, parse_html, should_c
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
+from .ranker import RankerError, RankerLocator
 from .validators import extract_value, validate_value
 
 POLICY_DEFAULTS = {
@@ -25,6 +26,22 @@ POLICY_DEFAULTS = {
         "min_validator_confidence": 0.70,
     },
     "safe-local": {
+        "strict": True,
+        "use_llm": True,
+        "model_on_abstain_only": True,
+        "min_confidence": 0.75,
+        "min_margin": 0.15,
+        "min_validator_confidence": 0.70,
+    },
+    "ranker-local": {
+        "strict": True,
+        "use_llm": False,
+        "model_on_abstain_only": True,
+        "min_confidence": 0.75,
+        "min_margin": 0.15,
+        "min_validator_confidence": 0.70,
+    },
+    "ranker-plus-llm": {
         "strict": True,
         "use_llm": True,
         "model_on_abstain_only": True,
@@ -362,6 +379,40 @@ def _call_locator(
     return ModelAttempt(chosen, choice, None, int(round((time.perf_counter() - started) * 1000)))
 
 
+def _call_ranker(
+    field: FieldSpec,
+    ranked: list[RankedCandidate],
+    *,
+    ranker_path: str | None,
+    ranker_locator: Locator | None = None,
+    min_ranker_confidence: float = 0.70,
+    min_ranker_margin: float = 0.00,
+) -> ModelAttempt:
+    import time
+
+    started = time.perf_counter()
+    if ranker_locator is None:
+        if not ranker_path:
+            return ModelAttempt(None, None, "ranker model path required", 0)
+        try:
+            ranker_locator = RankerLocator.load(
+                ranker_path,
+                min_confidence=min_ranker_confidence,
+                min_margin=min_ranker_margin,
+            )
+        except RankerError as exc:
+            return ModelAttempt(None, None, str(exc), int(round((time.perf_counter() - started) * 1000)))
+    choice = ranker_locator.choose(field, ranked)
+    by_id = {item.candidate.id: item for item in ranked}
+    if choice.candidate_id is None:
+        return ModelAttempt(None, choice, None, int(round((time.perf_counter() - started) * 1000)))
+    chosen = by_id.get(choice.candidate_id)
+    if chosen is None:
+        return ModelAttempt(None, choice, f"ranker chose missing candidate {choice.candidate_id}", int(round((time.perf_counter() - started) * 1000)))
+    chosen.reasons.append(f"ranker chose with confidence {choice.confidence:.2f}: {choice.reason}")
+    return ModelAttempt(chosen, choice, None, int(round((time.perf_counter() - started) * 1000)))
+
+
 def extract_field(
     field: FieldSpec,
     html: str,
@@ -381,6 +432,10 @@ def extract_field(
     model_on_abstain_only: bool = False,
     locator: Locator | None = None,
     learn: bool = False,
+    ranker_path: str | None = None,
+    ranker_locator: Locator | None = None,
+    min_ranker_confidence: float = 0.70,
+    min_ranker_margin: float = 0.00,
 ) -> FieldExtraction:
     trace: list[dict] = []
     if cache is not None:
@@ -443,7 +498,67 @@ def extract_field(
                 cache.remember(field, heuristic, source="heuristic")
             return _field_extraction(field, heuristic, source="heuristic", trace=trace)
         trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": decision.reason, "candidate_id": heuristic.candidate.id})
-        should_call_model = use_llm and (model_on_abstain_only or policy == "safe-local")
+        if policy in {"ranker-local", "ranker-plus-llm"}:
+            ranker_attempt = _call_ranker(
+                field,
+                ranked,
+                ranker_path=ranker_path,
+                ranker_locator=ranker_locator,
+                min_ranker_confidence=min_ranker_confidence,
+                min_ranker_margin=min_ranker_margin,
+            )
+            if ranker_attempt.error:
+                trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
+                if policy == "ranker-local":
+                    return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
+            elif ranker_attempt.chosen is None:
+                trace.append(
+                    {
+                        "stage": "ranker",
+                        "status": "abstained",
+                        "reason": ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice",
+                        "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
+                        "latency_ms": ranker_attempt.latency_ms,
+                    }
+                )
+                if policy == "ranker-local":
+                    return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
+            else:
+                ranker_decision = _evaluate_strict(
+                    ranker_attempt.chosen,
+                    ranked,
+                    min_confidence=min_confidence,
+                    min_margin=min_margin,
+                    min_validator_confidence=min_validator_confidence,
+                    enforce_margin=False,
+                )
+                trace.append(
+                    {
+                        "stage": "ranker",
+                        "status": "choose",
+                        "candidate_id": ranker_attempt.chosen.candidate.id,
+                        "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
+                        "latency_ms": ranker_attempt.latency_ms,
+                    }
+                )
+                if ranker_decision.ok and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence):
+                    trace.append({"stage": "ranker_strict_gate", "status": "accepted", "candidate_id": ranker_attempt.chosen.candidate.id})
+                    if cache is not None and learn:
+                        cache.remember(field, ranker_attempt.chosen, source="ranker_recovery")
+                    return _field_extraction(
+                        field,
+                        ranker_attempt.chosen,
+                        source="ranker_recovery",
+                        model=ranker_path,
+                        trace=trace,
+                        decision_reason="ranker_recovered_after_heuristic_abstention",
+                    )
+                reason = ranker_decision.reason or "low_ranker_confidence"
+                trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
+                if policy == "ranker-local":
+                    return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
+
+        should_call_model = use_llm and (model_on_abstain_only or policy in {"safe-local", "ranker-plus-llm"})
         if should_call_model:
             attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
             if attempt.error:
@@ -531,6 +646,10 @@ def extract_html(
     model_on_abstain_only: bool = False,
     locator: Locator | None = None,
     learn: bool = False,
+    ranker_path: str | None = None,
+    ranker_locator: Locator | None = None,
+    min_ranker_confidence: float = 0.70,
+    min_ranker_margin: float = 0.00,
 ):
     from .models import ExtractionReport
 
@@ -557,6 +676,10 @@ def extract_html(
             model_on_abstain_only=model_on_abstain_only,
             locator=locator,
             learn=learn,
+            ranker_path=ranker_path,
+            ranker_locator=ranker_locator,
+            min_ranker_confidence=min_ranker_confidence,
+            min_ranker_margin=min_ranker_margin,
         )
 
     if cache is not None and learn:
