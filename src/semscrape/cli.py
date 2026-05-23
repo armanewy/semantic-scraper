@@ -7,6 +7,7 @@ import json
 import platform
 import shutil
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1465,6 +1466,50 @@ def cmd_pilot_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pilot_report(args: argparse.Namespace) -> int:
+    project = Path(args.project)
+    if not project.exists():
+        raise CliError(f"Pilot project not found: {project}", 2)
+    rows, summary, evidence_stats, audit_result = _pilot_artifacts(project)
+    text = _pilot_field_report(project, rows, summary, evidence_stats, audit_result)
+    out = Path(args.out) if args.out else project / "pilot-report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8", newline="\n")
+    _print_json({"out": str(out), "project": str(project), "fields": len([row for row in rows if row.get("field") is not None])})
+    return 0
+
+
+def cmd_pilot_summarize(args: argparse.Namespace) -> int:
+    projects = [Path(path) for path in _expand_paths(args.projects)]
+    rows: list[dict[str, Any]] = []
+    for project in projects:
+        if not project.is_dir():
+            continue
+        canary_rows, summary, _evidence_stats, audit_result = _pilot_artifacts(project)
+        metrics = _first_metrics(canary_rows)
+        rows.append(
+            {
+                "pilot": project.name,
+                "domain": _pilot_domain(project, summary, canary_rows),
+                "pages": int(summary.get("pilot_cases") or _pilot_case_count(canary_rows)),
+                "fields": int(metrics.get("rows", summary.get("fields_attempted", 0))),
+                "coverage": float(metrics.get("coverage_rate", summary.get("ranker_local_coverage", 0.0))),
+                "false_positive_rate": float(metrics.get("false_positive_rate", summary.get("false_positive_rate", 0.0))),
+                "abstention_rate": float(metrics.get("abstention_rate", summary.get("abstention_rate", 0.0))),
+                "candidate_recall_at_40": float(metrics.get("candidate_recall_at_k", summary.get("candidate_recall_at_40", 0.0))),
+                "corrections": int(summary.get("user_corrections_count", 0)),
+                "bundle_ok": bool(summary.get("bundle_audit_passed") or (audit_result and audit_result.get("ok"))),
+                "pack": summary.get("pack") or "",
+            }
+        )
+    text = _pilot_summary_report(rows)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+    aggregate = _pilot_summary_metrics(rows)
+    _print_json({"out": args.out, "pilots": len(rows), "aggregate": aggregate})
+    return 0
+
+
 def cmd_pack_info(args: argparse.Namespace) -> int:
     try:
         pack = load_pack(args.pack)
@@ -1595,6 +1640,15 @@ def cmd_pack_compare(args: argparse.Namespace) -> int:
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     _print_json({"out": args.out, "release_check": str(release_path), "passed": result["passed"]})
+    return 0
+
+
+def cmd_pack_gaps(args: argparse.Namespace) -> int:
+    evidence_rows = read_jsonl(args.evidence)
+    report = _pack_gaps_report(evidence_rows, pack=args.pack)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(report, encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "records": len(evidence_rows), **_pack_gaps_summary(evidence_rows)})
     return 0
 
 
@@ -1826,6 +1880,153 @@ def _pilot_report(summary: dict[str, Any], evidence_stats: dict[str, Any], audit
     return "\n".join(lines) + "\n"
 
 
+def _pilot_artifacts(project: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    summary_path = project / "runs" / "summary.json"
+    canary_path = project / "runs" / "canary.jsonl"
+    bundle_path = project / "evidence-bundle.zip"
+    db_path = project / "evidence.db"
+    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    rows = read_jsonl(canary_path) if canary_path.exists() else []
+    evidence_stats = EvidenceStore(db_path).stats() if db_path.exists() else {}
+    audit_result = audit_evidence_bundle(bundle_path) if bundle_path.exists() else None
+    return rows, summary, evidence_stats, audit_result
+
+
+def _pilot_field_report(
+    project: Path,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    evidence_stats: dict[str, Any],
+    audit_result: dict[str, Any] | None,
+) -> str:
+    field_rows = [row for row in rows if row.get("field") is not None]
+    metrics = _first_metrics(field_rows)
+    failure_reasons = Counter(str(row.get("failure_reason") or "none") for row in field_rows if row.get("failure_reason"))
+    false_positives = [row for row in field_rows if row.get("false_positive")]
+    candidate_misses = [row for row in field_rows if row.get("expected_present") and not row.get("candidate_present")]
+    abstentions = [row for row in field_rows if row.get("status") == "abstained" or row.get("abstained")]
+    lines = [
+        "# semscrape alpha pilot report",
+        "",
+        "## Scorecard",
+        "",
+        f"- pilot: `{project.name}`",
+        f"- domain: `{_pilot_domain(project, summary, field_rows)}`",
+        f"- time_to_first_extract: `{summary.get('time_to_first_successful_extract', 'not_recorded')}`",
+        f"- fields_attempted: `{int(metrics.get('rows', summary.get('fields_attempted', 0)))}`",
+        f"- required_field_success_rate: `{float(metrics.get('coverage_rate', summary.get('required_field_success_rate', 0.0))):.6f}`",
+        f"- coverage_rate: `{float(metrics.get('coverage_rate', summary.get('ranker_local_coverage', 0.0))):.6f}`",
+        f"- false_positive_rate: `{float(metrics.get('false_positive_rate', summary.get('false_positive_rate', 0.0))):.6f}`",
+        f"- abstention_rate: `{float(metrics.get('abstention_rate', summary.get('abstention_rate', 0.0))):.6f}`",
+        f"- candidate_recall_at_40: `{float(metrics.get('candidate_recall_at_k', summary.get('candidate_recall_at_40', 0.0))):.6f}`",
+        f"- evidence_records_created: `{evidence_stats.get('records', summary.get('evidence_records_created', 0))}`",
+        f"- labeled_records_created: `{evidence_stats.get('labeled', summary.get('labeled_records_created', 0))}`",
+        f"- user_corrections_count: `{summary.get('user_corrections_count', 0)}`",
+        f"- bundle_audit_passed: `{bool(summary.get('bundle_audit_passed') or (audit_result and audit_result.get('ok')))}`",
+        "",
+        "## Failure Summary",
+        "",
+        f"- abstentions: `{len(abstentions)}`",
+        f"- false_positives: `{len(false_positives)}`",
+        f"- candidate_recall_failures: `{len(candidate_misses)}`",
+    ]
+    lines.extend(["", "### Failure Reasons", ""])
+    if failure_reasons:
+        for reason, count in failure_reasons.most_common():
+            lines.append(f"- {reason}: `{count}`")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Field Rows", "", "| field | status | source | expected_present | candidate_present | failure_reason |", "|---|---|---|---:|---:|---|"])
+    for row in field_rows:
+        lines.append(
+            f"| {row.get('field')} | {row.get('status') or ''} | {row.get('source') or row.get('model') or ''} | "
+            f"{str(bool(row.get('expected_present'))).lower()} | {str(bool(row.get('candidate_present'))).lower()} | {row.get('failure_reason') or ''} |"
+        )
+    lines.extend(["", "## Pack Recommendation", "", _pilot_pack_recommendation(project, summary, field_rows)])
+    if audit_result:
+        lines.extend(["", "## Bundle Privacy Audit", ""])
+        for key, value in sorted((audit_result.get("privacy_report") or {}).items()):
+            lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def _pilot_summary_report(rows: list[dict[str, Any]]) -> str:
+    aggregate = _pilot_summary_metrics(rows)
+    lines = [
+        "# semscrape alpha pilot summary",
+        "",
+        "## Aggregate",
+        "",
+        f"- pilots: `{aggregate['pilots']}`",
+        f"- domains: `{aggregate['domains']}`",
+        f"- fields: `{aggregate['fields']}`",
+        f"- aggregate_coverage_rate: `{aggregate['coverage_rate']:.6f}`",
+        f"- aggregate_false_positive_rate: `{aggregate['false_positive_rate']:.6f}`",
+        f"- aggregate_abstention_rate: `{aggregate['abstention_rate']:.6f}`",
+        f"- bundle_audit_pass_rate: `{aggregate['bundle_audit_pass_rate']:.6f}`",
+        "",
+        "## Pilots",
+        "",
+        "| pilot | domain | pages | fields | coverage | FPR | abstention | corrections | bundle ok | pack |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['pilot']} | {row['domain']} | {row['pages']} | {row['fields']} | {row['coverage']:.3f} | "
+            f"{row['false_positive_rate']:.3f} | {row['abstention_rate']:.3f} | {row['corrections']} | "
+            f"{str(row['bundle_ok']).lower()} | {row['pack']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _pilot_summary_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = sum(int(row["fields"]) for row in rows)
+    bundle_ok = sum(int(bool(row["bundle_ok"])) for row in rows)
+    domains = sorted({str(row["domain"]) for row in rows if row.get("domain")})
+    return {
+        "pilots": len(rows),
+        "domains": len(domains),
+        "domain_names": domains,
+        "fields": fields,
+        "coverage_rate": _weighted_average(rows, "coverage", "fields"),
+        "false_positive_rate": _weighted_average(rows, "false_positive_rate", "fields"),
+        "abstention_rate": _weighted_average(rows, "abstention_rate", "fields"),
+        "candidate_recall_at_40": _weighted_average(rows, "candidate_recall_at_40", "fields"),
+        "bundle_audit_pass_rate": bundle_ok / len(rows) if rows else 0.0,
+    }
+
+
+def _weighted_average(rows: list[dict[str, Any]], value_key: str, weight_key: str) -> float:
+    total = sum(float(row.get(weight_key) or 0.0) for row in rows)
+    if total <= 0:
+        return 0.0
+    return sum(float(row.get(value_key) or 0.0) * float(row.get(weight_key) or 0.0) for row in rows) / total
+
+
+def _pilot_domain(project: Path, summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    if summary.get("pack"):
+        return str(summary["pack"])
+    categories = Counter(str(row.get("category") or "unknown") for row in rows if row.get("category"))
+    if categories:
+        return categories.most_common(1)[0][0]
+    return project.name.split("_alpha_", 1)[0]
+
+
+def _pilot_case_count(rows: list[dict[str, Any]]) -> int:
+    cases = {str(row.get("case_id")) for row in rows if row.get("case_id")}
+    return len(cases)
+
+
+def _pilot_pack_recommendation(project: Path, summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    domain = _pilot_domain(project, summary, rows)
+    false_positive_rate = _first_metrics(rows).get("false_positive_rate", 0.0)
+    if false_positive_rate and float(false_positive_rate) > 0.02:
+        return "Do not use this pilot for pack promotion until false positives are reviewed and converted to gold hard negatives."
+    if domain in {"ecommerce", "product", "listings"}:
+        return "Use reviewed labels as ecommerce/listings hard-negative evidence; release-check before promotion."
+    return "Use reviewed labels for the matching domain pack once there are enough similar pilots."
+
+
 def _pack_optional_path(pack_path: Path, value: Any) -> str | None:
     if not value:
         return None
@@ -1964,6 +2165,131 @@ def _pack_model_card_exists(pack_ref: str) -> bool:
         return bool(model_card and Path(model_card).exists())
     except Exception:
         return False
+
+
+def _pack_gaps_report(evidence_rows: list[dict[str, Any]], *, pack: str | None = None) -> str:
+    summary = _pack_gaps_summary(evidence_rows)
+    lines = [
+        "# semscrape pack gap analysis",
+        "",
+        "## Summary",
+        "",
+        f"- pack: `{pack or 'unspecified'}`",
+        f"- evidence_records: `{summary['records']}`",
+        f"- abstentions: `{summary['abstentions']}`",
+        f"- false_positives: `{summary['false_positives']}`",
+        f"- candidate_missing: `{summary['candidate_missing']}`",
+        f"- hard_negatives: `{summary['hard_negatives']}`",
+        f"- validator_rejected_positive_candidates: `{summary['validator_rejected_positive_candidates']}`",
+        "",
+        "## Field Type Gaps",
+        "",
+        "| field type | records | abstentions | candidate missing | hard negatives | validator rejected positives |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for field_type in sorted(summary["field_types"]):
+        stats = summary["field_types"][field_type]
+        lines.append(
+            f"| {field_type} | {stats['records']} | {stats['abstentions']} | {stats['candidate_missing']} | "
+            f"{stats['hard_negatives']} | {stats['validator_rejected_positive_candidates']} |"
+        )
+    lines.extend(["", "## Repeated Traps", ""])
+    if summary["trap_counts"]:
+        for trap, count in sorted(summary["trap_counts"].items(), key=lambda item: (-item[1], item[0]))[:20]:
+            lines.append(f"- {trap}: `{count}`")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Failure Reasons", ""])
+    if summary["failure_reasons"]:
+        for reason, count in sorted(summary["failure_reasons"].items(), key=lambda item: (-item[1], item[0]))[:20]:
+            lines.append(f"- {reason}: `{count}`")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Recommendations", ""])
+    lines.extend(_pack_gap_recommendations(summary, pack=pack))
+    return "\n".join(lines) + "\n"
+
+
+def _pack_gaps_summary(evidence_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    field_types: dict[str, dict[str, int]] = {}
+    trap_counts: Counter[str] = Counter()
+    failure_reasons: Counter[str] = Counter()
+    categories: Counter[str] = Counter()
+    abstentions = 0
+    false_positives = 0
+    candidate_missing = 0
+    hard_negatives = 0
+    validator_rejected_positive_candidates = 0
+    for row in evidence_rows:
+        record = row.get("record") or {}
+        field = record.get("field") or {}
+        field_type = str(field.get("kind") or "unknown")
+        stats = field_types.setdefault(
+            field_type,
+            {
+                "records": 0,
+                "abstentions": 0,
+                "candidate_missing": 0,
+                "hard_negatives": 0,
+                "validator_rejected_positive_candidates": 0,
+            },
+        )
+        stats["records"] += 1
+        categories[str(record.get("category") or "unknown")] += 1
+        status = str(record.get("status") or "")
+        if status == "abstained":
+            abstentions += 1
+            stats["abstentions"] += 1
+        reason = record.get("failure_reason")
+        if reason:
+            failure_reasons[str(reason)] += 1
+        if record.get("candidate_recall") is False:
+            candidate_missing += 1
+            stats["candidate_missing"] += 1
+        if record.get("label", {}).get("status") == "false_positive":
+            false_positives += 1
+        for candidate in row.get("candidates") or []:
+            if candidate.get("hard_negative"):
+                hard_negatives += 1
+                stats["hard_negatives"] += 1
+                for term in candidate.get("negative_terms") or []:
+                    trap_counts[f"{field_type}:{term}"] += 1
+                for term in candidate.get("own_negative_terms") or []:
+                    trap_counts[f"{field_type}:{term}"] += 1
+                if candidate.get("selector_strategy"):
+                    trap_counts[f"selector:{candidate['selector_strategy']}"] += 1
+            if candidate.get("label") and not candidate.get("validation_passed", True):
+                validator_rejected_positive_candidates += 1
+                stats["validator_rejected_positive_candidates"] += 1
+    return {
+        "records": len(evidence_rows),
+        "abstentions": abstentions,
+        "false_positives": false_positives,
+        "candidate_missing": candidate_missing,
+        "hard_negatives": hard_negatives,
+        "validator_rejected_positive_candidates": validator_rejected_positive_candidates,
+        "field_types": field_types,
+        "trap_counts": dict(trap_counts),
+        "failure_reasons": dict(failure_reasons),
+        "categories": dict(categories),
+    }
+
+
+def _pack_gap_recommendations(summary: dict[str, Any], *, pack: str | None) -> list[str]:
+    recommendations: list[str] = []
+    if summary["false_positives"]:
+        recommendations.append("- Convert every false positive into a reviewed gold hard negative before training.")
+    if summary["candidate_missing"]:
+        recommendations.append("- Improve candidate generation or rendered metadata before tuning ranker thresholds.")
+    if summary["validator_rejected_positive_candidates"]:
+        recommendations.append("- Review validators: at least one positive candidate is being rejected before ranking can help.")
+    if summary["abstentions"] and not summary["candidate_missing"]:
+        recommendations.append("- Candidate recall exists for abstentions; inspect ranker margins and field-specific gates.")
+    if pack == "ecommerce" or "ecommerce" in summary.get("categories", {}):
+        recommendations.append("- Ecommerce traps should remain hard negatives: old/list price, shipping, installment, sponsored, and coupon values.")
+    if not recommendations:
+        recommendations.append("- No repeated safety gaps detected in this evidence file. Add more external pilots before promotion claims.")
+    return recommendations
 
 
 def _load_failure_rows(path: str) -> list[dict[str, Any]]:
@@ -2317,6 +2643,14 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_run.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
     pilot_run.add_argument("--only-labeled", action="store_true")
     pilot_run.set_defaults(func=cmd_pilot_run)
+    pilot_report = pilot_sub.add_parser("report", help="Generate a standardized pilot report")
+    pilot_report.add_argument("project")
+    pilot_report.add_argument("--out", default=None)
+    pilot_report.set_defaults(func=cmd_pilot_report)
+    pilot_summary = pilot_sub.add_parser("summarize", help="Summarize multiple pilot projects")
+    pilot_summary.add_argument("projects", nargs="+")
+    pilot_summary.add_argument("--out", required=True)
+    pilot_summary.set_defaults(func=cmd_pilot_summarize)
 
     pack = sub.add_parser("pack", help="Build, inspect, and release-check domain packs")
     pack_sub = pack.add_subparsers(dest="pack_cmd", required=True)
@@ -2357,6 +2691,11 @@ def build_parser() -> argparse.ArgumentParser:
     pack_compare.add_argument("--max-model-call-rate", type=float, default=0.0)
     pack_compare.add_argument("--max-fpr-regression", type=float, default=0.0)
     pack_compare.set_defaults(func=cmd_pack_compare)
+    pack_gaps = pack_sub.add_parser("gaps", help="Analyze evidence intake for pack/domain gaps")
+    pack_gaps.add_argument("evidence", help="Evidence JSONL from evidence intake/export")
+    pack_gaps.add_argument("--pack", default=None)
+    pack_gaps.add_argument("--out", required=True)
+    pack_gaps.set_defaults(func=cmd_pack_gaps)
 
     inspect = sub.add_parser("inspect", help="Show ranked candidates for one field")
     inspect.add_argument("spec")

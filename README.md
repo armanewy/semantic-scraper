@@ -533,6 +533,16 @@ semscrape pilot run pilots/articles_alpha_001 --policy ranker-local
 semscrape pilot run pilots/listings_alpha_001 --policy ranker-local
 ```
 
+Generate standardized field-trial reports:
+
+```bash
+semscrape pilot report pilots/ecommerce_alpha_001 \
+  --out runs/m13/ecommerce-pilot-report.md
+
+semscrape pilot summarize pilots/* \
+  --out runs/m13/alpha-pilot-summary.md
+```
+
 Generated pilot evidence DBs, bundles, and run outputs are ignored by git. The checked-in pilot directories keep only the manifest, expected values, and instructions.
 
 The local pack release loop is:
@@ -559,6 +569,16 @@ semscrape pack compare packs/ecommerce packs/ecommerce-v1 \
 ```
 
 `pack release-check` runs baseline and candidate packs against the sealed base holdout, then runs the candidate against the adversarial holdout. Promotion requires no false-positive regression, adversarial false-positive rate of zero, model-call rate of zero, feature-schema compatibility, and a model card.
+
+Analyze incoming pilot evidence for pack gaps:
+
+```bash
+semscrape pack gaps runs/m13/pilot-intake.jsonl \
+  --pack ecommerce \
+  --out runs/m13/ecommerce-gaps.md
+```
+
+The pilot playbook for external alpha users is in [docs/alpha_pilot_playbook.md](docs/alpha_pilot_playbook.md).
 
 Run the M8C OOD hardening workflow:
 

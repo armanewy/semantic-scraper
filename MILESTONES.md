@@ -770,3 +770,53 @@ Exit criteria:
 - no unverified production outputs are used as positive training labels.
 
 Status: passed for the local replay alpha-pilot loop. The pack release candidate is evidence-derived from local pilot bundles and release-checked against the current sealed replay holdouts.
+
+## M13: External Alpha Field Trials
+
+**Question:** Can semscrape work on real user/projects outside the curated repo corpus while preserving false-positive safety and generating useful pack/ranker evidence?
+
+Deliverables:
+
+- Alpha pilot playbook:
+  - `docs/alpha_pilot_playbook.md`
+- `semscrape pilot report`.
+- `semscrape pilot summarize`.
+- `semscrape pack gaps`.
+- Pilot scorecard fields:
+  - fields attempted
+  - required-field success rate
+  - coverage rate
+  - false-positive rate
+  - abstention rate
+  - candidate recall
+  - evidence record count
+  - labeled record count
+  - bundle audit result
+  - correction count placeholder
+- Aggregate pilot summary report.
+- Pack gap analysis by field type, failure reason, hard-negative trap, validator rejection, and candidate-missing count.
+
+M13 tooling smoke result on the existing local alpha pilots:
+
+```text
+pilots summarized: 3
+domains represented: 3
+fields summarized: 11
+aggregate coverage_rate: 1.000000
+aggregate false_positive_rate: 0.000000
+bundle audit pass rate: 1.000000
+pack gaps hard_negatives: 54
+pack gaps candidate_missing: 0
+```
+
+Exit criteria for the actual external field-trial gate:
+
+- 5+ pilots completed end to end.
+- 3+ domains represented.
+- aggregate false_positive_rate <= 2%.
+- adversarial/manual trap false_positive_rate = 0%.
+- ranker-local aggregate coverage >= 60%.
+- every pilot bundle passes privacy audit.
+- release-check blocks any candidate with false-positive regression.
+
+Status: reporting and gap-analysis infrastructure implemented. The external-field-trial gate is not marked passed until 5+ real external pilots are run.
