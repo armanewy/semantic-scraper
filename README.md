@@ -48,6 +48,8 @@ This repo is a developer-alpha semantic scraper CLI:
 - Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
 - A packaged default ranker is included, so `ranker-local` works without Ollama or an explicit `--ranker` path.
 - Local SQLite evidence capture, review, labeling, privacy-safe export, and evidence-derived dataset generation are included.
+- Privacy-audited evidence bundles and maintainer-side bundle intake are included for opt-in contribution workflows.
+- A local ecommerce domain-pack skeleton is included for pack-specific ranker and threshold defaults.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -86,6 +88,14 @@ Extract with the packaged offline ranker:
 
 ```bash
 semscrape extract examples/product.yml examples/product_v2.html --values-only
+```
+
+Use the ecommerce pack to apply pack-specific defaults:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html \
+  --pack ecommerce \
+  --values-only
 ```
 
 Expected output for `product_v2.html`:
@@ -142,6 +152,12 @@ semscrape extract examples/product.yml examples/product_v2.html \
 
 semscrape evidence stats .semscrape/evidence.db
 semscrape evidence review .semscrape/evidence.db --limit 5
+
+semscrape evidence bundle .semscrape/evidence.db \
+  --privacy features-only \
+  --out semscrape-evidence-bundle.zip
+
+semscrape evidence audit semscrape-evidence-bundle.zip
 ```
 
 Evaluate the model locator against the fixture corpus:
@@ -377,10 +393,16 @@ Review and label records:
 ```bash
 semscrape evidence stats .semscrape/evidence.db
 semscrape evidence review .semscrape/evidence.db --status abstained --limit 20
+semscrape evidence review .semscrape/evidence.db \
+  --status abstained \
+  --limit 20 \
+  --write-review-file review.jsonl
 
 semscrape evidence label .semscrape/evidence.db 123 --correct-candidate c0017
 semscrape evidence label .semscrape/evidence.db 124 --correct-value "$59.99"
 semscrape evidence label .semscrape/evidence.db 125 --abstention-correct
+
+semscrape evidence apply-review .semscrape/evidence.db review.jsonl
 ```
 
 Export privacy-controlled evidence and turn it into ranker data:
@@ -388,6 +410,7 @@ Export privacy-controlled evidence and turn it into ranker data:
 ```bash
 semscrape evidence export .semscrape/evidence.db \
   --only-labeled \
+  --min-trust silver \
   --privacy features-only \
   --out data/evidence-labeled.jsonl
 
@@ -406,6 +429,37 @@ full          keeps candidate values/text/context for local debugging
 redacted      keeps candidate values and ML features, replaces long text/context with hashes
 features-only keeps labels and ML features, omits raw values/text/context/selectors
 ```
+
+Trust levels control which labels can feed release-candidate training:
+
+```text
+gold       explicit user corrections, manually reviewed labels, benchmark/canary expected values
+silver     confirmed fallback or repeated validated canary evidence
+bronze     high-confidence production evidence without ground truth
+untrusted  unknown production outputs
+```
+
+Global-training exports default to `--min-trust silver`, so bronze and untrusted production positives are excluded unless explicitly requested.
+
+Create an opt-in contribution bundle and audit it before sharing:
+
+```bash
+semscrape evidence bundle .semscrape/evidence.db \
+  --privacy features-only \
+  --min-trust silver \
+  --out semscrape-evidence-bundle.zip
+
+semscrape evidence audit semscrape-evidence-bundle.zip
+```
+
+Maintainer-side intake validates privacy, schema version, and duplicate records before writing merged evidence:
+
+```bash
+semscrape evidence intake bundles/*.zip \
+  --out data/intake/evidence.jsonl
+```
+
+Features-only bundles include `manifest.json`, `records.jsonl`, `schema.json`, `privacy_report.json`, and `summary.json`. The privacy audit rejects bundles that contain raw HTML, selectors, full candidate text, or raw values unless values are explicitly allowed.
 
 Run the M10 base-ranker release-candidate workflow:
 
@@ -440,6 +494,34 @@ semscrape ranker release-check \
 ```
 
 `corpus/base_holdout/` and `corpus/adversarial_holdout/` are sealed release-candidate suites. Do not include them in dataset builds, evidence-derived training exports, or ranker tuning. `candidate-ranker-v3` is the current packaged default because it passed the M10 release check; keep `candidate-ranker-v2` for regression comparisons.
+
+## Domain Packs
+
+Domain packs bundle a ranker artifact, policy defaults, threshold presets, validator notes, supported fields, and a model card for a page family:
+
+```text
+packs/
+  ecommerce/
+    pack.yml
+    thresholds.yml
+    validators.yml
+    supported-fields.yml
+    model-card.md
+```
+
+Use a pack with any command that supports extraction policy defaults:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html \
+  --pack ecommerce \
+  --values-only
+
+semscrape canary corpus/base_holdout/manifest.yml \
+  --pack ecommerce \
+  --out runs/ecommerce-holdout.jsonl
+```
+
+The initial `ecommerce` pack resolves to the packaged default ranker and conservative `ranker-local` thresholds. Packs are local files today; they are the foundation for future domain-specific rankers, validators, thresholds, and model cards.
 
 Run the M8C OOD hardening workflow:
 

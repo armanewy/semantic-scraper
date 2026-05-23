@@ -22,6 +22,23 @@ def test_extract_defaults_to_packaged_ranker(capsys) -> None:
     assert payload["price"] == "$59.99"
 
 
+def test_extract_can_use_ecommerce_pack(capsys) -> None:
+    code = main(
+        [
+            "extract",
+            "examples/product.yml",
+            "examples/product_v2.html",
+            "--pack",
+            "ecommerce",
+            "--values-only",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["price"] == "$59.99"
+
+
 def test_extract_required_unknown_field_returns_config_error(capsys) -> None:
     code = main(
         [

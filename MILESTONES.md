@@ -650,3 +650,54 @@ Exit criteria:
 - if v3 passes, package it as default; otherwise keep v2.
 
 Status: passed for the initial replay release-candidate suite. The corpus is still intentionally small, so the model card treats the domain envelope as replay-validated rather than universal web robustness.
+
+## M11: Opt-in Evidence Contribution and Ranker Update Pipeline
+
+**Question:** Can semscrape safely turn real-world usage evidence into future ranker/domain-pack improvements without leaking private data or poisoning the model?
+
+Deliverables:
+
+- `semscrape evidence bundle` for reviewable opt-in evidence archives.
+- Bundle contents:
+  - `manifest.json`
+  - `records.jsonl`
+  - `schema.json`
+  - `privacy_report.json`
+  - `summary.json`
+- `semscrape evidence audit` for privacy and schema checks.
+- Trust-level export enforcement:
+  - `gold`
+  - `silver`
+  - `bronze`
+  - `untrusted`
+- `semscrape evidence export --min-trust`, defaulting to `silver` for training-oriented exports.
+- Batch review workflow:
+  - `semscrape evidence review --write-review-file`
+  - `semscrape evidence apply-review`
+- Maintainer-side `semscrape evidence intake` with bundle validation and deduplication.
+- Domain-pack skeleton:
+  - `packs/ecommerce/pack.yml`
+  - pack thresholds, validator notes, supported fields, and model card.
+- `--pack ecommerce` support for extraction, benchmark, eval, snapshot, and canary commands.
+
+M11 smoke result:
+
+```text
+ecommerce pack extract: passed
+features-only bundle: 4 records, 4 gold labels
+privacy audit: passed
+intake: 4 records accepted, 0 duplicates
+dataset build from intake: 92 candidate rows, 5 positives, 20 hard negatives
+```
+
+Exit criteria:
+
+- Features-only bundles contain no raw HTML or full candidate text.
+- Training exports exclude unverified production positives by default.
+- User corrections become gold labels.
+- Malformed/privacy-unsafe bundles are rejected.
+- Maintainer intake validates bundles and summarizes trust levels.
+- Domain-pack defaults can be used locally.
+- Existing alpha CLI workflows still pass.
+
+Status: implemented and smoke-tested. The contribution workflow remains local/offline; no cloud ingestion service is included.

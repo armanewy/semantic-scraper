@@ -35,14 +35,21 @@ from .eval_model import (
 from .evidence import (
     DEFAULT_EVIDENCE_DB,
     PRIVACY_MODES,
+    TRUST_LEVEL_ORDER,
     EvidenceStore,
+    apply_review_jsonl,
+    audit_evidence_bundle,
+    create_evidence_bundle,
+    intake_evidence_bundles,
     record_report_evidence,
     write_dataset_from_evidence_export,
     write_evidence_jsonl,
+    write_review_jsonl,
 )
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
+from .packs import apply_pack_to_args
 from .ranker import (
     CandidateRanker,
     calibrate_ranker_dataset,
@@ -77,9 +84,17 @@ class CliError(RuntimeError):
         self.code = code
 
 
+def _apply_pack_defaults(args: argparse.Namespace) -> None:
+    try:
+        apply_pack_to_args(args)
+    except (FileNotFoundError, ValueError) as exc:
+        raise CliError(str(exc), 2) from exc
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
     html = _load_input(args.input, render=args.render, wait_for=args.wait_for)
+    _apply_pack_defaults(args)
     _apply_policy_defaults(args)
     cache = None
     if args.cache or args.learn:
@@ -197,6 +212,7 @@ def _compare_expected(expected: Any, actual: Any) -> bool:
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
+    _apply_pack_defaults(args)
     _apply_policy_defaults(args)
     results = []
     total = 0
@@ -327,6 +343,7 @@ def _eval_targets(paths: list[str]) -> list[tuple[str, list[str]]]:
 
 
 def cmd_eval_model(args: argparse.Namespace) -> int:
+    _apply_pack_defaults(args)
     if getattr(args, "policy", None):
         _apply_policy_defaults(args)
     rows, targets = _run_eval_rows(args)
@@ -667,12 +684,15 @@ class ExplicitDefaultsParser(argparse.ArgumentParser):
         raw_args = list(sys.argv[1:] if args is None else args)
         parsed = super().parse_args(args, namespace)
         parsed._strict_explicit = "--strict" in raw_args
+        parsed._policy_explicit = "--policy" in raw_args
         parsed._use_llm_explicit = "--no-llm" in raw_args
         parsed._model_on_abstain_only_explicit = "--model-on-abstain-only" in raw_args
         parsed._llm_fallback_policy_explicit = "--llm-fallback-policy" in raw_args
         parsed._min_confidence_explicit = "--min-confidence" in raw_args
         parsed._min_margin_explicit = "--min-margin" in raw_args
         parsed._min_validator_confidence_explicit = "--min-validator-confidence" in raw_args
+        parsed._min_ranker_confidence_explicit = "--min-ranker-confidence" in raw_args
+        parsed._min_ranker_margin_explicit = "--min-ranker-margin" in raw_args
         parsed._max_ranker_penalties_explicit = "--max-ranker-penalties" in raw_args
         return parsed
 
@@ -1084,6 +1104,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
+    _apply_pack_defaults(args)
     _apply_policy_defaults(args)
     result = create_snapshot(
         spec_path=args.spec,
@@ -1103,6 +1124,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_canary(args: argparse.Namespace) -> int:
+    _apply_pack_defaults(args)
     _apply_policy_defaults(args)
     rows = []
     render_failures = 0
@@ -1298,6 +1320,8 @@ def cmd_evidence_review(args: argparse.Namespace) -> int:
         label_status=args.label_status,
         limit=args.limit,
     )
+    if args.write_review_file:
+        write_review_jsonl(args.write_review_file, rows)
     _print_json({"db": args.db, "records": rows})
     return 0
 
@@ -1320,9 +1344,48 @@ def cmd_evidence_export(args: argparse.Namespace) -> int:
     rows = EvidenceStore(args.db).export_records(
         privacy=args.privacy,
         only_labeled=args.only_labeled,
+        min_trust=args.min_trust,
     )
     write_evidence_jsonl(args.out, rows)
-    _print_json({"db": args.db, "out": args.out, "rows": len(rows), "privacy": args.privacy})
+    _print_json({"db": args.db, "out": args.out, "rows": len(rows), "privacy": args.privacy, "min_trust": args.min_trust})
+    return 0
+
+
+def cmd_evidence_apply_review(args: argparse.Namespace) -> int:
+    _print_json(apply_review_jsonl(args.db, args.review_file))
+    return 0
+
+
+def cmd_evidence_bundle(args: argparse.Namespace) -> int:
+    try:
+        result = create_evidence_bundle(
+            args.db,
+            args.out,
+            privacy=args.privacy,
+            min_trust=args.min_trust,
+            only_labeled=args.only_labeled,
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), 2) from exc
+    _print_json(result)
+    return 0
+
+
+def cmd_evidence_audit(args: argparse.Namespace) -> int:
+    try:
+        result = audit_evidence_bundle(args.bundle, allow_values=args.allow_values)
+    except (ValueError, FileNotFoundError) as exc:
+        raise CliError(str(exc), 2) from exc
+    _print_json(result)
+    return 0 if result["ok"] else 2
+
+
+def cmd_evidence_intake(args: argparse.Namespace) -> int:
+    try:
+        result = intake_evidence_bundles(args.bundles, args.out, allow_values=args.allow_values)
+    except (ValueError, FileNotFoundError) as exc:
+        raise CliError(str(exc), 2) from exc
+    _print_json(result)
     return 0
 
 
@@ -1769,6 +1832,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
     extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local")
+    extract.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     extract.add_argument("--model-on-abstain-only", action="store_true", help="Call the local model only after strict heuristic abstention")
     extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
     extract.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
@@ -1818,6 +1882,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--top-k", type=int, default=40)
     bench.add_argument("--strict", action="store_true")
     bench.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    bench.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     bench.add_argument("--model-on-abstain-only", action="store_true")
     bench.add_argument("--min-confidence", type=float, default=0.75)
     bench.add_argument("--min-margin", type=float, default=0.15)
@@ -1845,6 +1910,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("paths", nargs="+", help="YAML specs and optional HTML inputs. Globs are expanded by semscrape.")
     eval_model.add_argument("--models", nargs="+", required=True, help="Ollama model names, or 'heuristic' for a no-LLM baseline")
     eval_model.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    eval_model.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     eval_model.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker-local/ranker-plus-llm policies")
     eval_model.add_argument("--top-k", type=int, default=40)
     eval_model.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
@@ -1934,6 +2000,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--candidates", action="store_true")
     snapshot.add_argument("--accessibility", action="store_true")
     snapshot.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
+    snapshot.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     snapshot.add_argument("--model", default=None)
     snapshot.add_argument("--ollama-host", default=None)
     snapshot.add_argument("--top-k", type=int, default=40)
@@ -1942,6 +2009,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary = sub.add_parser("canary", help="Run safe-local extraction over replayable real-page specs")
     canary.add_argument("specs", nargs="+")
     canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
+    canary.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     canary.add_argument("--model", default=None)
     canary.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker policies")
     canary.add_argument("--render", action="store_true", help="Deprecated alias for --live")
@@ -2060,6 +2128,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_review.add_argument("--status", default=None)
     evidence_review.add_argument("--label-status", default=None)
     evidence_review.add_argument("--limit", type=int, default=20)
+    evidence_review.add_argument("--write-review-file", default=None, help="Write editable review JSONL")
     evidence_review.set_defaults(func=cmd_evidence_review)
 
     evidence_label = evidence_sub.add_parser("label", help="Add a user correction label to one evidence record")
@@ -2071,12 +2140,37 @@ def build_parser() -> argparse.ArgumentParser:
     label_group.add_argument("--abstention-correct", action="store_true")
     evidence_label.set_defaults(func=cmd_evidence_label)
 
+    evidence_apply = evidence_sub.add_parser("apply-review", help="Apply labels from an editable review JSONL")
+    evidence_apply.add_argument("db")
+    evidence_apply.add_argument("review_file")
+    evidence_apply.set_defaults(func=cmd_evidence_apply_review)
+
     evidence_export = evidence_sub.add_parser("export", help="Export evidence records as JSONL")
     evidence_export.add_argument("db", nargs="?", default=DEFAULT_EVIDENCE_DB)
     evidence_export.add_argument("--only-labeled", action="store_true")
     evidence_export.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only")
+    evidence_export.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
     evidence_export.add_argument("--out", required=True)
     evidence_export.set_defaults(func=cmd_evidence_export)
+
+    evidence_bundle = evidence_sub.add_parser("bundle", help="Create a reviewable evidence bundle ZIP")
+    evidence_bundle.add_argument("db", nargs="?", default=DEFAULT_EVIDENCE_DB)
+    evidence_bundle.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only")
+    evidence_bundle.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
+    evidence_bundle.add_argument("--only-labeled", action="store_true")
+    evidence_bundle.add_argument("--out", required=True)
+    evidence_bundle.set_defaults(func=cmd_evidence_bundle)
+
+    evidence_audit = evidence_sub.add_parser("audit", help="Audit an evidence bundle ZIP for privacy and schema safety")
+    evidence_audit.add_argument("bundle")
+    evidence_audit.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in the audited bundle")
+    evidence_audit.set_defaults(func=cmd_evidence_audit)
+
+    evidence_intake = evidence_sub.add_parser("intake", help="Validate and merge evidence bundles into one JSONL")
+    evidence_intake.add_argument("bundles", nargs="+")
+    evidence_intake.add_argument("--out", required=True)
+    evidence_intake.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in accepted bundles")
+    evidence_intake.set_defaults(func=cmd_evidence_intake)
 
     cache = sub.add_parser("cache-clear", help="Delete a selector cache/lock file")
     cache.add_argument("cache")

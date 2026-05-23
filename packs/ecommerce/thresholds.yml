@@ -1,0 +1,8 @@
+policy: ranker-local
+min_confidence: 0.75
+min_margin: 0.15
+min_validator_confidence: 0.70
+min_ranker_confidence: 0.70
+min_ranker_margin: 0.00
+max_ranker_penalties: 1
+llm_fallback_policy: recoverable-only

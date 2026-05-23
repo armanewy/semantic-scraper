@@ -4,6 +4,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
+import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,8 @@ EVIDENCE_SCHEMA_VERSION = 1
 DEFAULT_EVIDENCE_DB = ".semscrape/evidence.db"
 PRIVACY_MODES = {"full", "redacted", "features-only"}
 TRAINABLE_TRUST_LEVELS = {"gold", "silver"}
+TRUST_LEVEL_ORDER = {"untrusted": 0, "bronze": 1, "silver": 2, "gold": 3}
+BUNDLE_TYPE = "semscrape_evidence"
 
 
 @dataclass(slots=True)
@@ -264,8 +268,10 @@ class EvidenceStore:
         *,
         privacy: str,
         only_labeled: bool = False,
+        min_trust: str = "untrusted",
     ) -> list[dict[str, Any]]:
         _validate_privacy(privacy)
+        _validate_trust(min_trust)
         clauses = ["label_status = 'labeled'"] if only_labeled else []
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as conn:
@@ -283,6 +289,8 @@ class EvidenceStore:
                 "abstention_correct": bool(row["abstention_correct"]),
                 "expected_value": row["expected_value"],
             }
+            if not _trust_at_least(str(label.get("trust_level") or "untrusted"), min_trust):
+                continue
             record["id"] = int(row["id"])
             record["label"] = label
             exported.append(
@@ -332,6 +340,234 @@ def write_dataset_from_evidence_export(in_path: str | Path, out_path: str | Path
         "rows": len(rows),
         "positives": sum(int(bool(row.get("label"))) for row in rows),
         "hard_negatives": sum(int(bool(row.get("hard_negative"))) for row in rows),
+    }
+
+
+def write_review_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            review = {
+                "id": row["id"],
+                "field": row["field"],
+                "status": row["status"],
+                "failure_reason": row["failure_reason"],
+                "selected_candidate_id": row["selected_candidate_id"],
+                "expected_value": row["expected_value"],
+                "top_candidates": row["top_candidates"],
+                "correct_candidate_id": None,
+                "correct_value": None,
+                "abstention_correct": False,
+                "notes": "",
+            }
+            handle.write(json.dumps(review, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def apply_review_jsonl(db_path: str | Path, review_path: str | Path) -> dict[str, Any]:
+    store = EvidenceStore(db_path)
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in _read_jsonl(review_path):
+        record_id = int(row.get("id") or 0)
+        correct_candidate = _non_empty(row.get("correct_candidate_id"))
+        correct_value = _non_empty(row.get("correct_value"))
+        abstention_correct = bool(row.get("abstention_correct"))
+        choices = [correct_candidate is not None, correct_value is not None, abstention_correct]
+        if record_id <= 0 or sum(bool(item) for item in choices) != 1:
+            skipped.append({"id": record_id or None, "reason": "missing_or_ambiguous_label"})
+            continue
+        try:
+            applied.append(
+                store.label_record(
+                    record_id,
+                    correct_candidate_id=correct_candidate,
+                    correct_value=correct_value,
+                    abstention_correct=abstention_correct,
+                )
+            )
+        except ValueError as exc:
+            skipped.append({"id": record_id, "reason": str(exc)})
+    return {"db": str(db_path), "review": str(review_path), "applied": len(applied), "skipped": skipped}
+
+
+def create_evidence_bundle(
+    db_path: str | Path,
+    out_path: str | Path,
+    *,
+    privacy: str = "features-only",
+    min_trust: str = "silver",
+    only_labeled: bool = False,
+) -> dict[str, Any]:
+    _validate_privacy(privacy)
+    _validate_trust(min_trust)
+    store = EvidenceStore(db_path)
+    records = store.export_records(privacy=privacy, only_labeled=only_labeled, min_trust=min_trust)
+    stats = store.stats()
+    privacy_report = evidence_privacy_report(records)
+    manifest = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "bundle_type": BUNDLE_TYPE,
+        "privacy_mode": privacy,
+        "min_trust": min_trust,
+        "created_at": datetime.now(UTC).isoformat(),
+        "record_count": len(records),
+        "labeled_count": sum(int((row.get("record") or {}).get("label", {}).get("status") == "labeled") for row in records),
+        "unlabeled_count": sum(int((row.get("record") or {}).get("label", {}).get("status") != "labeled") for row in records),
+        "contains_raw_html": privacy_report["raw_html_present"],
+        "contains_full_candidate_text": privacy_report["full_candidate_text_present"],
+        "source": "local_cli",
+    }
+    summary = evidence_records_summary(records)
+    summary["source_db_stats"] = stats
+    schema = evidence_bundle_schema()
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        archive.writestr("schema.json", json.dumps(schema, indent=2, sort_keys=True))
+        archive.writestr("privacy_report.json", json.dumps(privacy_report, indent=2, sort_keys=True))
+        archive.writestr("summary.json", json.dumps(summary, indent=2, sort_keys=True))
+        archive.writestr("records.jsonl", "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in records))
+    return {"out": str(target), "manifest": manifest, "summary": summary, "privacy_report": privacy_report}
+
+
+def audit_evidence_bundle(path: str | Path, *, allow_values: bool = False) -> dict[str, Any]:
+    manifest, records, claimed_privacy_report, summary = read_evidence_bundle(path)
+    privacy_report = evidence_privacy_report(records)
+    errors: list[str] = []
+    if manifest.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
+        errors.append(f"unsupported schema_version {manifest.get('schema_version')!r}")
+    if manifest.get("bundle_type") != BUNDLE_TYPE:
+        errors.append(f"unsupported bundle_type {manifest.get('bundle_type')!r}")
+    if claimed_privacy_report != privacy_report:
+        errors.append("privacy_report_mismatch")
+    if privacy_report["raw_html_present"]:
+        errors.append("raw_html_present")
+    if privacy_report["full_candidate_text_present"]:
+        errors.append("full_candidate_text_present")
+    if privacy_report["selector_present"]:
+        errors.append("selector_present")
+    if privacy_report["value_text_present"] and not allow_values:
+        errors.append("value_text_present")
+    return {
+        "path": str(path),
+        "ok": not errors,
+        "errors": errors,
+        "manifest": manifest,
+        "privacy_report": privacy_report,
+        "claimed_privacy_report": claimed_privacy_report,
+        "summary": summary or evidence_records_summary(records),
+    }
+
+
+def intake_evidence_bundles(
+    bundle_paths: list[str | Path],
+    out_path: str | Path,
+    *,
+    allow_values: bool = False,
+) -> dict[str, Any]:
+    seen: set[str] = set()
+    accepted: list[dict[str, Any]] = []
+    bundle_results: list[dict[str, Any]] = []
+    for bundle_path in bundle_paths:
+        audit = audit_evidence_bundle(bundle_path, allow_values=allow_values)
+        if not audit["ok"]:
+            bundle_results.append({"path": str(bundle_path), "accepted": False, "errors": audit["errors"]})
+            continue
+        _manifest, records, _privacy_report, _summary = read_evidence_bundle(bundle_path)
+        accepted_count = 0
+        duplicate_count = 0
+        for record in records:
+            digest = _sha256_text(json.dumps(record, sort_keys=True))
+            if digest in seen:
+                duplicate_count += 1
+                continue
+            seen.add(digest)
+            accepted.append(record)
+            accepted_count += 1
+        bundle_results.append({"path": str(bundle_path), "accepted": True, "records": accepted_count, "duplicates": duplicate_count})
+    write_evidence_jsonl(out_path, accepted)
+    return {
+        "out": str(out_path),
+        "bundles": bundle_results,
+        "records": len(accepted),
+        "summary": evidence_records_summary(accepted),
+    }
+
+
+def read_evidence_bundle(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    with zipfile.ZipFile(path, "r") as archive:
+        names = set(archive.namelist())
+        required = {"manifest.json", "records.jsonl", "schema.json", "privacy_report.json", "summary.json"}
+        missing = sorted(required - names)
+        if missing:
+            raise ValueError(f"Evidence bundle missing required files: {', '.join(missing)}")
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        records = [
+            json.loads(line)
+            for line in archive.read("records.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        privacy_report = json.loads(archive.read("privacy_report.json").decode("utf-8"))
+        summary = json.loads(archive.read("summary.json").decode("utf-8"))
+    return manifest, records, privacy_report, summary
+
+
+def evidence_bundle_schema() -> dict[str, Any]:
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "required_files": ["manifest.json", "records.jsonl", "schema.json", "privacy_report.json", "summary.json"],
+        "privacy_modes": sorted(PRIVACY_MODES),
+        "trust_levels": sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get),
+    }
+
+
+def evidence_records_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    trust = Counter()
+    labels = Counter()
+    field_types = Counter()
+    hard_negatives = 0
+    positives = 0
+    for row in records:
+        record = row.get("record") or {}
+        label = record.get("label") or {}
+        trust[str(label.get("trust_level") or "untrusted")] += 1
+        labels[str(label.get("status") or "unknown")] += 1
+        field = record.get("field") or {}
+        field_types[str(field.get("kind") or "unknown")] += 1
+        for candidate in row.get("candidates") or []:
+            hard_negatives += int(bool(candidate.get("hard_negative")))
+            positives += int(bool(candidate.get("label")))
+    return {
+        "records": len(records),
+        "label_counts": dict(sorted(labels.items())),
+        "trust_level_counts": dict(sorted(trust.items())),
+        "field_type_counts": dict(sorted(field_types.items())),
+        "positive_candidate_rows": positives,
+        "hard_negative_candidate_rows": hard_negatives,
+    }
+
+
+def evidence_privacy_report(records: list[dict[str, Any]]) -> dict[str, Any]:
+    serialized = json.dumps(records, ensure_ascii=False).lower()
+    raw_html_present = bool("<html" in serialized or "<!doctype" in serialized)
+    full_candidate_text_present = _key_present(records, "candidate_text") or _key_present(records, "candidate_context")
+    selector_present = _key_present(records, "candidate_selector") or _key_present(records, "selector")
+    value_text_present = (
+        _key_present(records, "candidate_value")
+        or _key_present(records, "selected_value")
+        or _key_present(records, "correct_value")
+        or _key_present(records, "expected_value")
+    )
+    url_present = "http://" in serialized or "https://" in serialized
+    return {
+        "raw_html_present": raw_html_present,
+        "full_candidate_text_present": full_candidate_text_present,
+        "selector_present": selector_present,
+        "value_text_present": value_text_present,
+        "url_present": url_present,
+        "hashes_present": "_hash" in serialized or "hash" in serialized,
     }
 
 
@@ -524,6 +760,9 @@ def _record_for_privacy(record: dict[str, Any], privacy: str) -> dict[str, Any]:
         out.pop("selected_value", None)
         name_hash = _sha256_text(record["input"]["name"])
         out["input"] = {"name": f"<redacted:{name_hash[:12]}>", "name_hash": name_hash, "hash": record["input"]["hash"]}
+        if isinstance(out.get("label"), dict):
+            out["label"].pop("correct_value", None)
+            out["label"].pop("expected_value", None)
     elif privacy == "redacted" and out.get("selected_value") is not None:
         out["selected_value_hash"] = _sha256_text(str(out["selected_value"]))
     return out
@@ -622,9 +861,33 @@ def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _key_present(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_key_present(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_key_present(item, key) for item in value)
+    return False
+
+
 def _validate_privacy(value: str) -> None:
     if value not in PRIVACY_MODES:
         raise ValueError(f"Unknown evidence privacy mode {value!r}; expected one of {sorted(PRIVACY_MODES)}")
+
+
+def _validate_trust(value: str) -> None:
+    if value not in TRUST_LEVEL_ORDER:
+        raise ValueError(f"Unknown trust level {value!r}; expected one of {sorted(TRUST_LEVEL_ORDER)}")
+
+
+def _trust_at_least(value: str, minimum: str) -> bool:
+    return TRUST_LEVEL_ORDER.get(value, 0) >= TRUST_LEVEL_ORDER[minimum]
+
+
+def _non_empty(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _value_shape(value: Any) -> str:
