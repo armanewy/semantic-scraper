@@ -1,0 +1,77 @@
+{
+  "run_name": "semis_guidance_surprise_v1",
+  "source": {
+    "mode": "manual_events",
+    "events_csv": "runs/semis_earnings_reviewed_v1/data/events/05_curated_corpus.csv"
+  },
+  "expectations": {
+    "external_expectations_csv": "data/events/semis_guidance_surprise_labels.csv",
+    "fill_labels_from_expectations": true
+  },
+  "corpus": {
+    "require_reviewed": true,
+    "target_labeled_rows_min": 80,
+    "target_labeled_rows_max": 150
+  },
+  "labels": {
+    "do_not_use_post_event_stock_movement": true,
+    "positive_guidance_threshold": 0.02,
+    "negative_guidance_threshold": -0.02,
+    "positive_revenue_threshold": 0.02,
+    "negative_revenue_threshold": -0.02,
+    "surprise_score_weights": {
+      "eps_surprise_z": 0.15,
+      "revenue_surprise_z": 0.25,
+      "guidance_revenue_surprise_z": 0.4,
+      "gross_margin_or_guidance_margin_surprise_z": 0.2
+    }
+  },
+  "tests": [
+    {
+      "name": "negative_guidance_after_pre_event_runup",
+      "filters": [
+        "market_adjusted_pre_return_20d > 0",
+        "guidance_revenue_surprise_pct < -0.02"
+      ],
+      "primary_horizons": ["h1_sector_adjusted", "h3_sector_adjusted"]
+    },
+    {
+      "name": "gross_margin_disappointment",
+      "filters": [
+        "gross_margin_surprise_pct < 0 OR guidance_gross_margin_surprise_pct < 0"
+      ],
+      "segments": {
+        "equipment": ["AMAT", "LRCX", "KLAC"],
+        "analog_mixed_signal": ["TXN", "ADI", "MCHP", "ON"]
+      }
+    },
+    {
+      "name": "ai_data_center_guidance_beat",
+      "universe": ["NVDA", "AMD", "AVGO", "MRVL", "MU"],
+      "features": [
+        "data_center_revenue_growth",
+        "ai_or_accelerator_mentions",
+        "forward_revenue_guidance_surprise_pct",
+        "capex_or_supply_constraint_commentary"
+      ]
+    },
+    {
+      "name": "equipment_company_guidance_cuts",
+      "universe": ["AMAT", "LRCX", "KLAC"],
+      "primary_feature": "guidance_revenue_surprise_pct"
+    }
+  ],
+  "gates": {
+    "min_reviewed_labeled_events": 80,
+    "min_events_with_guidance_surprise": 40,
+    "min_out_of_sample_predictions": 30,
+    "max_unknown_surprise_direction_rate": 0.2,
+    "max_unknown_surprise_magnitude_rate": 0.2,
+    "require_release_session_nearly_all_rows": true,
+    "require_placebo_weaker_than_real": true,
+    "require_peer_control_weaker_than_real": true,
+    "max_null_shuffle_p_value": 0.1,
+    "max_calibration_ece": 0.2,
+    "require_positive_net_after_costs": true
+  }
+}
