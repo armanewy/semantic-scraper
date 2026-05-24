@@ -37,7 +37,7 @@ Run the offline ranker path first:
 
 ```bash
 semscrape extract spec.yml inputs/example.html \
-  --policy ranker-local \
+  --policy ranker-local-safe \
   --record-evidence \
   --evidence-db .semscrape/evidence.db
 ```
@@ -46,7 +46,7 @@ For scripts, require important fields:
 
 ```bash
 semscrape extract spec.yml inputs/example.html \
-  --policy ranker-local \
+  --policy ranker-local-safe \
   --require-fields title price availability \
   --fail-on-abstain \
   --min-coverage 0.75
@@ -58,7 +58,7 @@ Add replay cases to `manifest.yml`, then run:
 
 ```bash
 semscrape canary manifest.yml \
-  --policy ranker-local \
+  --policy ranker-local-safe \
   --record-evidence \
   --evidence-db .semscrape/evidence.db \
   --out runs/canary.jsonl

@@ -47,6 +47,7 @@ This repo is a developer-alpha semantic scraper CLI:
 - Replayable rendered-page snapshots and real-page canary evaluation are included.
 - Tiny offline candidate-ranker dataset, training, calibration, and runtime policies are included.
 - A packaged default ranker is included, so `ranker-local` works without Ollama or an explicit `--ranker` path.
+- A high-precision `ranker-local-safe` policy is included for public-alpha style runs where abstention is preferred over false positives.
 - Local SQLite evidence capture, review, labeling, privacy-safe export, and evidence-derived dataset generation are included.
 - Privacy-audited evidence bundles and maintainer-side bundle intake are included for opt-in contribution workflows.
 - A local ecommerce domain-pack skeleton is included for pack-specific ranker and threshold defaults.
@@ -90,6 +91,14 @@ Extract with the packaged offline ranker:
 semscrape extract examples/product.yml examples/product_v2.html --values-only
 ```
 
+Use the public-alpha-safe local policy when false positives matter more than coverage:
+
+```bash
+semscrape extract examples/product.yml examples/product_v2.html \
+  --policy ranker-local-safe \
+  --values-only
+```
+
 Use the ecommerce pack to apply pack-specific defaults:
 
 ```bash
@@ -129,7 +138,7 @@ Create a small starter project:
 ```bash
 semscrape init product-scraper
 cd product-scraper
-semscrape extract spec.yml inputs/example.html --policy ranker-local --values-only
+semscrape extract spec.yml inputs/example.html --policy ranker-local-safe --values-only
 ```
 
 Exit codes for alpha scripting:
@@ -374,7 +383,7 @@ semscrape report-domain runs/ood-ranker-local.jsonl runs/ood-ranker-plus-llm.jso
   --out runs/domain-envelope.md
 ```
 
-`ranker-local` uses no LLM calls. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
+`ranker-local-safe` is the public-alpha high-precision preset: it uses no LLM calls and tightens ranker confidence, margin, validator-confidence, and penalty gates. `ranker-local` remains available for internal comparison when more coverage is useful. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
 
 ## Evidence Loop
 
@@ -382,7 +391,7 @@ Evidence capture is opt-in and local by default:
 
 ```bash
 semscrape canary corpus/ood_holdout/manifest.yml \
-  --policy ranker-local \
+  --policy ranker-local-safe \
   --record-evidence \
   --evidence-db .semscrape/evidence.db \
   --out runs/ood-holdout.jsonl
@@ -521,7 +530,7 @@ semscrape canary corpus/base_holdout/manifest.yml \
   --out runs/ecommerce-holdout.jsonl
 ```
 
-The initial `ecommerce` pack resolves to the packaged default ranker and conservative `ranker-local` thresholds. Packs are local files today; they are the foundation for future domain-specific rankers, validators, thresholds, and model cards.
+The initial `ecommerce` pack resolves to the packaged default ranker and conservative local thresholds. Packs are local files today; they are the foundation for future domain-specific rankers, validators, thresholds, and model cards.
 
 ## Alpha Pilots And Pack Releases
 
@@ -529,8 +538,8 @@ Pilot projects are local external-style usage cases. A pilot run executes a mani
 
 ```bash
 semscrape pilot run pilots/ecommerce_alpha_001 --pack ecommerce
-semscrape pilot run pilots/articles_alpha_001 --policy ranker-local
-semscrape pilot run pilots/listings_alpha_001 --policy ranker-local
+semscrape pilot run pilots/articles_alpha_001 --policy ranker-local-safe
+semscrape pilot run pilots/listings_alpha_001 --policy ranker-local-safe
 ```
 
 Generate standardized field-trial reports:

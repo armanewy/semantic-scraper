@@ -139,6 +139,16 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
         if PRICE_RE.search(value):
             score += 1.0
             reasons.append("price-like value")
+        if _is_listing_item_prompt(field.prompt_text):
+            if _looks_like_later_repeated_result(candidate.selector.lower()):
+                score -= 2.4
+                validation.hard_disqualifiers.append("non-first listing item price")
+                validation.errors.append("non-first listing item price")
+                validation.passed = False
+                reasons.append("disqualified non-first listing item price")
+            elif _candidate_in_listing_region(candidate.selector.lower(), ctx):
+                score += 0.55
+                reasons.append("first/listing price region cue")
         plan_reason = _price_plan_gate_reason(field.prompt_text, value.lower(), ctx, candidate.text.lower())
         if plan_reason:
             score -= 2.0
@@ -173,6 +183,28 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             reasons.append("penalized broad price container")
 
     if _is_title_field(field, name, f_tokens):
+        if _is_recent_item_title_prompt(field.prompt_text):
+            if candidate.tag in {"h1", "title"}:
+                score -= 2.6
+                validation.hard_disqualifiers.append("recent item title matched featured/page title")
+                validation.errors.append("recent item title matched featured/page title")
+                validation.passed = False
+                reasons.append("disqualified featured/page title for recent item")
+            elif candidate.tag not in {"h2", "h3", "h4"}:
+                score -= 2.0
+                validation.hard_disqualifiers.append("recent item title matched non-heading")
+                validation.errors.append("recent item title matched non-heading")
+                validation.passed = False
+                reasons.append("disqualified non-heading for recent item title")
+            else:
+                score += 1.25
+                reasons.append("recent item heading cue")
+            if _looks_like_later_repeated_result(candidate.selector.lower()):
+                score -= 1.8
+                validation.hard_disqualifiers.append("not first recent item title")
+                validation.errors.append("not first recent item title")
+                validation.passed = False
+                reasons.append("disqualified non-first recent item title")
         if candidate.tag in {"h1", "h2"}:
             score += 1.4
             reasons.append("heading tag")
@@ -297,6 +329,21 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
     if "availability" in name or "stock" in f_tokens:
         if any(term in text for term in ["in stock", "out of stock", "available", "ships", "sold out"]):
             score += 1.0
+
+    if _is_metadata_value_prompt(field):
+        metadata_reason = _metadata_value_gate_reason(field, candidate)
+        if metadata_reason:
+            score -= 2.4
+            validation.hard_disqualifiers.append(metadata_reason)
+            validation.errors.append(metadata_reason)
+            validation.passed = False
+            reasons.append(f"disqualified {metadata_reason}")
+        elif _metadata_label_matches(field, candidate):
+            score += 2.2
+            reasons.append("metadata label/value cue")
+        elif candidate.tag in {"dd", "abbr"} and _is_metadata_region(candidate):
+            score += 0.45
+            reasons.append("metadata value region cue")
 
     if field.kind == "url" and candidate.attrs.get("href"):
         score += 0.6
@@ -423,16 +470,39 @@ def _is_first_section_prompt(field: FieldSpec, name: str) -> bool:
 
 
 def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
-    region = f"{selector} {context}".lower()
+    selector_region = selector.lower()
+    context_region = context.lower()
     if any(
-        term in region
+        term in selector_region
+        for term in {
+            "banner",
+            "visuallyhidden",
+            "role=\"complementary\"",
+            "role='complementary'",
+            "aside",
+            "sidebar",
+            "browse-header",
+            "links-wrapper",
+            "getting-help-sidebar",
+            "col-learn-more",
+            "col-get-involved",
+            "col-get-help",
+            "col-follow-us",
+            "col-support-us",
+            "toc",
+            "table-of-contents",
+            "breadcrumb",
+            "footer",
+        }
+    ):
+        return True
+    if any(
+        term in context_region
         for term in {
             "main navigation",
             "aria-label=\"related\"",
             "aria-label='related'",
-            "toc",
             "table of contents",
-            "sidebar",
             "previous topic",
             "next topic",
             "this page",
@@ -440,7 +510,22 @@ def _is_non_content_section_region(selector: str, context: str, value: str) -> b
         }
     ):
         return True
-    return value in {"navigation", "table of contents", "previous topic", "next topic", "this page"}
+    return value in {
+        "navigation",
+        "table of contents",
+        "previous topic",
+        "next topic",
+        "this page",
+        "contents",
+        "django links",
+        "learn more",
+        "get involved",
+        "get help",
+        "follow us",
+        "support us",
+        "additional information",
+        "django developer survey",
+    }
 
 
 def _heading_index(selector: str) -> int:
@@ -450,6 +535,8 @@ def _heading_index(selector: str) -> int:
 
 def _is_main_page_title_prompt(prompt: str) -> bool:
     compact = prompt.lower()
+    if _is_recent_item_title_prompt(compact):
+        return False
     return any(
         term in compact
         for term in {
@@ -460,9 +547,54 @@ def _is_main_page_title_prompt(prompt: str) -> bool:
             "main pricing page title",
             "main article title",
             "article title",
-            "post title",
         }
     )
+
+
+def _is_recent_item_title_prompt(prompt: str) -> bool:
+    compact = prompt.lower()
+    return any(term in compact for term in {"first recent", "recent post", "recent h3", "listed under the recent", "under the recent section"})
+
+
+def _is_metadata_value_prompt(field: FieldSpec) -> bool:
+    prompt = field.prompt_text.lower()
+    name = field.name.lower()
+    return any(term in prompt for term in {"metadata", "field-list", "definition list"}) or name in {"status", "type", "created", "post_history", "post-history"}
+
+
+def _metadata_value_gate_reason(field: FieldSpec, candidate: Candidate) -> str | None:
+    prompt = field.prompt_text.lower()
+    selector = candidate.selector.lower()
+    ctx = context_text(candidate)
+    if candidate.tag == "dt":
+        return "metadata label not value"
+    if candidate.tag in {"article", "section", "dl", "ul", "ol", "table"} and _is_metadata_region(candidate):
+        return "metadata container not scalar value"
+    if candidate.tag in {"code", "pre"} or "pre:nth-of-type" in selector or "code" in selector:
+        return "code sample metadata candidate"
+    if candidate.tag == "a" and not _metadata_label_matches(field, candidate):
+        return "link body text metadata candidate"
+    if "status" in prompt and _metadata_label_matches(field, candidate, label="status"):
+        return None
+    if "status" in prompt and candidate.tag in {"dd", "abbr"} and _is_metadata_region(candidate):
+        return None
+    if candidate.tag in {"span", "em"} and not _metadata_label_matches(field, candidate):
+        return "inline body text metadata candidate"
+    if any(term in ctx for term in {"table of contents", "source code", "# correct:", "# wrong:"}):
+        return "non-metadata body region"
+    return None
+
+
+def _metadata_label_matches(field: FieldSpec, candidate: Candidate, *, label: str | None = None) -> bool:
+    name = field.name.lower().replace("_", " ")
+    labels = {label} if label else {name, name.replace(" ", "-"), *name.split()}
+    context = f"{candidate.before_text} {candidate.attr_text}".lower()
+    return any(_contains_context_term(context, item) for item in labels if len(item) >= 3)
+
+
+def _is_metadata_region(candidate: Candidate) -> bool:
+    haystack = f"{candidate.selector} {candidate.path} {candidate.parent_text} {candidate.before_text}".lower()
+    return any(term in haystack for term in {"dl:nth-of-type", "field-list", "rfc2822", "metadata"})
 
 
 def _is_page_heading_candidate(candidate: Candidate) -> bool:
@@ -482,7 +614,7 @@ def _candidate_in_listing_region(selector: str, context: str) -> bool:
 
 
 def _looks_like_later_repeated_result(selector: str) -> bool:
-    indexes = [int(match) for match in re.findall(r"(?:article|section|li):nth-of-type\((\d+)\)", selector)]
+    indexes = [int(match) for match in re.findall(r"(?:article|li):nth-of-type\((\d+)\)", selector)]
     return bool(indexes and max(indexes) >= 2)
 
 

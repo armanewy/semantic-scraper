@@ -1112,3 +1112,106 @@ Exit criteria:
 - No unverified positives are used for training.
 
 Status: failed public-alpha readiness. `v0.1.0-alpha.3` passed recall, coverage, bundle audit, and known-regression gates, but fresh alpha.3 false-positive rate was `0.096774`, above the `0.020000` gate. Do not promote to public alpha before M15R.
+
+## M15R: Public-Alpha Safety Remediation
+
+**Question:** Can we reduce fresh alpha.3 false positives below the public-alpha threshold without overfitting to the M15 pilot set?
+
+Deliverables:
+
+- M15 false-positive incident report:
+  - `docs/m15r_public_alpha_incident_report.md`
+- Public-alpha high-precision policy preset:
+  - `ranker-local-safe`
+- Field/region remediation for:
+  - first repeated listing/product-card prices
+  - recent h3/list item titles vs featured h1 titles
+  - metadata definition-list values vs body/link/code candidates
+  - docs section headings vs banners, hidden footer headings, footer columns, and sidebar-only regions
+- Feature additions:
+  - candidate before/after/parent text
+  - region flags for toc, glossary, breadcrumb, metadata panel, and code regions
+- M15 remediation rerun:
+  - `runs/m15r/m15-remediation-summary.md`
+- Fresh M15R mini-holdout rerun:
+  - `runs/m15r/mini-holdout-summary.md`
+- Accumulated regression reruns:
+  - `runs/m15r/original-external-alpha-regression-summary.md`
+  - `runs/m15r/m14-fresh-remediation-regression-summary.md`
+  - `runs/m15r/m14r-mini-holdout-regression-summary.md`
+- Base/adversarial reruns:
+  - `runs/m15r/base-holdout-ranker-local-safe.jsonl`
+  - `runs/m15r/adversarial-holdout-ranker-local-safe.jsonl`
+- Release-check:
+  - `runs/m15r/ranker-local-safe-release-check.json`
+- Public-alpha safety report:
+  - `docs/m15r_public_alpha_safety_report.md`
+
+M15 remediation set:
+
+```text
+pilots: 11
+domains: 6
+fields: 31
+coverage_rate: 0.709678
+false_positive_rate: 0.000000
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Fresh M15R mini-holdout:
+
+```text
+pilots: 4
+domains: 4
+fields: 10
+coverage_rate: 0.900000
+false_positive_rate: 0.000000
+candidate_recall_at_40: 1.000000
+bundle_audit_pass_rate: 1.000000
+```
+
+Regression suites:
+
+```text
+original_external_alpha:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+m14_fresh_remediation:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+m14r_mini_holdout:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+base_holdout:
+  coverage_rate: 0.950000
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+adversarial_holdout:
+  false_positive_rate: 0.000000
+```
+
+Release-check:
+
+```text
+passed: true
+promotion: promote_candidate
+```
+
+Exit criteria:
+
+- M15 remediation set FPR = 0.
+- M15 remediation set recall@40 >= 95%.
+- New M15R mini-holdout FPR <= 2%.
+- New M15R mini-holdout recall@40 >= 95%.
+- All regression suites remain FPR = 0.
+- Base/adversarial FPR remains 0.
+- Features-only bundle audits still pass.
+- No unverified positives are used for training.
+- `v0.1.0-alpha.4` is tagged only after the full gate passes.
+
+Status: passed. M15R restored false-positive safety on the M15 fresh set, passed a separate mini-holdout, preserved all accumulated regression suites, and kept the release posture conservative through `ranker-local-safe`.

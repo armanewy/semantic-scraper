@@ -328,9 +328,141 @@ def test_section_prompt_rejects_navigation_heading() -> None:
     assert prediction.row["candidate_value"] == "Basic Usage"
 
 
+def test_section_prompt_rejects_banner_and_footer_headings() -> None:
+    field = FieldSpec(
+        name="first_tutorial_section",
+        kind="text",
+        description="First main tutorial section heading after the page title, not survey/sidebar content.",
+        hints=["first tutorial section", "creating a project"],
+    )
+    html = """
+    <body>
+      <div class="banner"><h2>Django Developer Survey</h2></div>
+      <div class="container sidebar-right">
+        <main>
+          <h1>Writing your first Django app, part 1</h1>
+          <section id="s-creating-a-project"><h2>Creating a project<a class="headerlink">¶</a></h2></section>
+          <section id="s-the-development-server"><h2>The development server<a class="headerlink">¶</a></h2></section>
+        </main>
+        <aside><h2 id="aside-header">Additional Information</h2></aside>
+      </div>
+      <footer>
+        <div class="col-learn-more"><h3>Learn More</h3></div>
+        <div class="col-get-help"><h3>Get Help</h3></div>
+      </footer>
+    </body>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Creating a project"
+
+
+def test_section_prompt_rejects_visuallyhidden_footer_heading() -> None:
+    field = FieldSpec(
+        name="server_section",
+        kind="text",
+        description="Tutorial section heading about the development server.",
+        hints=["development server", "server section"],
+    )
+    html = """
+    <body>
+      <main>
+        <h1>Writing your first Django app, part 1</h1>
+        <section id="s-creating-a-project"><h2>Creating a project<a class="headerlink">¶</a></h2></section>
+        <section id="s-the-development-server"><h2>The development server<a class="headerlink">¶</a></h2></section>
+      </main>
+      <footer>
+        <h2 class="visuallyhidden">Django Links</h2>
+        <div class="col-learn-more"><h3>Learn More</h3></div>
+      </footer>
+    </body>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "The development server"
+
+
 def test_mojibake_pound_currency_matches_expected_value() -> None:
     field = FieldSpec(name="price", kind="price")
     candidate = generate_candidates("<p class='price_color'>Â£45.17</p>")[0]
 
     assert extract_value(field, candidate) == "£45.17"
     assert values_match("£45.17", "Â£45.17")
+
+
+def test_recent_post_title_rejects_featured_h1() -> None:
+    field = FieldSpec(
+        name="first_recent_title",
+        kind="text",
+        description="Title of the first h3 post listed under the Recent section, not the featured h1 post.",
+        hints=["first recent post title", "h3 post title"],
+    )
+    html = """
+    <main>
+      <section><h1>Python 3.14.5 is out!</h1></section>
+      <section>
+        <h2>Recent</h2>
+        <article><a><h3>Python 3.15.0 beta 1 is here!</h3></a></article>
+        <article><a><h3>Python 3.14.5 release candidate</h3></a></article>
+      </section>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Python 3.15.0 beta 1 is here!"
+
+
+def test_pep_metadata_status_prefers_definition_value() -> None:
+    field = FieldSpec(
+        name="status",
+        kind="text",
+        description="PEP status value from the metadata table.",
+        hints=["status", "PEP metadata"],
+    )
+    html = """
+    <article>
+      <dl class="rfc2822 field-list simple">
+        <dt>Status<span>:</span></dt><dd><abbr title="Currently valid">Active</abbr></dd>
+        <dt>Type<span>:</span></dt><dd><abbr>Process</abbr></dd>
+      </dl>
+      <section id="introduction"><p>See <a>PEP 257</a> for docstring conventions.</p></section>
+    </article>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "Active"
+
+
+def test_first_product_price_rejects_later_card_prices() -> None:
+    field = FieldSpec(
+        name="first_product_price",
+        kind="price",
+        description="Current visible price for the first product card only.",
+        hints=["first product price", "current price"],
+    )
+    html = """
+    <main>
+      <ol>
+        <li><article class="product_pod"><h3>First Book</h3><p class="price_color">£33.34</p></article></li>
+        <li><article class="product_pod"><h3>Second Book</h3><p class="price_color">£43.14</p></article></li>
+      </ol>
+    </main>
+    """
+
+    prediction = _ranker_prediction(field, html)
+
+    assert prediction.action == "choose"
+    assert prediction.row is not None
+    assert prediction.row["candidate_value"] == "£33.34"

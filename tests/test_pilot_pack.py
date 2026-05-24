@@ -80,7 +80,7 @@ def test_pack_build_info_and_release_check(tmp_path, capsys) -> None:
 
     assert main(["pack", "info", str(out_pack)]) == 0
     info = json.loads(capsys.readouterr().out)
-    assert info["policy"] == "ranker-local"
+    assert info["policy"] == "ranker-local-safe"
     assert info["ranker"]["type"] == "semscrape_candidate_ranker"
 
     release = tmp_path / "release.json"

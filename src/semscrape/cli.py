@@ -389,7 +389,7 @@ def _run_eval_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list
             expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
             if not expected_for_file and args.expect_like:
                 expected_for_file = spec.benchmarks.get(args.expect_like, {})
-            if getattr(args, "policy", None) in {"safe-local", "ranker-local", "ranker-plus-llm"}:
+            if getattr(args, "policy", None) in {"safe-local", "ranker-local", "ranker-local-safe", "ranker-plus-llm"}:
                 rows.extend(_run_policy_eval_rows(args, spec, input_ref, html, expected_for_file, failures_dir))
             else:
                 for field in spec.fields:
@@ -436,7 +436,7 @@ def _run_policy_eval_rows(
             html,
             input_name=basename_key(input_ref),
             cache=cache,
-            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") != "ranker-local",
+            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe"},
             model=model if model not in {"heuristic", "ranker"} else "qwen3:1.7b",
             ollama_host=args.ollama_host,
             top_k=args.top_k,
@@ -673,12 +673,12 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.min_validator_confidence = float(defaults["min_validator_confidence"])
     if not getattr(args, "_max_ranker_penalties_explicit", False) and "max_ranker_penalties" in defaults:
         args.max_ranker_penalties = int(defaults["max_ranker_penalties"])
-    if policy in {"ranker-local", "ranker-plus-llm"} and not getattr(args, "ranker", None):
+    if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"} and not getattr(args, "ranker", None):
         try:
             args.ranker = default_ranker_path()
         except FileNotFoundError as exc:
             raise CliError(str(exc), 4) from exc
-    if policy in {"ranker-local", "ranker-plus-llm"} and getattr(args, "ranker", None) and not Path(args.ranker).exists():
+    if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"} and getattr(args, "ranker", None) and not Path(args.ranker).exists():
         raise CliError(f"Ranker file not found: {args.ranker}", 4)
 
 
@@ -1170,7 +1170,7 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
-        if args.policy == "ranker-local":
+        if args.policy in {"ranker-local", "ranker-local-safe"}:
             model = args.model or "ranker"
         elif args.policy in {"safe-local", "ranker-plus-llm"}:
             model = args.model or "qwen3:1.7b"
@@ -1794,7 +1794,7 @@ def _first_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _canary_namespace(
     *,
     specs: list[str],
-    policy: str = "ranker-local",
+    policy: str = "ranker-local-safe",
     pack: str | None = None,
     out: str,
     failures_dir: str,
@@ -2424,7 +2424,7 @@ def cmd_ranker_info(args: argparse.Namespace) -> int:
             "feature_count": len(ranker.weights),
             "threshold": ranker.threshold,
             "margin": ranker.margin,
-            "recommended_policy": "ranker-local",
+            "recommended_policy": "ranker-local-safe",
             "metadata": ranker.metadata or {},
             "metrics": raw.get("metrics", {}),
         }
@@ -2568,13 +2568,13 @@ semscrape inspect spec.yml inputs/example.html price
 Extract with the packaged offline ranker:
 
 ```bash
-semscrape extract spec.yml inputs/example.html --policy ranker-local --values-only
+semscrape extract spec.yml inputs/example.html --policy ranker-local-safe --values-only
 ```
 
 Run a replay canary:
 
 ```bash
-semscrape canary manifest.yml --policy ranker-local --out runs/canary.jsonl
+semscrape canary manifest.yml --policy ranker-local-safe --out runs/canary.jsonl
 ```
 """
 
@@ -2595,7 +2595,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
-    extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local")
+    extract.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
     extract.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     extract.add_argument("--model-on-abstain-only", action="store_true", help="Call the local model only after strict heuristic abstention")
     extract.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
@@ -2631,7 +2631,7 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_sub = pilot.add_subparsers(dest="pilot_cmd", required=True)
     pilot_run = pilot_sub.add_parser("run", help="Run a pilot project end to end")
     pilot_run.add_argument("project")
-    pilot_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local")
+    pilot_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
     pilot_run.add_argument("--pack", default=None, help="Domain pack name or path")
     pilot_run.add_argument("--top-k", type=int, default=40)
     pilot_run.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
@@ -2842,7 +2842,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     canary = sub.add_parser("canary", help="Run safe-local extraction over replayable real-page specs")
     canary.add_argument("specs", nargs="+")
-    canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="safe-local")
+    canary.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
     canary.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     canary.add_argument("--model", default=None)
     canary.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker policies")

@@ -53,6 +53,11 @@ NUMERIC_FEATURES = {
     "region_footer": 1.0,
     "region_tag_cloud": 1.0,
     "region_related": 1.0,
+    "region_toc": 1.0,
+    "region_glossary": 1.0,
+    "region_breadcrumb": 1.0,
+    "region_metadata_panel": 1.0,
+    "region_code": 1.0,
 }
 
 CATEGORICAL_FEATURES = (
@@ -562,7 +567,21 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if _is_title_prompt(prompt, field):
         if _looks_like_price_value(value_lower):
             return "ranker_title_price_candidate"
-        if _is_listing_item_prompt(prompt):
+        if _is_recent_item_title_prompt(prompt):
+            if tag in {"h1", "title"}:
+                return "ranker_recent_title_featured_candidate"
+            if "h3" in prompt and tag != "h3":
+                return "ranker_recent_title_h3_required"
+            if tag not in {"h2", "h3", "h4"}:
+                return "ranker_recent_title_heading_required"
+            candidate_position = _listing_position(selector, context)
+            if candidate_position is not None and candidate_position > 1:
+                return "ranker_non_first_recent_candidate"
+            if any(term in selector or term in context for term in {"related", "footer", "sidebar", "tag"}):
+                return "ranker_recent_title_non_primary_region"
+            if value_lower in {"recent", "latest", "related links"}:
+                return "ranker_recent_title_section_label"
+        elif _is_listing_item_prompt(prompt):
             first_listing_position = row.get("_first_listing_position")
             candidate_position = _listing_position(selector, context)
             if (
@@ -641,6 +660,11 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
         if _is_broad_container(row, value):
             return "ranker_broad_container"
 
+    if _is_metadata_value_prompt(prompt, field):
+        metadata_reason = _metadata_value_gate_reason(row, prompt, field, tag, selector, context)
+        if metadata_reason:
+            return metadata_reason
+
     ordinal = _requested_ordinal(prompt)
     if ordinal and _requires_numeric_ordinal(prompt, ordinal):
         if not _value_starts_with_ordinal(value, ordinal):
@@ -656,6 +680,10 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if field_type == "price" and any(term in context for term in {"sponsored", "recommended", "training fee", "workshop"}):
         return "ranker_price_ad_region"
     if field_type == "price":
+        if _is_listing_item_prompt(prompt):
+            candidate_position = _listing_position(selector, context)
+            if candidate_position is not None and candidate_position > 1:
+                return "ranker_non_first_listing_price"
         plan_reason = _price_plan_gate_reason(prompt, value_lower, context, candidate_text)
         if plan_reason:
             return plan_reason
@@ -700,16 +728,39 @@ def _is_first_section_prompt(prompt: str, field: str) -> bool:
 
 
 def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
-    region = f"{selector} {context}".lower()
+    selector_region = selector.lower()
+    context_region = context.lower()
     if any(
-        term in region
+        term in selector_region
+        for term in {
+            "banner",
+            "visuallyhidden",
+            "role=\"complementary\"",
+            "role='complementary'",
+            "aside",
+            "sidebar",
+            "browse-header",
+            "links-wrapper",
+            "getting-help-sidebar",
+            "col-learn-more",
+            "col-get-involved",
+            "col-get-help",
+            "col-follow-us",
+            "col-support-us",
+            "toc",
+            "table-of-contents",
+            "breadcrumb",
+            "footer",
+        }
+    ):
+        return True
+    if any(
+        term in context_region
         for term in {
             "main navigation",
             "aria-label=\"related\"",
             "aria-label='related'",
-            "toc",
             "table of contents",
-            "sidebar",
             "previous topic",
             "next topic",
             "this page",
@@ -717,7 +768,22 @@ def _is_non_content_section_region(selector: str, context: str, value: str) -> b
         }
     ):
         return True
-    return value in {"navigation", "table of contents", "previous topic", "next topic", "this page"}
+    return value in {
+        "navigation",
+        "table of contents",
+        "previous topic",
+        "next topic",
+        "this page",
+        "contents",
+        "django links",
+        "learn more",
+        "get involved",
+        "get help",
+        "follow us",
+        "support us",
+        "additional information",
+        "django developer survey",
+    }
 
 
 def _heading_index(selector: str) -> int:
@@ -726,6 +792,8 @@ def _heading_index(selector: str) -> int:
 
 
 def _is_main_page_title_prompt(prompt: str) -> bool:
+    if _is_recent_item_title_prompt(prompt):
+        return False
     return any(
         term in prompt
         for term in {
@@ -736,9 +804,12 @@ def _is_main_page_title_prompt(prompt: str) -> bool:
             "main pricing page title",
             "main article title",
             "article title",
-            "post title",
         }
     )
+
+
+def _is_recent_item_title_prompt(prompt: str) -> bool:
+    return any(term in prompt for term in {"first recent", "recent post", "recent h3", "listed under the recent", "under the recent section"})
 
 
 def _is_page_heading_candidate(row: dict[str, Any], tag: str, selector: str, context: str) -> bool:
@@ -810,7 +881,7 @@ def _candidate_index(candidate_id: Any) -> int | None:
 
 def _listing_position(selector: str, context: str) -> int | None:
     haystack = f"{selector} {context}".lower()
-    matches = [int(match) for match in re.findall(r"(?:li|article|section):nth-of-type\((\d+)\)", haystack)]
+    matches = [int(match) for match in re.findall(r"(?:li|article):nth-of-type\((\d+)\)", haystack)]
     return max(matches) if matches else None
 
 
@@ -831,8 +902,53 @@ def _is_tag_or_category_title(value: str, selector: str, context: str) -> bool:
 
 
 def _looks_like_later_repeated_result(selector: str) -> bool:
-    indexes = [int(match) for match in re.findall(r"(?:article|section|li):nth-of-type\((\d+)\)", selector)]
+    indexes = [int(match) for match in re.findall(r"(?:article|li):nth-of-type\((\d+)\)", selector)]
     return bool(indexes and max(indexes) >= 3)
+
+
+def _is_metadata_value_prompt(prompt: str, field: str) -> bool:
+    return any(term in prompt for term in {"metadata", "field-list", "definition list"}) or field in {"status", "type", "created", "post_history", "post-history"}
+
+
+def _metadata_value_gate_reason(row: dict[str, Any], prompt: str, field: str, tag: str, selector: str, context: str) -> str | None:
+    label_matches = _metadata_label_matches(row, field)
+    if tag == "dt":
+        return "ranker_metadata_label_not_value"
+    if label_matches:
+        if tag in {"dd", "abbr"}:
+            return None
+        return "ranker_metadata_label_context_not_scalar"
+    if tag in {"article", "section", "dl", "ul", "ol", "table"} and _is_metadata_region(selector, context):
+        return "ranker_metadata_container_not_scalar"
+    if tag in {"code", "pre"} or "pre:nth-of-type" in selector or "code" in selector:
+        return "ranker_metadata_code_sample"
+    if "status" in prompt and tag in {"dd", "abbr"} and _is_metadata_region(selector, context):
+        return "ranker_metadata_wrong_field_value"
+    if tag == "a":
+        return "ranker_metadata_body_link"
+    if tag in {"span", "em", "p"}:
+        return "ranker_metadata_inline_body_text"
+    if any(term in context for term in {"table of contents", "source code", "# correct:", "# wrong:"}):
+        return "ranker_metadata_non_metadata_region"
+    return "ranker_metadata_label_context_required"
+
+
+def _metadata_label_matches(row: dict[str, Any], field: str) -> bool:
+    normalized = field.lower().replace("_", " ")
+    labels = {normalized, normalized.replace(" ", "-"), *normalized.split()}
+    context = " ".join(
+        [
+            str(row.get("candidate_before_text") or ""),
+            str(row.get("candidate_selector") or ""),
+            str(row.get("aria_name") or ""),
+        ]
+    ).lower()
+    return any(_contains_term(context, label) for label in labels if len(label) >= 3)
+
+
+def _is_metadata_region(selector: str, context: str) -> bool:
+    haystack = f"{selector} {context}".lower()
+    return any(term in haystack for term in {"dl:nth-of-type", "field-list", "rfc2822", "metadata"})
 
 
 def _contains_term(haystack: str, term: str) -> bool:

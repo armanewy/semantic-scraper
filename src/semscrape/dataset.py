@@ -163,6 +163,9 @@ def candidate_dataset_row(
         "candidate_id": candidate.id,
         "candidate_value": ranked.value,
         "candidate_text": candidate.text[:500],
+        "candidate_before_text": candidate.before_text[:240],
+        "candidate_after_text": candidate.after_text[:240],
+        "candidate_parent_text": candidate.parent_text[:500],
         "candidate_context": ctx[:1000],
         "candidate_selector": selector,
         "candidate_tag": candidate.tag,
@@ -282,6 +285,11 @@ def _region_flags(selector: str, context: str) -> dict[str, bool]:
         "region_footer": _region_has_any(haystack, {"footer"}),
         "region_tag_cloud": _region_has_any(haystack, {"tag cloud", "top tags", "tags-box"}),
         "region_related": _region_has_any(haystack, {"related", "recommended", "recently viewed", "also viewed", "sponsored"}),
+        "region_toc": _region_has_any(haystack, {"toc", "table of contents", "toctree"}),
+        "region_glossary": _region_has_any(haystack, {"glossary", "index", "terms"}),
+        "region_breadcrumb": _region_has_any(haystack, {"breadcrumb", "you are here"}),
+        "region_metadata_panel": _region_has_any(haystack, {"field-list", "rfc2822", "metadata", "dl:nth-of-type"}),
+        "region_code": _region_has_any(haystack, {"pre:nth-of-type", "code", "highlight", "docutils literal"}),
     }
 
 

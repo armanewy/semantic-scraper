@@ -45,6 +45,16 @@ POLICY_DEFAULTS = {
         "min_validator_confidence": 0.70,
         "max_ranker_penalties": 1,
     },
+    "ranker-local-safe": {
+        "strict": True,
+        "use_llm": False,
+        "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
+        "min_confidence": 0.78,
+        "min_margin": 0.18,
+        "min_validator_confidence": 0.75,
+        "max_ranker_penalties": 0,
+    },
     "ranker-plus-llm": {
         "strict": True,
         "use_llm": True,
@@ -712,7 +722,7 @@ def extract_field(
             return _field_extraction(field, heuristic, source="heuristic", trace=trace)
         trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": decision.reason, "candidate_id": heuristic.candidate.id})
         ranker_abstention_reason = None
-        if policy in {"ranker-local", "ranker-plus-llm"}:
+        if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"}:
             ranker_attempt = _call_ranker(
                 field,
                 ranked,
@@ -726,7 +736,7 @@ def extract_field(
             if ranker_attempt.error:
                 trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
                 ranker_abstention_reason = "ranker_error"
-                if policy == "ranker-local":
+                if policy in {"ranker-local", "ranker-local-safe"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
             elif ranker_attempt.chosen is None:
                 ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
@@ -740,7 +750,7 @@ def extract_field(
                         "latency_ms": ranker_attempt.latency_ms,
                     }
                 )
-                if policy == "ranker-local":
+                if policy in {"ranker-local", "ranker-local-safe"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
                 if not _ranker_abstention_allows_model(ranker_abstention_reason):
                     return _abstention(
@@ -784,7 +794,7 @@ def extract_field(
                     )
                 reason = ranker_decision.reason or "low_ranker_confidence"
                 trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
-                if policy == "ranker-local":
+                if policy in {"ranker-local", "ranker-local-safe"}:
                     return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
                 return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
 

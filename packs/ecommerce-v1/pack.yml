@@ -1,14 +1,14 @@
 name: ecommerce-v1
 description: Domain pack built from trusted evidence intake for ecommerce.
-policy: ranker-local
+policy: ranker-local-safe
 ranker: ranker.json
 thresholds:
-  min_confidence: 0.75
-  min_margin: 0.15
-  min_validator_confidence: 0.7
+  min_confidence: 0.78
+  min_margin: 0.18
+  min_validator_confidence: 0.75
   min_ranker_confidence: 0.7
   min_ranker_margin: 0.0
-  max_ranker_penalties: 1
+  max_ranker_penalties: 0
   llm_fallback_policy: recoverable-only
 validators: validators.yml
 supported_fields: supported-fields.yml
