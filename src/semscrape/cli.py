@@ -56,6 +56,13 @@ from .evidence import (
 from .extract import POLICY_DEFAULTS, extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
+from .oracle import (
+    OracleError,
+    read_oracle_jsonl,
+    resolve_source_oracle,
+    write_oracle_jsonl,
+    write_oracle_report,
+)
 from .packs import apply_pack_to_args, load_pack
 from .ranker import (
     CandidateRanker,
@@ -473,6 +480,8 @@ def _run_policy_eval_rows(
                 bucket=getattr(args, "bucket", None),
                 category=getattr(args, "category", None),
                 ranker_model=getattr(args, "ranker", None),
+                label_source=getattr(args, "label_source", None),
+                label_trust=getattr(args, "label_trust", None),
             )
         elapsed_ms = int(round((time.perf_counter() - report_started) * 1000))
         for field in spec.fields:
@@ -1209,6 +1218,8 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             evidence_db=getattr(args, "evidence_db", DEFAULT_EVIDENCE_DB),
             evidence_privacy=getattr(args, "evidence_privacy", "redacted"),
             command="canary",
+            label_source=getattr(args, "label_source", None),
+            label_trust=getattr(args, "label_trust", None),
         )
         case_rows = _run_policy_eval_rows(eval_args, spec, input_ref, html, expected_for_file, failures_dir)
         for row in case_rows:
@@ -1437,7 +1448,7 @@ def cmd_alpha_summarize(args: argparse.Namespace) -> int:
 
 
 SOURCE_SPLITS = {"dev", "holdout", "adversarial", "monitor_only", "train_candidate"}
-EXPECTED_MODES = {"manual", "benchmark", "oracle", "none", "unknown"}
+EXPECTED_MODES = {"manual", "benchmark", "oracle", "page_structured_data", "none", "unknown"}
 LABEL_POLICIES = {"review_required", "benchmark", "oracle", "monitor_only", "none"}
 GLOBAL_TRAINING_SPLITS = {"train_candidate"}
 TRAINABLE_TRUST = {"gold", "silver"}
@@ -1451,12 +1462,19 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
     source_results: list[dict[str, Any]] = []
     bundle_paths: list[str] = []
     evidence_rows: list[dict[str, Any]] = []
+    oracle_rows: list[dict[str, Any]] = []
     selected_sources = _select_registry_sources(registry["sources"], args)
 
     for index, source in enumerate(selected_sources, start=1):
         source_dir = out_dir / "sources" / _safe_cache_name(source["id"])
         source_dir.mkdir(parents=True, exist_ok=True)
-        manifest = _write_source_manifest(source, registry_path.parent, source_dir)
+        source_oracle_rows: list[dict[str, Any]] = []
+        oracle_expected: dict[str, Any] = {}
+        if args.resolve_oracles and (source.get("oracle") or source["expected_mode"] in {"oracle", "page_structured_data"}):
+            source_oracle_rows = _resolve_oracle_rows_for_source(source, registry_path.parent, live=bool(source.get("live", args.live)))
+            oracle_rows.extend(source_oracle_rows)
+            oracle_expected = {row["field"]: row["expected"] for row in source_oracle_rows if row.get("status") == "resolved"}
+        manifest = _write_source_manifest(source, registry_path.parent, source_dir, oracle_expected=oracle_expected)
         evidence_db = source_dir / "evidence.db"
         canary_out = source_dir / "canary.jsonl"
         failures_dir = source_dir / "failures"
@@ -1476,6 +1494,8 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
             evidence_privacy=source.get("evidence_privacy") or args.evidence_privacy,
             top_k=int(source.get("top_k") or args.top_k),
             live=bool(source.get("live", args.live)),
+            label_source=_oracle_label_source(source, source_oracle_rows),
+            label_trust=_oracle_label_trust(source_oracle_rows),
         )
         canary_result = _run_canary(canary_args)
         bundle_result = create_evidence_bundle(
@@ -1512,6 +1532,9 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
                 "false_positive_rate": float(metrics.get("false_positive_rate", 0.0)),
                 "candidate_recall_at_40": float(metrics.get("candidate_recall_at_k", 0.0)),
                 "abstention_rate": float(metrics.get("abstention_rate", 0.0)),
+                "oracle_rows": len(source_oracle_rows),
+                "oracle_resolved": sum(int(row.get("status") == "resolved") for row in source_oracle_rows),
+                "oracle_errors": [row.get("error") for row in source_oracle_rows if row.get("status") == "error"],
             }
         )
         delay = float(source.get("rate_limit_seconds") or 0)
@@ -1527,6 +1550,13 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
     _write_jsonl(out_dir / "review-queue.jsonl", review_queue)
     gaps_report = _pack_gaps_report(evidence_rows, pack=args.pack)
     (out_dir / "gaps.md").write_text(gaps_report, encoding="utf-8", newline="\n")
+    if args.resolve_oracles:
+        write_oracle_jsonl(out_dir / "oracle-expected.jsonl", oracle_rows)
+        write_oracle_report(out_dir / "oracle-label-yield.md", oracle_rows)
+        oracle_training_rows = _oracle_training_eligible_rows(evidence_rows)
+        _write_jsonl(out_dir / "oracle-training-eligible-evidence.jsonl", oracle_training_rows)
+    else:
+        oracle_training_rows = []
     manifest = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -1538,6 +1568,10 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
         "split_counts": dict(Counter(row["split"] for row in source_results)),
         "label_policy_counts": dict(Counter(row["label_policy"] for row in source_results)),
         "training_policy": "No training dataset or model promotion is produced by alpha run.",
+        "oracle_rows": len(oracle_rows),
+        "oracle_resolved": sum(int(row.get("status") == "resolved") for row in oracle_rows),
+        "oracle_type_counts": dict(Counter(str(row.get("oracle_type") or "unknown") for row in oracle_rows)),
+        "oracle_training_eligible_rows": len(oracle_training_rows),
         "intake": intake_result,
         "metrics": metrics,
     }
@@ -1551,6 +1585,8 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
             "summary": str(out_dir / "summary.md"),
             "intake": str(out_dir / "intake.jsonl"),
             "gaps": str(out_dir / "gaps.md"),
+            "oracle_expected": str(out_dir / "oracle-expected.jsonl") if args.resolve_oracles else None,
+            "oracle_training_eligible": str(out_dir / "oracle-training-eligible-evidence.jsonl") if args.resolve_oracles else None,
             **metrics,
         }
     )
@@ -1618,8 +1654,8 @@ def _prepare_alpha_run_dir(path: Path, *, force: bool) -> None:
         (path / child_name).mkdir(parents=True, exist_ok=True)
 
 
-def _write_source_manifest(source: dict[str, Any], registry_dir: Path, out_dir: Path) -> Path:
-    cases = _source_cases(source, registry_dir)
+def _write_source_manifest(source: dict[str, Any], registry_dir: Path, out_dir: Path, *, oracle_expected: dict[str, Any] | None = None) -> Path:
+    cases = _source_cases(source, registry_dir, out_dir=out_dir, oracle_expected=oracle_expected or {})
     manifest = {
         "name": f"{source['id']}_harvest",
         "cases": cases,
@@ -1629,7 +1665,7 @@ def _write_source_manifest(source: dict[str, Any], registry_dir: Path, out_dir: 
     return target
 
 
-def _source_cases(source: dict[str, Any], registry_dir: Path) -> list[dict[str, Any]]:
+def _source_cases(source: dict[str, Any], registry_dir: Path, *, out_dir: Path | None = None, oracle_expected: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     if source.get("project"):
         project = _resolve_registry_path(registry_dir, source["project"])
         manifest_path = project / "manifest.yml"
@@ -1653,6 +1689,8 @@ def _source_cases(source: dict[str, Any], registry_dir: Path) -> list[dict[str, 
     if not input_value:
         raise CliError(f"Source {source['id']} must include input or url when spec is used", 2)
     resolved_input = _resolve_case_input(registry_dir, input_value)
+    if oracle_expected and out_dir is not None:
+        spec_path = _write_oracle_expected_spec(spec_path, resolved_input, oracle_expected, out_dir)
     return [_source_case(source, spec_path, resolved_input)]
 
 
@@ -1677,6 +1715,82 @@ def _source_case(
     if input_value:
         case["input"] = input_value
     return case
+
+
+def _write_oracle_expected_spec(spec_path: Path, input_value: str, expected: dict[str, Any], out_dir: Path) -> Path:
+    raw = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
+    benchmarks = dict(raw.get("benchmarks") or {})
+    basename = basename_key(input_value)
+    benchmarks[basename] = {**dict(benchmarks.get(basename) or {}), **expected}
+    benchmarks["rendered.html"] = {**dict(benchmarks.get("rendered.html") or {}), **expected}
+    raw["benchmarks"] = benchmarks
+    target = out_dir / "oracle_spec.yml"
+    target.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8", newline="\n")
+    return target.resolve()
+
+
+def _resolve_oracle_rows_for_source(source: dict[str, Any], registry_dir: Path, *, live: bool) -> list[dict[str, Any]]:
+    try:
+        return resolve_source_oracle(source, registry_dir=registry_dir, live=live)
+    except (OracleError, KeyError, OSError, ValueError) as exc:
+        oracle = source.get("oracle") or {}
+        return [
+            {
+                "schema_version": 1,
+                "source_id": source.get("id"),
+                "domain": source.get("domain"),
+                "split": source.get("split"),
+                "field": None,
+                "expected": None,
+                "oracle_type": oracle.get("type"),
+                "trust": oracle.get("trust") or "untrusted",
+                "status": "error",
+                "error": str(exc),
+                "resolved_at": datetime.now(UTC).isoformat(),
+            }
+        ]
+
+
+def _oracle_label_source(source: dict[str, Any], rows: list[dict[str, Any]]) -> str | None:
+    if not rows:
+        return None
+    oracle_type = next((row.get("oracle_type") for row in rows if row.get("status") == "resolved"), None)
+    return f"oracle:{oracle_type}" if oracle_type else None
+
+
+def _oracle_label_trust(rows: list[dict[str, Any]]) -> str | None:
+    trusted = [str(row.get("trust") or "") for row in rows if row.get("status") == "resolved"]
+    if not trusted:
+        return None
+    if "gold" in trusted:
+        return "gold"
+    if "silver" in trusted:
+        return "silver"
+    if "bronze" in trusted:
+        return "bronze"
+    return "untrusted"
+
+
+def _oracle_training_eligible_rows(evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in evidence_rows:
+        record = row.get("record") or {}
+        label = record.get("label") or {}
+        split = str(record.get("source_split") or record.get("bucket") or "")
+        source = str(label.get("source") or "")
+        trust = str(label.get("trust_level") or "")
+        if split not in GLOBAL_TRAINING_SPLITS:
+            continue
+        if not source.startswith("oracle:"):
+            continue
+        if trust not in TRAINABLE_TRUST:
+            continue
+        if label.get("status") != "labeled":
+            continue
+        exported = json.loads(json.dumps(row))
+        exported.setdefault("record", {})["training_eligible"] = True
+        rows.append(exported)
+    return rows
 
 
 def _resolve_registry_path(base: Path, value: Any) -> Path:
@@ -1918,6 +2032,44 @@ def cmd_review_apply(args: argparse.Namespace) -> int:
         Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
     _print_json(report)
     return 0 if report["privacy_passed"] else 2
+
+
+def cmd_oracle_resolve(args: argparse.Namespace) -> int:
+    registry_path = Path(args.registry)
+    registry = _load_source_registry(registry_path)
+    rows: list[dict[str, Any]] = []
+    for source in _select_registry_sources(registry["sources"], args):
+        if not source.get("oracle") and source["expected_mode"] not in {"oracle", "page_structured_data"}:
+            continue
+        rows.extend(_resolve_oracle_rows_for_source(source, registry_path.parent, live=bool(source.get("live", args.live))))
+    write_oracle_jsonl(args.out, rows)
+    payload = _oracle_rows_payload(rows)
+    payload["out"] = args.out
+    _print_json(payload)
+    return 0 if not any(row.get("status") == "error" for row in rows) else 2
+
+
+def cmd_oracle_report(args: argparse.Namespace) -> int:
+    rows = read_oracle_jsonl(args.input)
+    write_oracle_report(args.out, rows)
+    payload = _oracle_rows_payload(rows)
+    payload["out"] = args.out
+    _print_json(payload)
+    return 0
+
+
+def _oracle_rows_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    resolved = [row for row in rows if row.get("status") == "resolved"]
+    return {
+        "sources_with_oracle": len({row.get("source_id") for row in rows if row.get("source_id")}),
+        "fields_resolved": len(resolved),
+        "fields_missing": sum(int(row.get("status") == "missing") for row in rows),
+        "errors": sum(int(row.get("status") == "error") for row in rows),
+        "gold_labels_created": sum(int(row.get("trust") == "gold" and row.get("status") == "resolved") for row in rows),
+        "silver_labels_created": sum(int(row.get("trust") == "silver" and row.get("status") == "resolved") for row in rows),
+        "oracle_type_counts": dict(Counter(str(row.get("oracle_type") or "unknown") for row in rows)),
+        "split_counts": dict(Counter(str(row.get("split") or "unknown") for row in rows)),
+    }
 
 
 def _load_review_queue(path: str | Path) -> list[dict[str, Any]]:
@@ -2490,6 +2642,8 @@ def _canary_namespace(
     evidence_privacy: str = "redacted",
     top_k: int = 40,
     live: bool = False,
+    label_source: str | None = None,
+    label_trust: str | None = None,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         specs=specs,
@@ -2516,6 +2670,8 @@ def _canary_namespace(
         record_evidence=record_evidence,
         evidence_db=evidence_db,
         evidence_privacy=evidence_privacy,
+        label_source=label_source,
+        label_trust=label_trust,
         _policy_explicit=pack is None,
         _strict_explicit=False,
         _use_llm_explicit=False,
@@ -3504,6 +3660,7 @@ def build_parser() -> argparse.ArgumentParser:
     alpha_run.add_argument("--top-k", type=int, default=40)
     alpha_run.add_argument("--live", action="store_true", help="Allow live URL inputs declared by the registry")
     alpha_run.add_argument("--record-evidence", action="store_true", help="Accepted for workflow parity; alpha run always records evidence")
+    alpha_run.add_argument("--resolve-oracles", action="store_true", help="Resolve oracle-backed expected values before running sources")
     alpha_run.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only", help="Evidence bundle privacy mode")
     alpha_run.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted", help="Evidence DB capture privacy mode")
     alpha_run.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="untrusted")
@@ -3870,6 +4027,21 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_intake.add_argument("--out", required=True)
     evidence_intake.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in accepted bundles")
     evidence_intake.set_defaults(func=cmd_evidence_intake)
+
+    oracle = sub.add_parser("oracle", help="Resolve trusted oracle expected values")
+    oracle_sub = oracle.add_subparsers(dest="oracle_cmd", required=True)
+    oracle_resolve = oracle_sub.add_parser("resolve", help="Resolve oracle-backed expected values from a source registry")
+    oracle_resolve.add_argument("registry")
+    oracle_resolve.add_argument("--out", required=True)
+    oracle_resolve.add_argument("--live", action="store_true", help="Allow oracle resolution from live URLs")
+    oracle_resolve.add_argument("--split", choices=sorted(SOURCE_SPLITS), action="append", help="Resolve only sources in this split; repeatable")
+    oracle_resolve.add_argument("--source", action="append", help="Resolve only this source id; repeatable")
+    oracle_resolve.add_argument("--limit", type=int, default=None)
+    oracle_resolve.set_defaults(func=cmd_oracle_resolve)
+    oracle_report_cmd = oracle_sub.add_parser("report", help="Write an oracle label-yield report")
+    oracle_report_cmd.add_argument("input")
+    oracle_report_cmd.add_argument("--out", required=True)
+    oracle_report_cmd.set_defaults(func=cmd_oracle_report)
 
     review = sub.add_parser("review", help="Triage and convert harvester review queues")
     review_sub = review.add_subparsers(dest="review_cmd", required=True)

@@ -1794,3 +1794,69 @@ Report:
 ```text
 docs/m18_review_queue_conversion_report.md
 ```
+
+## M18B: Trusted Label Acquisition / Oracle Sources
+
+Status: passed.
+
+Question: Can semscrape generate many more gold/silver labels from trusted or oracle-backed sources without using raw extraction guesses as positives?
+
+Implemented:
+
+```text
+- expected_mode: oracle in source registries.
+- semscrape oracle resolve.
+- semscrape oracle report.
+- alpha run --resolve-oracles.
+- Oracle mismatch/error rows in oracle-expected.jsonl.
+- Oracle-backed expected values feed alpha-run canary/evidence labels.
+- Oracle training-eligible evidence export.
+- Oracle types: manual_expected, pypi_json, npm_registry, github_repo, json_ld.
+```
+
+Oracle label-yield run:
+
+```text
+sources_with_oracle:      25
+fields_resolved:          98
+fields_missing:           0
+gold_labels_created:      98
+silver_labels_created:    0
+oracle_type:              manual_expected
+split:                    train_candidate
+```
+
+Alpha run with oracle expected values:
+
+```text
+sources:                  25
+fields_attempted:         98
+coverage_rate:            0.724490
+false_positive_rate:      0.000000
+candidate_recall@40:      1.000000
+bundle_audit_pass_rate:   1.000000
+oracle_training_eligible_rows: 98
+```
+
+Safety result:
+
+```text
+Raw extraction outputs were not promoted to positives.
+Oracle values were injected as expected values before evaluation.
+Features-only bundle audit passed.
+Holdout/adversarial training exclusions remain in the export logic.
+No ranker or pack was trained or promoted.
+```
+
+Decision:
+
+```text
+M19 is now unblocked for a candidate evidence-driven ranker/pack update attempt.
+Promotion must still require release-check against base, adversarial, external, and harvester suites.
+```
+
+Report:
+
+```text
+docs/m18b_oracle_label_acquisition_report.md
+```

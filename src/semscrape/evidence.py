@@ -595,6 +595,8 @@ def record_report_evidence(
     category: str | None = None,
     run_id: str | None = None,
     ranker_model: str | None = None,
+    label_source: str | None = None,
+    label_trust: str | None = None,
 ) -> EvidenceWriteResult:
     _validate_privacy(privacy)
     resolved_run_id = run_id or str(uuid.uuid4())
@@ -632,7 +634,13 @@ def record_report_evidence(
             )
             for rank, item in enumerate(ranked, start=1)
         ]
-        label = _auto_label(expected_known=expected_known, expected=expected, extraction_status=extraction.status)
+        label = _auto_label(
+            expected_known=expected_known,
+            expected=expected,
+            extraction_status=extraction.status,
+            source=label_source or "benchmark",
+            trust_level=label_trust or "gold",
+        )
         record = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "run_id": resolved_run_id,
@@ -683,7 +691,7 @@ def record_report_evidence(
     return EvidenceWriteResult(run_id=resolved_run_id, record_ids=record_ids)
 
 
-def _auto_label(*, expected_known: bool, expected: Any, extraction_status: str) -> dict[str, Any]:
+def _auto_label(*, expected_known: bool, expected: Any, extraction_status: str, source: str = "benchmark", trust_level: str = "gold") -> dict[str, Any]:
     if not expected_known:
         return {
             "status": "unknown",
@@ -696,8 +704,8 @@ def _auto_label(*, expected_known: bool, expected: Any, extraction_status: str) 
         }
     return {
         "status": "labeled",
-        "source": "benchmark",
-        "trust_level": "gold",
+        "source": source,
+        "trust_level": trust_level,
         "correct_candidate_id": None,
         "correct_value": str(expected) if expected_is_present(expected) else None,
         "abstention_correct": bool(not expected_is_present(expected) and extraction_status == "abstained"),

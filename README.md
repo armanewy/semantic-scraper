@@ -68,6 +68,7 @@ M17 automated external evidence harvester tooling: implemented
 M17S automated harvester scale run: passed
 v0.1.0-alpha.10: frozen harvester-scale target
 M18 review queue triage and trusted label conversion: implemented
+M18B trusted label acquisition / oracle sources: passed
 M16C true outside-user cohort: pending
 ```
 
@@ -191,6 +192,8 @@ semscrape review apply runs/review/batch-reviewed.jsonl --intake runs/auto/lates
 ```
 
 The M18 pass converted the M17S dev-split false positive into one reviewed gold hard-negative training row, classified two candidate misses as candidate-generation issues, and left recoverable abstentions deferred until explicit value review. See [M18 Review Queue Conversion Report](docs/m18_review_queue_conversion_report.md).
+
+M18B adds oracle-backed expected values via `semscrape oracle resolve`, `semscrape oracle report`, and `semscrape alpha run --resolve-oracles`. Supported oracle types are `manual_expected`, `pypi_json`, `npm_registry`, `github_repo`, and `json_ld`. The M18B run generated 98 gold oracle-backed labels and 98 training-eligible evidence rows without using raw extraction guesses as positives. See [M18B Oracle Label Acquisition Report](docs/m18b_oracle_label_acquisition_report.md).
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 

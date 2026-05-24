@@ -270,6 +270,84 @@ def test_review_triage_export_apply_keeps_training_boundary(tmp_path, capsys) ->
     assert json.loads(report.read_text(encoding="utf-8"))["privacy_passed"] is True
 
 
+def test_oracle_resolve_and_alpha_run_uses_json_ld_expected_values(tmp_path, capsys) -> None:
+    spec = tmp_path / "product.yml"
+    html = tmp_path / "product.html"
+    registry = tmp_path / "sources.yml"
+    oracle_out = tmp_path / "oracle.jsonl"
+    run_out = tmp_path / "run"
+    spec.write_text(
+        """
+name: oracle_product
+fields:
+  - name: product_name
+    type: text
+    description: Product name.
+  - name: price
+    type: price
+    description: Product price.
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    html.write_text(
+        """
+<html>
+  <head>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"Product","name":"Oracle Widget","offers":{"price":"19.99"}}
+    </script>
+  </head>
+  <body><main><h1>Oracle Widget</h1><p class="price">$19.99</p></main></body>
+</html>
+""".strip(),
+        encoding="utf-8",
+    )
+    registry.write_text(
+        f"""
+schema_version: 1
+sources:
+  - id: jsonld_product
+    domain: ecommerce
+    spec: {spec.as_posix()}
+    input: {html.as_posix()}
+    split: train_candidate
+    expected_mode: oracle
+    label_policy: oracle
+    privacy: features-only
+    rate_limit_seconds: 0
+    oracle:
+      type: json_ld
+      schema_type: Product
+      fields:
+        product_name: name
+        price: offers.price
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["oracle", "resolve", str(registry), "--out", str(oracle_out)]) == 0
+    oracle_payload = json.loads(capsys.readouterr().out)
+    assert oracle_payload["fields_resolved"] == 2
+    oracle_rows = [json.loads(line) for line in oracle_out.read_text(encoding="utf-8").splitlines()]
+    assert {row["trust"] for row in oracle_rows} == {"silver"}
+
+    assert main(["alpha", "run", str(registry), "--resolve-oracles", "--out", str(run_out), "--no-respect-rate-limits"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["oracle_expected"].endswith("oracle-expected.jsonl")
+    assert payload["oracle_training_eligible"].endswith("oracle-training-eligible-evidence.jsonl")
+    records = [json.loads(line) for line in (run_out / "intake.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert records
+    labels = [row["record"]["label"] for row in records]
+    assert {label["source"] for label in labels} == {"oracle:json_ld"}
+    assert {label["trust_level"] for label in labels} == {"silver"}
+    assert all(label["status"] == "labeled" for label in labels)
+    training_records = [json.loads(line) for line in (run_out / "oracle-training-eligible-evidence.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(training_records) == len(records)
+    assert all(row["record"]["training_eligible"] is True for row in training_records)
+
+
 def _write_rows(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 

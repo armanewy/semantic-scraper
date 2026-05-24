@@ -114,6 +114,60 @@ semscrape review apply runs/review/review-batch-reviewed.jsonl \
 
 Only reviewed gold/silver rows from non-holdout, non-adversarial splits can be exported by this workflow. Recoverable abstentions and unverified extractions remain non-training telemetry until a reviewer explicitly labels them.
 
+## Oracle Labels
+
+M18B adds oracle-backed expected values. Oracle rows are trusted expected values from a separate source, not semscrape's own extracted output:
+
+```yaml
+sources:
+  - id: pypi_bs4_project
+    domain: package_registry
+    spec: sources/specs/pypi_project.yml
+    input: snapshots/pypi_bs4.html
+    split: train_candidate
+    expected_mode: oracle
+    label_policy: oracle
+    oracle:
+      type: pypi_json
+      package: beautifulsoup4
+      fields:
+        package_name: info.name
+        version: info.version
+        summary: info.summary
+```
+
+Supported oracle types:
+
+```text
+manual_expected
+pypi_json
+npm_registry
+github_repo
+json_ld
+```
+
+Resolve and inspect label yield:
+
+```bash
+semscrape oracle resolve sources/external.yml \
+  --out runs/oracle/oracle-expected.jsonl
+
+semscrape oracle report runs/oracle/oracle-expected.jsonl \
+  --out runs/oracle/oracle-label-yield.md
+```
+
+Feed oracle values into the harvester:
+
+```bash
+semscrape alpha run sources/external.yml \
+  --resolve-oracles \
+  --policy ranker-local-safe \
+  --privacy features-only \
+  --out runs/auto/latest
+```
+
+When `--resolve-oracles` is used, `alpha run` also writes `oracle-expected.jsonl`, `oracle-label-yield.md`, and `oracle-training-eligible-evidence.jsonl`. The training-eligible oracle export is still only evidence JSONL; it does not build a candidate-ranking dataset and does not promote a model.
+
 ## Training Rules
 
 Raw extraction outputs are telemetry. They are not positive training labels.
