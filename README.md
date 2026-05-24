@@ -65,7 +65,8 @@ M16W founder-operated wide external corpus: executed, failed safety/recall
 M16W-R wide corpus recall and missing-candidate safety: passed
 v0.1.0-alpha.9: next frozen true outside-user cohort target after tagging
 M17 automated external evidence harvester tooling: implemented
-M17 100+ source evidence gate: pending
+M17S automated harvester scale run: passed
+v0.1.0-alpha.10: frozen harvester-scale target
 M16C true outside-user cohort: pending
 ```
 
@@ -177,6 +178,8 @@ semscrape alpha run sources/external.yml \
 ```
 
 The harvester writes `summary.md`, `intake.jsonl`, `gaps.md`, `review-queue.jsonl`, per-source bundles, and a `harvest-manifest.json`. It enforces split metadata (`dev`, `holdout`, `adversarial`, `monitor_only`, `train_candidate`) and review-oriented trust boundaries. It does not train or promote rankers/packs. See [Automated External Evidence Harvester](docs/automated_evidence_harvester.md).
+
+M17S ran the harvester across 102 public-page replay sources and passed the scale gate: bundle audit pass rate `1.000000`, false-positive rate `0.002155`, and candidate recall@40 `0.995633`. See [M17S Harvester Scale Report](docs/m17s_harvester_scale_report.md).
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 

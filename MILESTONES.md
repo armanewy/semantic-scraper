@@ -1678,3 +1678,56 @@ Remaining gate:
 - Holdout/adversarial splits are excluded from training exports.
 - Release-check remains required before any ranker/pack promotion.
 ```
+
+## M17S: Automated Harvester Scale Run
+
+Status: passed.
+
+Frozen target:
+
+```text
+v0.1.0-alpha.10
+commit: b4a5020
+```
+
+Scale run:
+
+```text
+command: semscrape alpha run runs/m17s/source-registry.yml --policy ranker-local-safe --record-evidence --privacy features-only --out runs/auto/m17s --force --no-respect-rate-limits --pack ecommerce
+sources:                  102
+bundles:                  102
+domains/source groups:    25
+fields_attempted:         464
+coverage_rate:            0.678879
+false_positive_rate:      0.002155
+candidate_recall@40:      0.995633
+bundle_audit_pass_rate:   1.000000
+review_queue_items:       296
+hard_negatives_created:   5278
+```
+
+Split checks:
+
+```text
+dev false_positive_rate:          0.002833
+dev candidate_recall@40:          0.997167
+holdout false_positive_rate:      0.000000
+holdout candidate_recall@40:      0.990476
+adversarial false_positive_rate:  0.000000
+```
+
+Safety result:
+
+```text
+features-only bundle audit pass rate: 100%
+training dataset produced: no
+ranker/pack promoted: no
+review items eligible for global training: 0
+holdout/adversarial split rows used for training: no
+```
+
+Report:
+
+```text
+docs/m17s_harvester_scale_report.md
+```
