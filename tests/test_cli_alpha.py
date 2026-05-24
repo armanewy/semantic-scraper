@@ -143,6 +143,81 @@ def test_ranker_release_check_passes_with_safe_candidate(tmp_path, capsys) -> No
     assert json.loads(out.read_text(encoding="utf-8"))["passed"] is True
 
 
+def test_alpha_run_collects_untrusted_evidence_without_training_export(tmp_path, capsys) -> None:
+    spec = tmp_path / "spec.yml"
+    html = tmp_path / "page.html"
+    registry = tmp_path / "sources.yml"
+    out = tmp_path / "run"
+    spec.write_text(
+        """
+name: unknown_page
+fields:
+  - name: page_title
+    type: text
+    description: Main page title.
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    html.write_text("<html><head><title>Demo</title></head><body><main><h1>Demo</h1></main></body></html>", encoding="utf-8")
+    registry.write_text(
+        f"""
+schema_version: 1
+sources:
+  - id: monitor_demo
+    domain: docs
+    spec: {spec.as_posix()}
+    input: {html.as_posix()}
+    split: monitor_only
+    expected_mode: unknown
+    label_policy: monitor_only
+    privacy: features-only
+    rate_limit_seconds: 0
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code = main(["alpha", "run", str(registry), "--out", str(out), "--no-respect-rate-limits"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["sources"] == 1
+    assert (out / "summary.md").exists()
+    assert (out / "gaps.md").exists()
+    assert (out / "intake.jsonl").exists()
+    assert not (out / "candidate-ranking.jsonl").exists()
+    records = [json.loads(line) for line in (out / "intake.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert records
+    assert {(row["record"]["label"]["trust_level"], row["record"]["label"]["status"]) for row in records} == {("untrusted", "unknown")}
+    review_rows = [json.loads(line) for line in (out / "review-queue.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert review_rows
+    assert all(row["eligible_for_global_training"] is False for row in review_rows)
+
+
+def test_alpha_run_rejects_invalid_registry_split(tmp_path, capsys) -> None:
+    registry = tmp_path / "bad-sources.yml"
+    registry.write_text(
+        """
+schema_version: 1
+sources:
+  - id: bad
+    domain: docs
+    spec: missing.yml
+    input: missing.html
+    split: training
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code = main(["alpha", "run", str(registry), "--out", str(tmp_path / "run")])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "invalid split" in captured.err
+
+
 def _write_rows(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 

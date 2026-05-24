@@ -7,6 +7,7 @@ import json
 import platform
 import shutil
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1433,6 +1434,385 @@ def cmd_alpha_summarize(args: argparse.Namespace) -> int:
     return 0 if all(row["audit_ok"] for row in bundle_rows) else 2
 
 
+SOURCE_SPLITS = {"dev", "holdout", "adversarial", "monitor_only", "train_candidate"}
+EXPECTED_MODES = {"manual", "benchmark", "oracle", "none", "unknown"}
+LABEL_POLICIES = {"review_required", "benchmark", "oracle", "monitor_only", "none"}
+GLOBAL_TRAINING_SPLITS = {"train_candidate"}
+TRAINABLE_TRUST = {"gold", "silver"}
+
+
+def cmd_alpha_run(args: argparse.Namespace) -> int:
+    registry_path = Path(args.registry)
+    registry = _load_source_registry(registry_path)
+    out_dir = Path(args.out)
+    _prepare_alpha_run_dir(out_dir, force=args.force)
+    source_results: list[dict[str, Any]] = []
+    bundle_paths: list[str] = []
+    evidence_rows: list[dict[str, Any]] = []
+    selected_sources = _select_registry_sources(registry["sources"], args)
+
+    for index, source in enumerate(selected_sources, start=1):
+        source_dir = out_dir / "sources" / _safe_cache_name(source["id"])
+        source_dir.mkdir(parents=True, exist_ok=True)
+        manifest = _write_source_manifest(source, registry_path.parent, source_dir)
+        evidence_db = source_dir / "evidence.db"
+        canary_out = source_dir / "canary.jsonl"
+        failures_dir = source_dir / "failures"
+        bundle_out = out_dir / "evidence-bundles" / f"{_safe_cache_name(source['id'])}.zip"
+        _delete_file(evidence_db)
+        _delete_file(canary_out)
+        _delete_file(bundle_out)
+
+        canary_args = _canary_namespace(
+            specs=[str(manifest)],
+            policy=source.get("policy") or args.policy,
+            pack=source.get("pack") or args.pack,
+            out=str(canary_out),
+            failures_dir=str(failures_dir),
+            record_evidence=True,
+            evidence_db=str(evidence_db),
+            evidence_privacy=source.get("evidence_privacy") or args.evidence_privacy,
+            top_k=int(source.get("top_k") or args.top_k),
+            live=bool(source.get("live", args.live)),
+        )
+        canary_result = _run_canary(canary_args)
+        bundle_result = create_evidence_bundle(
+            evidence_db,
+            bundle_out,
+            privacy=source.get("privacy") or args.privacy,
+            min_trust=args.min_trust,
+            only_labeled=False,
+        )
+        audit_result = audit_evidence_bundle(bundle_out, allow_values=args.allow_values)
+        bundle_paths.append(str(bundle_out))
+        if audit_result.get("ok"):
+            _manifest, records, _privacy_report, _summary = read_evidence_bundle(bundle_out)
+            _annotate_harvest_records(records, source)
+            evidence_rows.extend(records)
+        if args.snapshot:
+            _write_source_snapshot(source, registry_path.parent, source_dir)
+        metrics = _first_metrics(read_jsonl(canary_out) if canary_out.exists() else [])
+        source_results.append(
+            {
+                "id": source["id"],
+                "domain": source["domain"],
+                "split": source["split"],
+                "expected_mode": source["expected_mode"],
+                "label_policy": source["label_policy"],
+                "bundle": str(bundle_out),
+                "bundle_audit_ok": bool(audit_result.get("ok")),
+                "bundle_records": bundle_result["manifest"]["record_count"],
+                "canary": str(canary_out),
+                "cases": int(canary_result.get("cases", 0)),
+                "timeout_rate": float(canary_result.get("timeout_rate", 0.0)),
+                "fields": int(metrics.get("rows", 0)),
+                "coverage_rate": float(metrics.get("coverage_rate", 0.0)),
+                "false_positive_rate": float(metrics.get("false_positive_rate", 0.0)),
+                "candidate_recall_at_40": float(metrics.get("candidate_recall_at_k", 0.0)),
+                "abstention_rate": float(metrics.get("abstention_rate", 0.0)),
+            }
+        )
+        delay = float(source.get("rate_limit_seconds") or 0)
+        if args.respect_rate_limits and delay > 0 and index < len(selected_sources):
+            time.sleep(min(delay, args.max_rate_limit_seconds))
+
+    summary_rows = _bundle_rows_from_paths(bundle_paths, allow_values=args.allow_values)
+    metrics = _alpha_bundle_metrics(summary_rows, evidence_rows)
+    summary_report = _alpha_summary_report(summary_rows, metrics)
+    (out_dir / "summary.md").write_text(summary_report, encoding="utf-8", newline="\n")
+    intake_result = intake_evidence_bundles(bundle_paths, out_dir / "intake.jsonl", allow_values=args.allow_values)
+    review_queue = _build_alpha_review_queue(evidence_rows)
+    _write_jsonl(out_dir / "review-queue.jsonl", review_queue)
+    gaps_report = _pack_gaps_report(evidence_rows, pack=args.pack)
+    (out_dir / "gaps.md").write_text(gaps_report, encoding="utf-8", newline="\n")
+    manifest = {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "registry": str(registry_path),
+        "sources": source_results,
+        "source_count": len(source_results),
+        "bundle_count": len(bundle_paths),
+        "review_queue_count": len(review_queue),
+        "split_counts": dict(Counter(row["split"] for row in source_results)),
+        "label_policy_counts": dict(Counter(row["label_policy"] for row in source_results)),
+        "training_policy": "No training dataset or model promotion is produced by alpha run.",
+        "intake": intake_result,
+        "metrics": metrics,
+    }
+    (out_dir / "harvest-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    _print_json(
+        {
+            "out": str(out_dir),
+            "sources": len(source_results),
+            "bundles": len(bundle_paths),
+            "review_queue": len(review_queue),
+            "summary": str(out_dir / "summary.md"),
+            "intake": str(out_dir / "intake.jsonl"),
+            "gaps": str(out_dir / "gaps.md"),
+            **metrics,
+        }
+    )
+    return 0 if all(row["bundle_audit_ok"] for row in source_results) else 2
+
+
+def _load_source_registry(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise CliError(f"Source registry not found: {path}", 2)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("sources"), list):
+        raise CliError("Source registry must be a YAML mapping with a sources list", 2)
+    seen: set[str] = set()
+    sources: list[dict[str, Any]] = []
+    for index, item in enumerate(raw["sources"], start=1):
+        if not isinstance(item, dict):
+            raise CliError(f"Source registry item {index} must be a mapping", 2)
+        source = dict(item)
+        source_id = str(source.get("id") or "").strip()
+        if not source_id:
+            raise CliError(f"Source registry item {index} is missing id", 2)
+        if source_id in seen:
+            raise CliError(f"Duplicate source id in registry: {source_id}", 2)
+        seen.add(source_id)
+        source["id"] = source_id
+        source["domain"] = str(source.get("domain") or source.get("category") or "unknown")
+        source["split"] = _registry_choice(source, "split", SOURCE_SPLITS, default="monitor_only")
+        source["expected_mode"] = _registry_choice(source, "expected_mode", EXPECTED_MODES, default="manual")
+        source["label_policy"] = _registry_choice(source, "label_policy", LABEL_POLICIES, default="review_required")
+        if source["split"] in {"holdout", "adversarial"} and source["label_policy"] not in {"review_required", "benchmark", "oracle", "monitor_only"}:
+            raise CliError(f"Source {source_id} uses incompatible label_policy for split {source['split']}", 2)
+        if not source.get("project") and not source.get("spec"):
+            raise CliError(f"Source {source_id} must include project or spec", 2)
+        sources.append(source)
+    return {"schema_version": raw.get("schema_version", 1), "sources": sources}
+
+
+def _registry_choice(source: dict[str, Any], key: str, allowed: set[str], *, default: str) -> str:
+    value = str(source.get(key) or default)
+    if value not in allowed:
+        raise CliError(f"Source {source.get('id')} has invalid {key}={value!r}; expected one of {sorted(allowed)}", 2)
+    return value
+
+
+def _select_registry_sources(sources: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    selected = sources
+    if args.split:
+        wanted = set(args.split)
+        selected = [source for source in selected if source["split"] in wanted]
+    if args.source:
+        wanted_sources = set(args.source)
+        selected = [source for source in selected if source["id"] in wanted_sources]
+    if args.limit is not None:
+        selected = selected[: max(0, int(args.limit))]
+    if not selected:
+        raise CliError("No sources selected from registry", 2)
+    return selected
+
+
+def _prepare_alpha_run_dir(path: Path, *, force: bool) -> None:
+    if path.exists() and any(path.iterdir()) and not force:
+        raise CliError(f"Output directory is not empty: {path}. Pass --force to overwrite generated files.", 2)
+    path.mkdir(parents=True, exist_ok=True)
+    for child_name in ("evidence-bundles", "sources", "snapshots"):
+        (path / child_name).mkdir(parents=True, exist_ok=True)
+
+
+def _write_source_manifest(source: dict[str, Any], registry_dir: Path, out_dir: Path) -> Path:
+    cases = _source_cases(source, registry_dir)
+    manifest = {
+        "name": f"{source['id']}_harvest",
+        "cases": cases,
+    }
+    target = out_dir / "manifest.yml"
+    target.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8", newline="\n")
+    return target
+
+
+def _source_cases(source: dict[str, Any], registry_dir: Path) -> list[dict[str, Any]]:
+    if source.get("project"):
+        project = _resolve_registry_path(registry_dir, source["project"])
+        manifest_path = project / "manifest.yml"
+        if not manifest_path.exists():
+            raise CliError(f"Source {source['id']} project has no manifest.yml: {project}", 2)
+        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        raw_cases = raw.get("cases") or []
+        if not isinstance(raw_cases, list):
+            raise CliError(f"Source {source['id']} project manifest cases must be a list", 2)
+        cases: list[dict[str, Any]] = []
+        for index, case in enumerate(raw_cases, start=1):
+            if not isinstance(case, dict) or not case.get("path"):
+                raise CliError(f"Source {source['id']} project case {index} must include path", 2)
+            case_path = _resolve_case_path(manifest_path.parent, case["path"])
+            input_value = case.get("input")
+            resolved_input = _resolve_case_input(manifest_path.parent, input_value) if input_value else None
+            cases.append(_source_case(source, case_path, resolved_input, suffix=str(case.get("id") or index), version=case.get("version")))
+        return cases
+    spec_path = _resolve_registry_path(registry_dir, source["spec"])
+    input_value = source.get("input") or source.get("url")
+    if not input_value:
+        raise CliError(f"Source {source['id']} must include input or url when spec is used", 2)
+    resolved_input = _resolve_case_input(registry_dir, input_value)
+    return [_source_case(source, spec_path, resolved_input)]
+
+
+def _source_case(
+    source: dict[str, Any],
+    spec_path: Path,
+    input_value: str | None,
+    *,
+    suffix: str | None = None,
+    version: Any = None,
+) -> dict[str, Any]:
+    source_id = source["id"]
+    case_id = source_id if suffix is None else f"{source_id}_{_safe_cache_name(suffix)}"
+    case: dict[str, Any] = {
+        "id": case_id,
+        "group": source_id,
+        "bucket": source["split"],
+        "category": source["domain"],
+        "version": version or source.get("version") or "v1",
+        "path": str(spec_path),
+    }
+    if input_value:
+        case["input"] = input_value
+    return case
+
+
+def _resolve_registry_path(base: Path, value: Any) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else (base / path).resolve()
+
+
+def _resolve_case_path(base: Path, value: Any) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else (base / path).resolve()
+
+
+def _resolve_case_input(base: Path, value: Any) -> str:
+    raw = str(value)
+    if _is_url(raw):
+        return raw
+    path = Path(raw)
+    resolved = path if path.is_absolute() else (base / path).resolve()
+    return str(resolved)
+
+
+def _write_source_snapshot(source: dict[str, Any], registry_dir: Path, source_dir: Path) -> None:
+    snapshot_dir = source_dir / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "source_id": source["id"],
+        "created_at": datetime.now(UTC).isoformat(),
+        "snapshot_mode": "local-copy",
+        "notes": "Live URL snapshots are intentionally not fetched by alpha run to avoid duplicate requests.",
+    }
+    if source.get("input") and not _is_url(str(source["input"])):
+        input_path = _resolve_registry_path(registry_dir, source["input"])
+        if input_path.exists() and input_path.is_file():
+            target = snapshot_dir / input_path.name
+            shutil.copyfile(input_path, target)
+            metadata["input_snapshot"] = str(target)
+    (snapshot_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+
+
+def _bundle_rows_from_paths(bundle_paths: list[str], *, allow_values: bool = False) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bundle in bundle_paths:
+        try:
+            audit = audit_evidence_bundle(bundle, allow_values=allow_values)
+            manifest, records, _privacy_report, summary = read_evidence_bundle(bundle)
+        except (ValueError, FileNotFoundError) as exc:
+            rows.append({"path": str(bundle), "accepted": False, "audit_ok": False, "errors": [str(exc)], "records": 0})
+            continue
+        rows.append(
+            {
+                "path": str(bundle),
+                "accepted": bool(audit.get("ok")),
+                "audit_ok": bool(audit.get("ok")),
+                "errors": audit.get("errors", []),
+                "records": len(records),
+                "privacy_mode": manifest.get("privacy_mode"),
+                "labeled_count": manifest.get("labeled_count", 0),
+                "trust_level_counts": (summary or {}).get("trust_level_counts", {}),
+                "field_type_counts": (summary or {}).get("field_type_counts", {}),
+            }
+        )
+    return rows
+
+
+def _annotate_harvest_records(records: list[dict[str, Any]], source: dict[str, Any]) -> None:
+    for row in records:
+        record = row.get("record") or {}
+        record.setdefault("source_registry_id", source["id"])
+        record.setdefault("source_split", source["split"])
+        record.setdefault("source_expected_mode", source["expected_mode"])
+        record.setdefault("source_label_policy", source["label_policy"])
+
+
+def _build_alpha_review_queue(evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    for row in evidence_rows:
+        record = row.get("record") or {}
+        issue = _review_issue_for_evidence_row(row)
+        if not issue:
+            continue
+        label = record.get("label") or {}
+        split = str(record.get("source_split") or record.get("bucket") or "monitor_only")
+        trust = str(label.get("trust_level") or "untrusted")
+        queue.append(
+            {
+                "priority": issue["priority"],
+                "issue_type": issue["issue_type"],
+                "reason": issue["reason"],
+                "evidence_id": row.get("evidence_id"),
+                "source_id": record.get("source_registry_id") or record.get("case_id"),
+                "case_id": record.get("case_id"),
+                "split": split,
+                "field": (record.get("field") or {}).get("name"),
+                "field_type": (record.get("field") or {}).get("kind"),
+                "status": record.get("status"),
+                "failure_reason": record.get("failure_reason"),
+                "candidate_recall": record.get("candidate_recall"),
+                "trust_level": trust,
+                "eligible_for_global_training": split in GLOBAL_TRAINING_SPLITS and trust in TRAINABLE_TRUST,
+            }
+        )
+    queue.sort(key=lambda item: (-int(item["priority"]), str(item.get("source_id") or ""), str(item.get("field") or "")))
+    return queue
+
+
+def _review_issue_for_evidence_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    record = row.get("record") or {}
+    status = str(record.get("status") or "")
+    if _evidence_row_false_positive(row):
+        return {"priority": 100, "issue_type": "false_positive", "reason": record.get("failure_reason") or "wrong_extracted_value"}
+    if record.get("candidate_recall") is False:
+        return {"priority": 90, "issue_type": "candidate_recall_miss", "reason": record.get("failure_reason") or "candidate_missing"}
+    if status == "abstained" and record.get("candidate_recall") is True:
+        return {"priority": 75, "issue_type": "recoverable_abstention", "reason": record.get("failure_reason") or "abstained_with_candidate_present"}
+    ranker = record.get("ranker") or {}
+    margin = ranker.get("margin")
+    if status == "extracted" and margin is not None and float(margin or 0.0) < 0.03:
+        return {"priority": 60, "issue_type": "low_margin_accept", "reason": "accepted_with_low_ranker_margin"}
+    selected_id = record.get("selected_candidate_id")
+    selected = next((candidate for candidate in row.get("candidates") or [] if candidate.get("candidate_id") == selected_id), None)
+    if status == "extracted" and selected and selected.get("hard_negative"):
+        return {"priority": 60, "issue_type": "risky_region_accept", "reason": "selected_candidate_marked_hard_negative"}
+    if status == "abstained":
+        return {"priority": 30, "issue_type": "abstention", "reason": record.get("failure_reason") or "abstained"}
+    label = record.get("label") or {}
+    if status == "extracted" and label.get("trust_level") == "untrusted":
+        return {"priority": 20, "issue_type": "unverified_extraction", "reason": "telemetry_only_not_training_positive"}
+    return None
+
+
+def _write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def cmd_pilot_run(args: argparse.Namespace) -> int:
     project = Path(args.project)
     manifest = project / "manifest.yml"
@@ -2847,6 +3227,25 @@ def build_parser() -> argparse.ArgumentParser:
     alpha_summary.add_argument("--out", required=True)
     alpha_summary.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in audited bundles")
     alpha_summary.set_defaults(func=cmd_alpha_summarize)
+    alpha_run = alpha_sub.add_parser("run", help="Run an automated external evidence harvester registry")
+    alpha_run.add_argument("registry", help="YAML source registry, such as sources/external.yml")
+    alpha_run.add_argument("--out", required=True, help="Output run directory")
+    alpha_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
+    alpha_run.add_argument("--pack", default=None, help="Optional domain pack for extraction defaults and gap reporting")
+    alpha_run.add_argument("--top-k", type=int, default=40)
+    alpha_run.add_argument("--live", action="store_true", help="Allow live URL inputs declared by the registry")
+    alpha_run.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only", help="Evidence bundle privacy mode")
+    alpha_run.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted", help="Evidence DB capture privacy mode")
+    alpha_run.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="untrusted")
+    alpha_run.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in audited bundles")
+    alpha_run.add_argument("--split", choices=sorted(SOURCE_SPLITS), action="append", help="Run only sources in this split; repeatable")
+    alpha_run.add_argument("--source", action="append", help="Run only this source id; repeatable")
+    alpha_run.add_argument("--limit", type=int, default=None, help="Limit selected sources")
+    alpha_run.add_argument("--snapshot", action="store_true", help="Copy local input snapshots into the run directory")
+    alpha_run.add_argument("--respect-rate-limits", action=argparse.BooleanOptionalAction, default=True)
+    alpha_run.add_argument("--max-rate-limit-seconds", type=float, default=30.0)
+    alpha_run.add_argument("--force", action="store_true", help="Allow writing into a non-empty output directory")
+    alpha_run.set_defaults(func=cmd_alpha_run)
 
     pack = sub.add_parser("pack", help="Build, inspect, and release-check domain packs")
     pack_sub = pack.add_subparsers(dest="pack_cmd", required=True)

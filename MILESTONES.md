@@ -1625,3 +1625,56 @@ M16W-R passed.
 v0.1.0-alpha.9 is the next frozen outside-user cohort target after this commit is tagged.
 M16C true outside-user cohort can resume on v0.1.0-alpha.9 unless a blocking runtime bug appears.
 ```
+
+## M17: Automated External Evidence Harvester
+
+Status: tooling implemented; 100+ source evidence gate pending.
+
+Question: Can semscrape continuously collect privacy-safe evidence from fresh public sources, prioritize useful review items, and feed trusted labels into the ranker/pack loop without poisoning the model?
+
+Deliverables implemented:
+
+```text
+- `sources/external.yml` source registry.
+- `semscrape alpha run sources/external.yml`.
+- Split metadata: dev, holdout, adversarial, monitor_only, train_candidate.
+- Expected-mode and label-policy metadata.
+- Per-source canary/evidence capture.
+- Features-only bundle creation and audit.
+- Automatic intake JSONL.
+- Automatic alpha summary and pack gap report.
+- Review queue for false positives, candidate misses, recoverable abstentions, low-margin accepts, risky accepts, and unverified extractions.
+- Scheduled local runner: scripts/run_alpha_harvester.ps1.
+- Documentation: docs/automated_evidence_harvester.md.
+```
+
+Safety rule:
+
+```text
+continuous evidence collection: yes
+automatic positive labeling from raw outputs: no
+automatic model/pack promotion: no
+```
+
+Smoke result:
+
+```text
+command: semscrape alpha run sources/external.yml --out runs/m17/smoke --force --no-respect-rate-limits --pack ecommerce
+sources:                  2
+bundles:                  2
+fields_attempted:         8
+bundle_audit_pass_rate:   1.000000
+false_positive_rate:      0.000000
+candidate_recall@40:      1.000000
+review_queue_items:       4
+```
+
+Remaining gate:
+
+```text
+- 100+ source runs complete with bundle_audit_pass_rate = 100%.
+- No unverified extraction is exported as a positive training label.
+- Review queue ranks high-value examples.
+- Holdout/adversarial splits are excluded from training exports.
+- Release-check remains required before any ranker/pack promotion.
+```

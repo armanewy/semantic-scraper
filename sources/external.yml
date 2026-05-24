@@ -1,0 +1,21 @@
+schema_version: 1
+sources:
+  - id: local_product_demo
+    domain: ecommerce
+    spec: ../examples/product.yml
+    input: ../examples/product_v2.html
+    split: dev
+    expected_mode: benchmark
+    label_policy: benchmark
+    privacy: features-only
+    rate_limit_seconds: 0
+
+  - id: local_product_holdout_demo
+    domain: ecommerce
+    spec: ../examples/product.yml
+    input: ../examples/product_v1.html
+    split: holdout
+    expected_mode: benchmark
+    label_policy: review_required
+    privacy: features-only
+    rate_limit_seconds: 0
