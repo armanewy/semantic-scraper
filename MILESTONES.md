@@ -1041,3 +1041,74 @@ Exit criteria:
 - No new ranker artifact is promoted unless release-check passes.
 
 Status: passed. M14R restored false-positive safety on the fresh alpha.2 remediation set, passed a separate final mini-holdout, preserved base/adversarial safety, and kept pilot artifacts local/ignored. The packaged ranker artifact remains `candidate-ranker-v3`; M14R changed deterministic gates and normalization only.
+
+## M15: Alpha.3 Public-Alpha Readiness Trial
+
+**Question:** Does the M14R-remediated build survive a larger fresh validation pass well enough to justify a public alpha release?
+
+Deliverables:
+
+- `v0.1.0-alpha.3` tag:
+  - `2b92586a9d3478999c144f98c851cdb104d72dfc`
+- Fresh alpha.3 pilot set:
+  - `runs/m15/alpha3-summary.md`
+- False-positive artifact:
+  - `runs/m15/alpha3-false-positives.jsonl`
+- Evidence intake and gap report:
+  - local ignored artifact: `data/intake/alpha3-evidence.jsonl`
+  - `runs/m15/alpha3-gaps.md`
+- Regression reruns:
+  - `runs/m15/original-external-alpha-regression-summary.md`
+  - `runs/m15/m14-fresh-remediation-regression-summary.md`
+  - `runs/m15/m14r-mini-holdout-regression-summary.md`
+  - `runs/m15/base-holdout-ranker-local.jsonl`
+  - `runs/m15/adversarial-holdout-ranker-local.jsonl`
+- Public-readiness report:
+  - `docs/m15_alpha3_public_readiness_report.md`
+
+Fresh alpha.3 pilots:
+
+```text
+pilots: 11
+domains: 6
+fields: 31
+coverage_rate: 0.741936
+false_positive_rate: 0.096774
+candidate_recall_at_40: 0.967742
+bundle_audit_pass_rate: 1.000000
+```
+
+Regression suites:
+
+```text
+original_external_alpha:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+m14_fresh_remediation:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+m14r_mini_holdout:
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+base_holdout:
+  coverage_rate: 0.950000
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+adversarial_holdout:
+  false_positive_rate: 0.000000
+```
+
+Exit criteria:
+
+- Fresh alpha.3 false_positive_rate <= 2%.
+- Fresh alpha.3 candidate_recall@40 >= 95%.
+- Fresh alpha.3 ranker-local coverage >= 60%.
+- Every regression suite remains FPR = 0.
+- Every features-only bundle passes audit.
+- No unverified positives are used for training.
+
+Status: failed public-alpha readiness. `v0.1.0-alpha.3` passed recall, coverage, bundle audit, and known-regression gates, but fresh alpha.3 false-positive rate was `0.096774`, above the `0.020000` gate. Do not promote to public alpha before M15R.

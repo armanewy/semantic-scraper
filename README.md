@@ -584,6 +584,8 @@ The first external-style alpha execution intentionally used the frozen `v0.1.0-a
 
 `v0.1.0-alpha.2` is an internal validation tag for the M13R build. It passed the original external-alpha regression suite, but M14 fresh pilots found new false positives and candidate-recall misses, so it was not promoted to public alpha. M14R converted those failures into targeted normalization, region, listing-order, title, and plan-price gates. The remediated fresh-alpha rerun reached `false_positive_rate = 0.0` and `candidate_recall_at_40 = 1.0`; a separate final mini-holdout also stayed at `false_positive_rate = 0.0`. Reports are in [docs/m14_alpha2_validation_report.md](docs/m14_alpha2_validation_report.md) and [docs/m14r_fresh_alpha_incident_report.md](docs/m14r_fresh_alpha_incident_report.md).
 
+`v0.1.0-alpha.3` is the M14R-remediated validation tag. M15 tested it against a larger fresh pilot set and found that known regression suites stayed clean, but fresh-pilot false-positive rate was `0.096774`, so it is not public-alpha ready. The public-readiness report is in [docs/m15_alpha3_public_readiness_report.md](docs/m15_alpha3_public_readiness_report.md).
+
 Run the M8C OOD hardening workflow:
 
 ```bash
