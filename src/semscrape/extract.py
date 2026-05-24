@@ -13,7 +13,7 @@ from .dom import element_to_candidate, generate_candidates, parse_html, should_c
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
-from .ranker import RankerError, RankerLocator
+from .ranker import RankerError, RankerLocator, safe_policy_gate_reason
 from .validators import extract_value, validate_value
 
 POLICY_DEFAULTS = {
@@ -53,6 +53,8 @@ POLICY_DEFAULTS = {
         "min_confidence": 0.78,
         "min_margin": 0.18,
         "min_validator_confidence": 0.75,
+        "min_ranker_confidence": 0.90,
+        "min_ranker_margin": 0.008,
         "max_ranker_penalties": 0,
     },
     "ranker-plus-llm": {
@@ -715,12 +717,20 @@ def extract_field(
             min_validator_confidence=min_validator_confidence,
             enforce_margin=True,
         )
-        if decision.ok:
+        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy == "ranker-local-safe" else None
+        if decision.ok and safe_gate_reason is None:
             trace.append({"stage": "strict_heuristic", "status": "accepted", "candidate_id": heuristic.candidate.id})
             if cache is not None and learn:
                 cache.remember(field, heuristic, source="heuristic")
             return _field_extraction(field, heuristic, source="heuristic", trace=trace)
-        trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": decision.reason, "candidate_id": heuristic.candidate.id})
+        trace.append(
+            {
+                "stage": "strict_heuristic",
+                "status": "abstained",
+                "reason": safe_gate_reason or decision.reason,
+                "candidate_id": heuristic.candidate.id,
+            }
+        )
         ranker_abstention_reason = None
         if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"}:
             ranker_attempt = _call_ranker(
@@ -780,7 +790,14 @@ def extract_field(
                         "latency_ms": ranker_attempt.latency_ms,
                     }
                 )
-                if ranker_decision.ok and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence):
+                safe_ranker_reason = (
+                    safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy == "ranker-local-safe" else None
+                )
+                if (
+                    ranker_decision.ok
+                    and safe_ranker_reason is None
+                    and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence)
+                ):
                     trace.append({"stage": "ranker_strict_gate", "status": "accepted", "candidate_id": ranker_attempt.chosen.candidate.id})
                     if cache is not None and learn:
                         cache.remember(field, ranker_attempt.chosen, source="ranker_recovery")
@@ -792,7 +809,7 @@ def extract_field(
                         trace=trace,
                         decision_reason="ranker_recovered_after_heuristic_abstention",
                     )
-                reason = ranker_decision.reason or "low_ranker_confidence"
+                reason = safe_ranker_reason or ranker_decision.reason or "low_ranker_confidence"
                 trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
                 if policy in {"ranker-local", "ranker-local-safe"}:
                     return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)

@@ -1,6 +1,6 @@
 # Public Alpha
 
-`v0.1.0-alpha.6` is a limited public-alpha cohort candidate for local, repeatable extraction workflows.
+`v0.1.0-alpha.7` is a limited public-alpha cohort candidate for local, repeatable extraction workflows.
 
 The default posture is conservative:
 
@@ -11,6 +11,8 @@ goal: abstain when evidence is weak
 ```
 
 semscrape is not trying to call an LLM for every scraped value. It generates bounded DOM candidates, ranks them locally, validates the selected value, and abstains when the evidence does not clear the safety gates.
+
+Alpha.7 is intentionally more conservative than alpha.6. The founder-operated external cohort found false positives and one features-only privacy leak on alpha.6; alpha.7 remediates those issues and should be used for the next true outside-user cohort.
 
 ## Install
 

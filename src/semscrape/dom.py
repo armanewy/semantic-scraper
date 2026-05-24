@@ -32,7 +32,7 @@ def parse_html(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
-def visible_text(element: Tag, *, limit: int = 600) -> str:
+def visible_text(element: Tag, *, limit: int = 1600) -> str:
     # BeautifulSoup doesn't compute CSS visibility; this is intentionally conservative.
     text = normalize_ws(element.get_text(" ", strip=True))
     return truncate(text, limit)
@@ -113,10 +113,10 @@ def _element_depth(element: Tag) -> int:
 def should_consider(element: Tag) -> bool:
     if element.name in SKIP_TAGS:
         return False
-    text = visible_text(element, limit=601)
+    text = visible_text(element, limit=1601)
     if text:
         # Skip giant container elements; their descendants are better candidates.
-        if len(text) > 600 and element.name not in {"article", "main", "section"}:
+        if len(text) > 1600 and element.name not in {"article", "main", "section"}:
             return False
         return True
     for attr in MEANINGFUL_EMPTY_ATTRS:

@@ -1,6 +1,6 @@
 # Known Limitations
 
-`v0.1.0-alpha.6` is a controlled public alpha cohort target. It is safe enough for limited external use, but it is not a universal scraper.
+`v0.1.0-alpha.7` is a controlled public alpha cohort target. It is safe enough for limited external use, but it is not a universal scraper.
 
 ## Scope
 
@@ -26,6 +26,8 @@ Not included:
 
 The public-alpha default is `ranker-local-safe`. It intentionally trades some coverage for fewer false positives.
 
+After the founder-operated external remediation, alpha.7 is deliberately conservative. Low coverage with clear abstention reason codes is expected on unfamiliar templates.
+
 Expected behavior:
 
 - strong evidence: extract
@@ -37,7 +39,7 @@ A missing field is a workflow/product issue. A silent wrong value is a correctne
 
 ## Generalization
 
-The current validation result covers the checked-in holdouts, accumulated external-style regressions, and the M15R mini-holdout. It does not prove arbitrary web robustness.
+The current validation result covers the checked-in holdouts, accumulated external-style regressions, the M15R mini-holdout, the M16R founder-operated external remediation set, and a fresh M16R mini-holdout. It does not prove arbitrary web robustness or true outside-user usability.
 
 Users should run canaries for their own page families:
 

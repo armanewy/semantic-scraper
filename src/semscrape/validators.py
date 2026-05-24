@@ -68,6 +68,13 @@ def extract_value(field: FieldSpec, candidate: Candidate) -> str:
     if "python" in name or "version" in name:
         return re.sub(r"^(?:requires?|requirement)\s+", "", text, flags=re.I).strip()
 
+    title_attr = normalize_ws(candidate.attrs.get("title", ""))
+    if title_attr and ("..." in text or len(title_attr) > len(text) + 8):
+        text = title_attr
+    if _is_documentation_label_field(field) and "documentation" in text.lower():
+        label = _documentation_label(text)
+        if label:
+            return label
     return _clean_text_value(text)
 
 
@@ -227,3 +234,18 @@ def _clean_text_value(value: str) -> str:
 
 def _normalize_currency_text(value: str) -> str:
     return normalize_ws(value).replace("Â£", "£").replace("Ł", "£")
+
+
+def _is_documentation_label_field(field: FieldSpec) -> bool:
+    prompt = " ".join([field.name, field.description]).lower()
+    return "documentation label" in prompt or "docs site" in prompt
+
+
+def _documentation_label(value: str) -> str:
+    for sep in ("—", " - ", " – "):
+        if sep in value:
+            parts = [part.strip() for part in value.split(sep) if part.strip()]
+            for part in reversed(parts):
+                if "documentation" in part.lower():
+                    return _clean_text_value(part)
+    return ""

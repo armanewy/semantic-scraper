@@ -515,7 +515,7 @@ def _ranker_gate_reason(
 ) -> str | None:
     if confidence < min_confidence:
         return "low_ranker_confidence"
-    if margin < min_margin:
+    if margin < min_margin and not _allow_low_margin_stable_scalar(row, min_validator_confidence):
         return "low_ranker_margin"
     if row.get("hard_negative"):
         return "ranker_hard_negative"
@@ -551,6 +551,30 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     context = str(row.get("candidate_context") or "").lower()
     own_terms = set(row.get("own_negative_terms") or [])
 
+    if _is_generic_sentence_prompt(prompt, field):
+        if tag in {"h1", "h2", "h3", "title"} or _word_count(value) < 8:
+            return "ranker_generic_text_low_intent_evidence"
+        if _unsafe_generic_region(selector, context):
+            return "ranker_generic_text_unsafe_region"
+
+    if "link" in field or " link " in prompt:
+        if tag != "a" and "href" not in context and "href" not in selector:
+            return "ranker_link_anchor_required"
+
+    if _is_table_data_prompt(prompt, field):
+        if tag not in {"td", "th", "a"} or not _candidate_in_table_region(selector, context):
+            return "ranker_table_cell_context_required"
+        if any(term in context for term in {"pagination", "per page", "page-size"}):
+            return "ranker_table_pagination_candidate"
+        if tag == "th" and field_type != "text":
+            return "ranker_table_header_not_value"
+        table_row = _table_row_position(selector, context)
+        if "first" in prompt and table_row is not None and table_row > 2:
+            return "ranker_non_first_table_row_candidate"
+        if "pct" in prompt or "percentage" in prompt:
+            if not any(term in selector or term in context for term in {"pct", "percentage", "win%"}):
+                return "ranker_table_percentage_context_required"
+
     if "first organic" in prompt and _looks_like_later_repeated_result(selector):
         return "ranker_non_first_organic_candidate"
 
@@ -582,25 +606,30 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
             if value_lower in {"recent", "latest", "related links"}:
                 return "ranker_recent_title_section_label"
         elif _is_listing_item_prompt(prompt):
-            first_listing_position = row.get("_first_listing_position")
+            ordinal = _requested_ordinal(prompt)
             candidate_position = _listing_position(selector, context)
-            if (
-                first_listing_position is not None
-                and candidate_position is not None
-                and candidate_position > int(first_listing_position)
-            ):
-                return "ranker_non_first_listing_candidate"
-            first_listing_id = row.get("_first_listing_candidate_id")
-            candidate_index = _candidate_index(row.get("candidate_id"))
-            if (
-                first_listing_id is not None
-                and candidate_index is not None
-                and (candidate_position is None or candidate_position == first_listing_position)
-                and candidate_index > int(first_listing_id) + 5
-            ):
-                return "ranker_non_first_listing_candidate"
-            if _looks_like_later_repeated_result(selector):
-                return "ranker_non_first_listing_candidate"
+            if ordinal:
+                if candidate_position is not None and candidate_position != ordinal:
+                    return "ranker_wrong_listing_ordinal_candidate"
+            else:
+                first_listing_position = row.get("_first_listing_position")
+                if (
+                    first_listing_position is not None
+                    and candidate_position is not None
+                    and candidate_position > int(first_listing_position)
+                ):
+                    return "ranker_non_first_listing_candidate"
+                first_listing_id = row.get("_first_listing_candidate_id")
+                candidate_index = _candidate_index(row.get("candidate_id"))
+                if (
+                    first_listing_id is not None
+                    and candidate_index is not None
+                    and (candidate_position is None or candidate_position == first_listing_position)
+                    and candidate_index > int(first_listing_id) + 5
+                ):
+                    return "ranker_non_first_listing_candidate"
+                if _looks_like_later_repeated_result(selector):
+                    return "ranker_non_first_listing_candidate"
             if tag in {"h1", "title"} or not _candidate_in_listing_region(selector, context):
                 return "ranker_listing_item_context_required"
         elif _is_main_page_title_prompt(prompt) and not _is_page_heading_candidate(row, tag, selector, context):
@@ -652,6 +681,20 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
         if tag in {"h1", "h2", "h3", "title"} or _word_count(value) < 8:
             return "ranker_summary_too_short"
 
+    if _is_heading_prompt(prompt, field):
+        if "html document title" in prompt:
+            if tag != "title":
+                return "ranker_document_title_required"
+        elif "h1" in prompt or "main heading" in prompt:
+            if tag != "h1":
+                return "ranker_main_heading_required"
+
+    if "navigation link back" in prompt and not any(term in value_lower for term in {"tutorial", "home", "index"}):
+        return "ranker_navigation_link_intent_required"
+
+    if "rfc" in prompt and not re.search(r"\brfc\s*\d+\b", value_lower):
+        return "ranker_rfc_value_required"
+
     if field_type == "date" or "published" in prompt:
         if own_terms.intersection({"updated", "joined", "copyright", "commented", "related article"}):
             return "ranker_date_negative_context"
@@ -680,9 +723,13 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if field_type == "price" and any(term in context for term in {"sponsored", "recommended", "training fee", "workshop"}):
         return "ranker_price_ad_region"
     if field_type == "price":
+        ordinal = _requested_ordinal(prompt)
+        candidate_position = _listing_position(selector, context)
+        if ordinal and _is_listing_item_prompt(prompt):
+            if candidate_position is not None and candidate_position != ordinal:
+                return "ranker_wrong_listing_ordinal_price"
         if _is_listing_item_prompt(prompt):
-            candidate_position = _listing_position(selector, context)
-            if candidate_position is not None and candidate_position > 1:
+            if not ordinal and candidate_position is not None and candidate_position > 1:
                 return "ranker_non_first_listing_price"
         plan_reason = _price_plan_gate_reason(prompt, value_lower, context, candidate_text)
         if plan_reason:
@@ -702,6 +749,26 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _allow_low_margin_stable_scalar(row: dict[str, Any], min_validator_confidence: float) -> bool:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    selector = str(row.get("candidate_selector") or "").lower()
+    context = str(row.get("candidate_context") or "").lower()
+    haystack = f"{selector} {context}"
+    validator_confidence = float(row.get("validator_confidence") or 0.0)
+    if validator_confidence < max(0.90, min_validator_confidence):
+        return False
+    if int(row.get("validator_penalty_count") or 0) > 0:
+        return False
+    if row.get("hard_disqualified") or int(row.get("hard_disqualifier_count") or 0) > 0:
+        return False
+    if field_type == "price" or "price" in field:
+        return any(term in haystack for term in {"data-qa", "data-testid", "data-role", "itemprop", "price", "deal", "offer"})
+    if field_type == "number" and any(term in field for term in {"rating", "score", "stars"}):
+        return any(term in haystack for term in {"data-qa", "data-testid", "itemprop", "rating", "score", "stars", "review"})
+    return False
+
+
 def _is_title_prompt(prompt: str, field: str) -> bool:
     if any(term in field for term in {"section", "chapter"}):
         return False
@@ -719,8 +786,18 @@ def _is_title_prompt(prompt: str, field: str) -> bool:
     )
 
 
+def safe_policy_gate_reason(field: FieldSpec, chosen: RankedCandidate, ranked: list[RankedCandidate]) -> str | None:
+    rank = next((index for index, item in enumerate(ranked, start=1) if item.candidate.id == chosen.candidate.id), 1)
+    row = runtime_candidate_row(field, chosen, rank, top_k=max(1, len(ranked)))
+    return _field_specific_gate_reason(row)
+
+
 def _is_section_prompt(prompt: str, field: str) -> bool:
     return "section" in field or any(term in prompt for term in {"section heading", "tutorial section"})
+
+
+def _is_heading_prompt(prompt: str, field: str) -> bool:
+    return "heading" in field or any(term in prompt for term in {"main h1", "main heading", "html document title"})
 
 
 def _is_first_section_prompt(prompt: str, field: str) -> bool:
@@ -821,11 +898,63 @@ def _is_page_heading_candidate(row: dict[str, Any], tag: str, selector: str, con
 
 
 def _is_listing_item_prompt(prompt: str) -> bool:
-    return any(term in prompt for term in {"first product", "product card", "first result", "listing result", "first book", "first item"})
+    return any(
+        term in prompt
+        for term in {
+            "first product",
+            "second product",
+            "third product",
+            "product card",
+            "first result",
+            "second result",
+            "listing result",
+            "first book",
+            "second book",
+            "first item",
+            "second item",
+        }
+    )
 
 
 def _candidate_in_listing_region(selector: str, context: str) -> bool:
     return any(term in selector or term in context for term in {"article", "li:nth-of-type", "card", "product", "quote", "result"})
+
+
+def _candidate_in_table_region(selector: str, context: str) -> bool:
+    return any(term in selector or term in context for term in {"table", "tr:nth-of-type", "td:nth-of-type", "th:nth-of-type"})
+
+
+def _table_row_position(selector: str, context: str) -> int | None:
+    matches = [int(match) for match in re.findall(r"tr:nth-of-type\((\d+)\)", f"{selector} {context}")]
+    return max(matches) if matches else None
+
+
+def _is_table_data_prompt(prompt: str, field: str) -> bool:
+    return any(
+        term in prompt
+        for term in {
+            "data row",
+            "first row",
+            "table row",
+            "first team",
+            "first year",
+            "first wins",
+            "first losses",
+            "win percentage",
+            "win pct",
+        }
+    )
+
+
+def _is_generic_sentence_prompt(prompt: str, field: str) -> bool:
+    if any(term in field for term in {"title", "heading", "author", "tag", "price", "date", "link"}):
+        return False
+    return any(term in prompt for term in {"sentence", "paragraph", "purpose text"})
+
+
+def _unsafe_generic_region(selector: str, context: str) -> bool:
+    haystack = f"{selector} {context}"
+    return any(term in haystack for term in {"nav", "sidebar", "footer", "pagination", "tags", "tag cloud", "related", "recommended"})
 
 
 def _annotate_first_listing_candidate(rows: list[dict[str, Any]]) -> None:
@@ -907,15 +1036,21 @@ def _looks_like_later_repeated_result(selector: str) -> bool:
 
 
 def _is_metadata_value_prompt(prompt: str, field: str) -> bool:
-    return any(term in prompt for term in {"metadata", "field-list", "definition list"}) or field in {"status", "type", "created", "post_history", "post-history"}
+    return (
+        any(term in prompt for term in {"metadata", "field-list", "definition list", "product type"})
+        or field in {"status", "type", "created", "post_history", "post-history"}
+        or field.endswith("_type")
+    )
 
 
 def _metadata_value_gate_reason(row: dict[str, Any], prompt: str, field: str, tag: str, selector: str, context: str) -> str | None:
     label_matches = _metadata_label_matches(row, field)
     if tag == "dt":
         return "ranker_metadata_label_not_value"
+    if tag == "th":
+        return "ranker_metadata_label_not_value"
     if label_matches:
-        if tag in {"dd", "abbr"}:
+        if tag in {"dd", "abbr", "td"}:
             return None
         return "ranker_metadata_label_context_not_scalar"
     if tag in {"article", "section", "dl", "ul", "ol", "table"} and _is_metadata_region(selector, context):

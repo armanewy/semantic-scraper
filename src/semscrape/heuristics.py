@@ -140,7 +140,18 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score += 1.0
             reasons.append("price-like value")
         if _is_listing_item_prompt(field.prompt_text):
-            if _looks_like_later_repeated_result(candidate.selector.lower()):
+            ordinal = _requested_ordinal(field.prompt_text)
+            position = _listing_position(candidate.selector.lower(), ctx)
+            if ordinal and position == ordinal:
+                score += 0.8
+                reasons.append(f"matched listing ordinal {ordinal}")
+            elif ordinal and position is not None and position != ordinal:
+                score -= 2.4
+                validation.hard_disqualifiers.append("wrong listing ordinal price")
+                validation.errors.append("wrong listing ordinal price")
+                validation.passed = False
+                reasons.append("disqualified wrong listing ordinal price")
+            elif _looks_like_later_repeated_result(candidate.selector.lower()):
                 score -= 2.4
                 validation.hard_disqualifiers.append("non-first listing item price")
                 validation.errors.append("non-first listing item price")
@@ -183,6 +194,9 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             reasons.append("penalized broad price container")
 
     if _is_title_field(field, name, f_tokens):
+        if "html document title" in field.prompt_text.lower() and candidate.tag == "title":
+            score += 2.0
+            reasons.append("document title tag")
         if _is_recent_item_title_prompt(field.prompt_text):
             if candidate.tag in {"h1", "title"}:
                 score -= 2.6
@@ -215,7 +229,18 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             validation.passed = False
             reasons.append("disqualified price-shaped title candidate")
         if _is_listing_item_prompt(field.prompt_text):
-            if _looks_like_later_repeated_result(candidate.selector.lower()):
+            ordinal = _requested_ordinal(field.prompt_text)
+            position = _listing_position(candidate.selector.lower(), ctx)
+            if ordinal and position == ordinal:
+                score += 0.8
+                reasons.append(f"matched listing ordinal {ordinal}")
+            elif ordinal and position is not None and position != ordinal:
+                score -= 2.0
+                validation.hard_disqualifiers.append("wrong listing ordinal item")
+                validation.errors.append("wrong listing ordinal item")
+                validation.passed = False
+                reasons.append("disqualified wrong listing ordinal item")
+            elif _looks_like_later_repeated_result(candidate.selector.lower()):
                 score -= 2.0
                 validation.hard_disqualifiers.append("non-first listing item")
                 validation.errors.append("non-first listing item")
@@ -249,6 +274,39 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score -= 1.0
             validation.penalties.append("title too long")
             reasons.append("title too long")
+
+    if _is_heading_prompt(field.prompt_text.lower(), name):
+        if "html document title" in field.prompt_text.lower():
+            if candidate.tag == "title":
+                score += 1.8
+                reasons.append("document title tag")
+            else:
+                score -= 1.6
+                validation.penalties.append("document title should use title tag")
+                reasons.append("penalized non-title document title candidate")
+        elif ("main heading" in field.prompt_text.lower() or "h1" in field.prompt_text.lower()) and candidate.tag == "h1":
+            score += 1.6
+            reasons.append("main h1 heading")
+
+    if _is_quote_text_prompt(field.prompt_text.lower(), name):
+        if candidate.tag == "span" and any(term in attr_ctx for term in {"itemprop text", "class text"}):
+            score += 1.5
+            reasons.append("quote text span")
+        if "tag" in attr_ctx or candidate.tag == "a":
+            score -= 1.0
+            validation.penalties.append("quote prompt matched tag/link")
+            reasons.append("penalized tag/link for quote text")
+
+    if _is_documentation_label_prompt(field.prompt_text.lower(), name):
+        if candidate.tag == "title" and "documentation" in value.lower():
+            score += 1.8
+            reasons.append("documentation title label")
+        if any(term in value.lower() for term in {"this page", "show source", "report a bug", "improve this page"}):
+            score -= 2.0
+            validation.hard_disqualifiers.append("docs chrome action label")
+            validation.errors.append("docs chrome action label")
+            validation.passed = False
+            reasons.append("disqualified docs chrome action label")
 
     if _is_section_prompt(field, name) and _is_non_content_section_region(candidate.selector, ctx, value.lower()):
         score -= 2.0
@@ -325,6 +383,33 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score -= 0.8
             validation.penalties.append("rating-adjacent count cue")
             reasons.append("penalized rating-adjacent count cue")
+
+    if _is_table_data_prompt(field.prompt_text.lower(), name):
+        if candidate.tag == "td":
+            score += 0.9
+            reasons.append("table data cell")
+        if any(term in ctx for term in {"pagination", "per page", "page-size"}):
+            score -= 2.2
+            validation.hard_disqualifiers.append("pagination/table control candidate")
+            validation.errors.append("pagination/table control candidate")
+            validation.passed = False
+            reasons.append("disqualified pagination/table control candidate")
+        if candidate.tag in {"h1", "h2", "div"} and not any(term in candidate.selector.lower() for term in {"table", "tr:nth-of-type", "td:nth-of-type"}):
+            score -= 1.8
+            validation.hard_disqualifiers.append("table field outside table cell")
+            validation.errors.append("table field outside table cell")
+            validation.passed = False
+            reasons.append("disqualified table field outside table cell")
+        table_row = _table_row_position(candidate.selector.lower(), ctx)
+        if "first" in field.prompt_text.lower() and table_row is not None and table_row > 2:
+            score -= 1.8
+            validation.hard_disqualifiers.append("non-first table row candidate")
+            validation.errors.append("non-first table row candidate")
+            validation.passed = False
+            reasons.append("disqualified non-first table row candidate")
+        if any(term in field.prompt_text.lower() for term in {"pct", "percentage"}) and "pct" in attr_ctx:
+            score += 1.7
+            reasons.append("percentage cell cue")
 
     if "availability" in name or "stock" in f_tokens:
         if any(term in text for term in ["in stock", "out of stock", "available", "ships", "sold out"]):
@@ -465,6 +550,35 @@ def _is_section_prompt(field: FieldSpec, name: str) -> bool:
     return "section" in name or any(term in prompt for term in {"section heading", "tutorial section"})
 
 
+def _is_heading_prompt(prompt: str, name: str) -> bool:
+    return "heading" in name or any(term in prompt for term in {"main h1", "main heading", "html document title"})
+
+
+def _is_quote_text_prompt(prompt: str, name: str) -> bool:
+    return "quote" in name or "quote text" in prompt
+
+
+def _is_documentation_label_prompt(prompt: str, name: str) -> bool:
+    return "documentation_label" in name or "documentation label" in prompt or "docs site" in prompt
+
+
+def _is_table_data_prompt(prompt: str, name: str) -> bool:
+    return any(
+        term in prompt
+        for term in {
+            "data row",
+            "first row",
+            "table row",
+            "first team",
+            "first year",
+            "first wins",
+            "first losses",
+            "win percentage",
+            "win pct",
+        }
+    )
+
+
 def _is_first_section_prompt(field: FieldSpec, name: str) -> bool:
     return "first" in field.prompt_text.lower() and _is_section_prompt(field, name)
 
@@ -559,7 +673,11 @@ def _is_recent_item_title_prompt(prompt: str) -> bool:
 def _is_metadata_value_prompt(field: FieldSpec) -> bool:
     prompt = field.prompt_text.lower()
     name = field.name.lower()
-    return any(term in prompt for term in {"metadata", "field-list", "definition list"}) or name in {"status", "type", "created", "post_history", "post-history"}
+    return (
+        any(term in prompt for term in {"metadata", "field-list", "definition list", "product type"})
+        or name in {"status", "type", "created", "post_history", "post-history"}
+        or name.endswith("_type")
+    )
 
 
 def _metadata_value_gate_reason(field: FieldSpec, candidate: Candidate) -> str | None:
@@ -567,6 +685,8 @@ def _metadata_value_gate_reason(field: FieldSpec, candidate: Candidate) -> str |
     selector = candidate.selector.lower()
     ctx = context_text(candidate)
     if candidate.tag == "dt":
+        return "metadata label not value"
+    if candidate.tag == "th":
         return "metadata label not value"
     if candidate.tag in {"article", "section", "dl", "ul", "ol", "table"} and _is_metadata_region(candidate):
         return "metadata container not scalar value"
@@ -606,11 +726,36 @@ def _is_page_heading_candidate(candidate: Candidate) -> bool:
 
 def _is_listing_item_prompt(prompt: str) -> bool:
     compact = prompt.lower()
-    return any(term in compact for term in {"first product", "product card", "first result", "listing result", "first book", "first item"})
+    return any(
+        term in compact
+        for term in {
+            "first product",
+            "second product",
+            "third product",
+            "product card",
+            "first result",
+            "second result",
+            "listing result",
+            "first book",
+            "second book",
+            "first item",
+            "second item",
+        }
+    )
 
 
 def _candidate_in_listing_region(selector: str, context: str) -> bool:
     return any(term in selector or term in context for term in {"article", "li:nth-of-type", "card", "product", "quote", "result"})
+
+
+def _listing_position(selector: str, context: str) -> int | None:
+    matches = [int(match) for match in re.findall(r"(?:article|li):nth-of-type\((\d+)\)", f"{selector} {context}")]
+    return max(matches) if matches else None
+
+
+def _table_row_position(selector: str, context: str) -> int | None:
+    matches = [int(match) for match in re.findall(r"tr:nth-of-type\((\d+)\)", f"{selector} {context}")]
+    return max(matches) if matches else None
 
 
 def _looks_like_later_repeated_result(selector: str) -> bool:

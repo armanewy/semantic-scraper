@@ -56,8 +56,10 @@ Current release state:
 
 ```text
 M16F: passed
-v0.1.0-alpha.6: frozen true outside-user cohort target
 M16C local stand-in cohort: passed safety
+M16C founder-operated external cohort on alpha.6: failed safety/privacy
+M16R-Founder: passed
+v0.1.0-alpha.7: safety-remediated founder-cohort target
 M16C true outside-user cohort: pending
 ```
 
@@ -73,7 +75,35 @@ abstention_rate:        0.246377
 bundle_audit_pass_rate: 1.000000
 ```
 
-That is preflight evidence, not a completed outside-user field trial. The next gate is to run outside users/projects on the frozen `v0.1.0-alpha.6` tag and aggregate their audited evidence bundles.
+That was preflight evidence, not a completed outside-user field trial. A broader founder-operated external cohort then found that `v0.1.0-alpha.6` was still too aggressive on fresh pages:
+
+```text
+coverage_rate:          0.986667
+false_positive_rate:    0.333333
+candidate_recall@40:    0.933333
+bundle_audit_pass_rate: 0.937500
+```
+
+M16R-Founder fixed the features-only privacy leak, added narrower safety gates for repeated lists, docs navigation/title contexts, table row/column fields, and generic text overmatches, and made `ranker-local-safe` more conservative. The remediation rerun result was:
+
+```text
+founder_external_remediation:
+  fields_attempted:       91
+  coverage_rate:          0.296703
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.989011
+  abstention_rate:        0.703297
+  bundle_audit_pass_rate: 1.000000
+
+fresh_mini_holdout:
+  fields_attempted:       22
+  coverage_rate:          0.318182
+  false_positive_rate:    0.000000
+  candidate_recall@40:    1.000000
+  bundle_audit_pass_rate: 1.000000
+```
+
+The coverage drop is intentional: alpha.7 restores abstention as the safety default. The next gate is still a true outside-user cohort on the frozen `v0.1.0-alpha.7` tag.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -636,7 +666,7 @@ The first external-style alpha execution intentionally used the frozen `v0.1.0-a
 
 `v0.1.0-alpha.5` added public-alpha onboarding/tooling, but it should not be used for the true outside-user cohort because `alpha summarize` overcounted final abstentions with rejected trace candidates as false positives.
 
-`v0.1.0-alpha.6` fixes that measurement bug and is the frozen true outside-user cohort target. The M16C local stand-in cohort passed safety under corrected final-result metrics:
+`v0.1.0-alpha.6` fixes that measurement bug. The M16C local stand-in cohort passed safety under corrected final-result metrics:
 
 ```text
 bundles:                25
@@ -648,7 +678,34 @@ abstention_rate:        0.246377
 bundle_audit_pass_rate: 1.000000
 ```
 
-This local cohort is preflight evidence only. M16C remains pending until outside users/projects reproduce the workflow without direct maintainer steering.
+The founder-operated external cohort then failed safety and privacy on alpha.6:
+
+```text
+coverage_rate:          0.986667
+false_positive_rate:    0.333333
+candidate_recall@40:    0.933333
+bundle_audit_pass_rate: 0.937500
+```
+
+`v0.1.0-alpha.7` is the M16R-Founder remediation tag. It fixes the features-only raw HTML leak and makes `ranker-local-safe` deliberately conservative:
+
+```text
+founder_external_remediation:
+  fields_attempted:       91
+  coverage_rate:          0.296703
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.989011
+  bundle_audit_pass_rate: 1.000000
+
+fresh_mini_holdout:
+  fields_attempted:       22
+  coverage_rate:          0.318182
+  false_positive_rate:    0.000000
+  candidate_recall@40:    1.000000
+  bundle_audit_pass_rate: 1.000000
+```
+
+The incident report is in [docs/m16r_founder_external_incident_report.md](docs/m16r_founder_external_incident_report.md). This is still preflight evidence only. M16C remains pending until outside users/projects reproduce the workflow without direct maintainer steering.
 
 Run the M8C OOD hardening workflow:
 
@@ -912,13 +969,14 @@ M13-M15R: complete through remediation
 M16: tooling/docs complete
 M16F: measurement integrity fix complete
 M16C local stand-in cohort: passed safety
+M16R-Founder: founder external safety remediation passed
 M16C true outside-user cohort: pending
 ```
 
 Current frozen external-cohort target:
 
 ```text
-v0.1.0-alpha.6
+v0.1.0-alpha.7
 ```
 
 Do not mark M16C complete until outside users/projects run the frozen target, produce audited features-only bundles, and pass the cohort gate:

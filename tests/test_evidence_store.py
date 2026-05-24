@@ -170,6 +170,9 @@ def test_evidence_bundle_audit_and_intake_features_only(tmp_path, capsys) -> Non
         records = archive.read("records.jsonl").decode("utf-8")
         assert '"candidate_text":' not in records
         assert '"candidate_context":' not in records
+        assert '"candidate_before_text":' not in records
+        assert '"candidate_after_text":' not in records
+        assert '"candidate_parent_text":' not in records
         assert '"candidate_value":' not in records
 
     assert main(["evidence", "audit", str(bundle)]) == 0
@@ -191,6 +194,22 @@ def test_evidence_bundle_audit_and_intake_features_only(tmp_path, capsys) -> Non
     assert unsafe_audit["ok"] is False
     assert "privacy_report_mismatch" in unsafe_audit["errors"]
     assert "full_candidate_text_present" in unsafe_audit["errors"]
+
+    raw_html_bundle = tmp_path / "raw-html-bundle.zip"
+    with zipfile.ZipFile(bundle) as source, zipfile.ZipFile(raw_html_bundle, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "records.jsonl":
+                rows = [json.loads(line) for line in data.decode("utf-8").splitlines()]
+                rows[0]["candidates"][0]["candidate_before_text"] = "<!doctype html><html><body>leak</body></html>"
+                data = "".join(json.dumps(row) + "\n" for row in rows).encode("utf-8")
+            target.writestr(name, data)
+
+    assert main(["evidence", "audit", str(raw_html_bundle)]) == 2
+    raw_html_audit = json.loads(capsys.readouterr().out)
+    assert raw_html_audit["ok"] is False
+    assert "raw_html_present" in raw_html_audit["errors"]
+    assert "full_candidate_text_present" in raw_html_audit["errors"]
 
     assert main(["evidence", "intake", str(bundle), "--out", str(intake)]) == 0
     result = json.loads(capsys.readouterr().out)

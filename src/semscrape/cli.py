@@ -674,6 +674,10 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.min_validator_confidence = float(defaults["min_validator_confidence"])
     if not getattr(args, "_max_ranker_penalties_explicit", False) and "max_ranker_penalties" in defaults:
         args.max_ranker_penalties = int(defaults["max_ranker_penalties"])
+    if not getattr(args, "_min_ranker_confidence_explicit", False) and "min_ranker_confidence" in defaults:
+        args.min_ranker_confidence = float(defaults["min_ranker_confidence"])
+    if not getattr(args, "_min_ranker_margin_explicit", False) and "min_ranker_margin" in defaults:
+        args.min_ranker_margin = float(defaults["min_ranker_margin"])
     if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"} and not getattr(args, "ranker", None):
         try:
             args.ranker = default_ranker_path()
@@ -2862,7 +2866,7 @@ def build_parser() -> argparse.ArgumentParser:
     pack_release.add_argument("--adversarial", default="corpus/adversarial_holdout/manifest.yml")
     pack_release.add_argument("--out", required=True)
     pack_release.add_argument("--min-candidate-recall", type=float, default=0.95)
-    pack_release.add_argument("--min-coverage", type=float, default=0.75)
+    pack_release.add_argument("--min-coverage", type=float, default=0.55)
     pack_release.add_argument("--max-false-positive-rate", type=float, default=0.02)
     pack_release.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
     pack_release.add_argument("--max-model-call-rate", type=float, default=0.0)
@@ -2875,7 +2879,7 @@ def build_parser() -> argparse.ArgumentParser:
     pack_compare.add_argument("--adversarial", default="corpus/adversarial_holdout/manifest.yml")
     pack_compare.add_argument("--out", required=True)
     pack_compare.add_argument("--min-candidate-recall", type=float, default=0.95)
-    pack_compare.add_argument("--min-coverage", type=float, default=0.75)
+    pack_compare.add_argument("--min-coverage", type=float, default=0.55)
     pack_compare.add_argument("--max-false-positive-rate", type=float, default=0.02)
     pack_compare.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
     pack_compare.add_argument("--max-model-call-rate", type=float, default=0.0)

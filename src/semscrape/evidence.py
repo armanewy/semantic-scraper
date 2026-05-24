@@ -405,6 +405,7 @@ def create_evidence_bundle(
     records = store.export_records(privacy=privacy, only_labeled=only_labeled, min_trust=min_trust)
     stats = store.stats()
     privacy_report = evidence_privacy_report(records)
+    _raise_for_privacy_violations(privacy, privacy_report)
     manifest = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "bundle_type": BUNDLE_TYPE,
@@ -552,7 +553,13 @@ def evidence_records_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
 def evidence_privacy_report(records: list[dict[str, Any]]) -> dict[str, Any]:
     serialized = json.dumps(records, ensure_ascii=False).lower()
     raw_html_present = bool("<html" in serialized or "<!doctype" in serialized)
-    full_candidate_text_present = _key_present(records, "candidate_text") or _key_present(records, "candidate_context")
+    full_candidate_text_present = (
+        _key_present(records, "candidate_text")
+        or _key_present(records, "candidate_context")
+        or _key_present(records, "candidate_before_text")
+        or _key_present(records, "candidate_after_text")
+        or _key_present(records, "candidate_parent_text")
+    )
     selector_present = _key_present(records, "candidate_selector") or _key_present(records, "selector")
     value_text_present = (
         _key_present(records, "candidate_value")
@@ -774,7 +781,7 @@ def _candidate_for_privacy(row: dict[str, Any], privacy: str) -> dict[str, Any]:
     if privacy == "full":
         return out
     if privacy == "redacted":
-        for key in ["candidate_text", "candidate_context"]:
+        for key in ["candidate_text", "candidate_context", "candidate_before_text", "candidate_after_text", "candidate_parent_text"]:
             if out.get(key) is not None:
                 out[f"{key}_hash"] = _sha256_text(str(out[key]))
                 out.pop(key, None)
@@ -785,6 +792,9 @@ def _candidate_for_privacy(row: dict[str, Any], privacy: str) -> dict[str, Any]:
     for key in [
         "candidate_value",
         "candidate_text",
+        "candidate_before_text",
+        "candidate_after_text",
+        "candidate_parent_text",
         "candidate_context",
         "candidate_selector",
         "field_description",
@@ -795,6 +805,18 @@ def _candidate_for_privacy(row: dict[str, Any], privacy: str) -> dict[str, Any]:
     ]:
         out.pop(key, None)
     return out
+
+
+def _raise_for_privacy_violations(privacy: str, report: dict[str, Any]) -> None:
+    if privacy != "features-only":
+        return
+    violations = [
+        key
+        for key in ("raw_html_present", "full_candidate_text_present", "selector_present", "value_text_present")
+        if report.get(key)
+    ]
+    if violations:
+        raise ValueError("features-only evidence bundle privacy violation: " + ", ".join(violations))
 
 
 def _apply_label_to_candidate(row: dict[str, Any], label: dict[str, Any]) -> dict[str, Any]:

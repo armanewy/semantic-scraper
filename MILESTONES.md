@@ -1334,3 +1334,97 @@ Exit criteria:
 - `python -m pytest -q` passes.
 
 Status: complete. `v0.1.0-alpha.6` is the frozen target for true outside-user M16C execution. `v0.1.0-alpha.5` remains a valid packaging tag but contains the alpha-summary measurement bug.
+
+## M16R-Founder: Founder External Safety Remediation
+
+**Question:** Can we remediate founder-operated external cohort failures before inviting true outside users?
+
+Baseline alpha.6 founder-operated external cohort:
+
+```text
+bundles: 16
+accepted_bundles: 15
+domains: 5
+fields_attempted: 75
+coverage_rate: 0.986667
+false_positive_rate: 0.333333
+candidate_recall_at_40: 0.933333
+bundle_audit_pass_rate: 0.937500
+```
+
+Failure families:
+
+- features-only bundle privacy leak in candidate before/after text.
+- repeated/list ordinal confusion.
+- docs navigation/title context confusion.
+- product/table row and column confusion.
+- generic text overmatches.
+- candidate recall misses from long leaf text, title attributes, documentation labels, and table percentage candidates.
+
+Deliverables:
+
+- Features-only bundle leak fix.
+- Privacy audit regression tests for raw HTML and full candidate text.
+- Founder external incident report:
+  - `docs/m16r_founder_external_incident_report.md`
+- Targeted safety gates for repeated/list contexts, docs title/navigation contexts, table fields, generic sentence fields, links, RFC values, and product metadata values.
+- Candidate recall fixes for long text, title attributes, documentation labels, quote text, table percentage, and ordinal listing candidates.
+- Timeout/operational failures kept separate from extraction correctness.
+- Founder remediation rerun.
+- Fresh mini-holdout rerun.
+- Base/adversarial regression rerun.
+
+Remediated founder external rerun:
+
+```text
+bundles: 18
+domains: 6
+fields_attempted: 91
+coverage_rate: 0.296703
+false_positive_rate: 0.000000
+candidate_recall_at_40: 0.989011
+abstention_rate: 0.703297
+bundle_audit_pass_rate: 1.000000
+```
+
+One founder project timed out during the final rerun and is excluded from extraction correctness metrics.
+
+Fresh M16R mini-holdout:
+
+```text
+bundles: 5
+domains: 5
+fields_attempted: 22
+coverage_rate: 0.318182
+false_positive_rate: 0.000000
+candidate_recall_at_40: 1.000000
+abstention_rate: 0.681818
+bundle_audit_pass_rate: 1.000000
+```
+
+Regression suites:
+
+```text
+base_holdout:
+  rows: 20
+  coverage_rate: 0.350000
+  false_positive_rate: 0.000000
+  candidate_recall_at_40: 1.000000
+
+adversarial_holdout:
+  rows: 6
+  coverage_rate: 0.000000
+  false_positive_rate: 0.000000
+```
+
+Exit criteria:
+
+- Founder remediation FPR = 0.
+- Founder remediation candidate_recall@40 >= 95%.
+- Founder remediation bundle audit pass rate = 100%.
+- Fresh mini-holdout FPR <= 2%.
+- Fresh mini-holdout candidate_recall@40 >= 95%.
+- Base/adversarial FPR remains 0.
+- No unverified positives are used for training.
+
+Status: passed. `v0.1.0-alpha.7` is the safety-remediated founder external cohort tag. Coverage is intentionally conservative; true outside-user M16C remains pending.

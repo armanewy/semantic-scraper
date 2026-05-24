@@ -15,7 +15,18 @@ from .models import FieldSpec, RankedCandidate, ScrapeSpec
 
 
 def normalize_expected(value: Any) -> str:
-    normalized = str(value).replace("Â£", "£").replace("Ł", "£")
+    normalized = (
+        str(value)
+        .replace("Â£", "£")
+        .replace("Ł", "£")
+        .replace("â€™", "’")
+        .replace("â€œ", "“")
+        .replace("â€\x9d", "”")
+        .replace("â€\x9c", "“")
+        .replace("â€“", "–")
+        .replace("â€”", "—")
+        .replace("â€¦", "…")
+    )
     return re.sub(r"\s+", " ", normalized).strip().lower()
 
 
