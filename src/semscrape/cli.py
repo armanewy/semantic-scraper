@@ -3234,6 +3234,7 @@ def build_parser() -> argparse.ArgumentParser:
     alpha_run.add_argument("--pack", default=None, help="Optional domain pack for extraction defaults and gap reporting")
     alpha_run.add_argument("--top-k", type=int, default=40)
     alpha_run.add_argument("--live", action="store_true", help="Allow live URL inputs declared by the registry")
+    alpha_run.add_argument("--record-evidence", action="store_true", help="Accepted for workflow parity; alpha run always records evidence")
     alpha_run.add_argument("--privacy", choices=sorted(PRIVACY_MODES), default="features-only", help="Evidence bundle privacy mode")
     alpha_run.add_argument("--evidence-privacy", choices=sorted(PRIVACY_MODES), default="redacted", help="Evidence DB capture privacy mode")
     alpha_run.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="untrusted")
