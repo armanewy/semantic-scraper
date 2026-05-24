@@ -33,7 +33,7 @@ Then it should regenerate a deterministic selector once it finds the right eleme
 
 ## Current status
 
-This repo is a developer-alpha semantic scraper CLI:
+This repo is a controlled public-alpha semantic scraper CLI:
 
 - Static HTML extraction works.
 - Deterministic candidate ranking works.
@@ -51,6 +51,29 @@ This repo is a developer-alpha semantic scraper CLI:
 - Local SQLite evidence capture, review, labeling, privacy-safe export, and evidence-derived dataset generation are included.
 - Privacy-audited evidence bundles and maintainer-side bundle intake are included for opt-in contribution workflows.
 - A local ecommerce domain-pack skeleton is included for pack-specific ranker and threshold defaults.
+
+Current release state:
+
+```text
+M16F: passed
+v0.1.0-alpha.6: frozen true outside-user cohort target
+M16C local stand-in cohort: passed safety
+M16C true outside-user cohort: pending
+```
+
+The corrected M16C local stand-in cohort result was:
+
+```text
+bundles:                25
+fields_attempted:       69
+coverage_rate:          0.753623
+false_positive_rate:    0.000000
+candidate_recall@40:    1.000000
+abstention_rate:        0.246377
+bundle_audit_pass_rate: 1.000000
+```
+
+That is preflight evidence, not a completed outside-user field trial. The next gate is to run outside users/projects on the frozen `v0.1.0-alpha.6` tag and aggregate their audited evidence bundles.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -609,6 +632,24 @@ The first external-style alpha execution intentionally used the frozen `v0.1.0-a
 
 `v0.1.0-alpha.3` is the M14R-remediated validation tag. M15 tested it against a larger fresh pilot set and found that known regression suites stayed clean, but fresh-pilot false-positive rate was `0.096774`, so it is not public-alpha ready. The public-readiness report is in [docs/m15_alpha3_public_readiness_report.md](docs/m15_alpha3_public_readiness_report.md).
 
+`v0.1.0-alpha.4` is the M15R safety-remediated extraction tag. It introduced the conservative `ranker-local-safe` public-alpha preset and restored zero observed false positives on the accumulated regression suites. The safety report is in [docs/m15r_public_alpha_safety_report.md](docs/m15r_public_alpha_safety_report.md).
+
+`v0.1.0-alpha.5` added public-alpha onboarding/tooling, but it should not be used for the true outside-user cohort because `alpha summarize` overcounted final abstentions with rejected trace candidates as false positives.
+
+`v0.1.0-alpha.6` fixes that measurement bug and is the frozen true outside-user cohort target. The M16C local stand-in cohort passed safety under corrected final-result metrics:
+
+```text
+bundles:                25
+fields_attempted:       69
+coverage_rate:          0.753623
+false_positive_rate:    0.000000
+candidate_recall@40:    1.000000
+abstention_rate:        0.246377
+bundle_audit_pass_rate: 1.000000
+```
+
+This local cohort is preflight evidence only. M16C remains pending until outside users/projects reproduce the workflow without direct maintainer steering.
+
 Run the M8C OOD hardening workflow:
 
 ```bash
@@ -730,13 +771,46 @@ min_length, max_length, regex, regex_not, contains, not_contains, choices, requi
 
 ```bash
 semscrape extract SPEC INPUT [--no-llm] [--learn] [--model MODEL]
+semscrape doctor
+semscrape init PROJECT_DIR
 semscrape inspect SPEC INPUT FIELD --top-k 20
 semscrape benchmark SPEC INPUT... [--expect-like BASENAME]
 semscrape recall SPEC INPUT... --top-k 40 [--expect-like BASENAME]
 semscrape eval-model SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40 [--strict]
 semscrape calibrate SPEC_OR_GLOB [INPUT...] --models MODEL... --top-k 40
 semscrape report RUN_JSONL --out REPORT.md
+semscrape compare LEFT.jsonl RIGHT.jsonl --out REPORT.md
+semscrape report-domain RUN.jsonl [...] --out REPORT.md
+semscrape fallback audit RUN.jsonl --out REPORT.md
 semscrape mutate INPUT --out DIR --n 20 --seed 7
+semscrape drift INPUT --profile PROFILE --out OUTPUT
+semscrape snapshot SPEC URL --out DIR [--screenshot] [--candidates] [--accessibility]
+semscrape canary SPEC_OR_MANIFEST [...] --policy ranker-local-safe --out RUN.jsonl
+semscrape dataset build SPEC_OR_MANIFEST [...] --out DATASET.jsonl
+semscrape dataset split DATASET.jsonl --by group --train-out TRAIN.jsonl --test-out TEST.jsonl
+semscrape ranker info [--model RANKER.json]
+semscrape ranker train TRAIN.jsonl --out RANKER.json
+semscrape ranker eval TEST.jsonl --model RANKER.json --out RUN.jsonl
+semscrape ranker calibrate TEST.jsonl --model RANKER.json --out RUN.jsonl
+semscrape ranker model-card RANKER.json --out MODEL_CARD.md
+semscrape ranker release-check --baseline BASE.jsonl --candidate CANDIDATE.jsonl --adversarial ADV.jsonl --out CHECK.json
+semscrape evidence stats .semscrape/evidence.db
+semscrape evidence review .semscrape/evidence.db [--status abstained]
+semscrape evidence label .semscrape/evidence.db RECORD_ID --correct-candidate CANDIDATE_ID
+semscrape evidence export .semscrape/evidence.db --privacy features-only --out EVIDENCE.jsonl
+semscrape evidence bundle .semscrape/evidence.db --privacy features-only --out bundle.zip
+semscrape evidence audit bundle.zip
+semscrape evidence intake bundles/*.zip --out intake.jsonl
+semscrape pilot run PROJECT_DIR --policy ranker-local-safe --record-evidence
+semscrape pilot report PROJECT_DIR --out report.md
+semscrape pilot summarize pilots/* --out summary.md
+semscrape alpha summarize alpha_bundles/*.zip --out runs/m16/public-alpha-summary.md
+semscrape pack info ecommerce
+semscrape pack build ecommerce --from-intake intake.jsonl --out packs/ecommerce-v1
+semscrape pack release-check packs/ecommerce-v1 --baseline packs/ecommerce --holdout HOLDOUT.yml --adversarial ADV.yml --out CHECK.json
+semscrape pack compare packs/ecommerce packs/ecommerce-v1 --out compare.md
+semscrape pack gaps intake.jsonl --pack ecommerce --out gaps.md
+semscrape failures summarize RUN_OR_FAILURE_DIR
 semscrape cache-clear CACHE_PATH
 ```
 
@@ -750,17 +824,25 @@ semscrape extract examples/product.yml https://example.com/item --render --wait-
 
 ```text
 src/semscrape/
+  assets.py      packaged ranker lookup
   cache.py       selector memory / lock files
   cli.py         command line entrypoint
+  dataset.py     candidate-ranking dataset build/split
   decision.py    strict confidence/abstention gates
   dom.py         HTML -> compact candidate elements
-  eval_model.py  local model evaluation harness
-  extract.py     extraction and repair loop
-  heuristics.py  deterministic ranking
+  drift.py       named replay drift generator
+  eval_model.py  local model/eval/report metrics
+  evidence.py    SQLite evidence store, bundles, intake, privacy audit
+  extract.py     extraction, ranker, LLM fallback, and repair loop
+  heuristics.py  deterministic candidate ranking
   llm.py         local Ollama candidate chooser
-  mutate.py      HTML drift generator
+  models.py      shared extraction data models
+  mutate.py      fixture mutation generator
+  packs.py       domain pack loading/defaults
+  ranker.py      tiny offline candidate ranker
   render.py      requests + optional Playwright rendering
   selectors.py   CSS selector generation
+  snapshot.py    rendered-page snapshot capture
   spec.py        YAML spec loader
   validators.py  type-specific scalar validators
 
@@ -771,10 +853,25 @@ examples/
   article.yml
   article_v1.html
 
+corpus/
+  base_train/
+  base_dev/
+  base_holdout/
+  adversarial_holdout/
+  ood_dev/
+  ood_holdout/
+  repro_minimized/
+
+packs/
+  ecommerce/
+
 tests/
   test_candidate_generation.py
+  test_dataset_ranker.py
+  test_evidence_store.py
   test_eval_model.py
   test_extract_no_llm.py
+  test_pilot_pack.py
   test_selectors.py
   test_validators.py
 
@@ -785,169 +882,58 @@ fixtures/
   tables/pricing_table/
 ```
 
-## Milestones
+## Milestone Status
 
-### Milestone 1 — Static semantic extraction
-
-Status: done.
-
-Goal: Given HTML and a field spec, produce the correct scalar value without using brittle prewritten selectors.
-
-Implemented:
-
-- DOM candidate generation.
-- Compact candidate contexts.
-- Field-specific validators.
-- Heuristic ranker.
-- `extract`, `inspect`, and `benchmark` commands.
-
-Success test:
-
-```bash
-python -m pytest -q
-semscrape benchmark examples/product.yml examples/product_v1.html examples/product_v2.html --no-llm
-```
-
-### Milestone 2 — Robustness harness
-
-Status: done.
-
-Goal: Measure candidate recall before measuring LLM quality.
-
-Implemented:
-
-- `mutate` command that changes classes/IDs/wrappers and injects distractors.
-- `recall` command that checks whether expected values appear in top-K candidates.
-- `benchmark --expect-like` for mutated copies.
-
-The key metric is candidate recall@K:
+Detailed milestone notes live in [MILESTONES.md](MILESTONES.md). Current summary:
 
 ```text
-Did the correct element/value appear in the top 40 candidates?
+M1-M5: complete
+  static extraction, robustness harness, local model evaluation,
+  selector cache, confidence gates, and calibrated safe-local policy
+
+M6-M6E: complete
+  rendered snapshots, canary/replay corpus, failure triage,
+  selector memory hardening, and cross-version drift validation
+
+M7A-M7C: complete
+  tiny offline ranker, ranker safety calibration, and LLM fallback-call reduction
+
+M8A/M8C/M8B: complete
+  OOD canary suite, OOD hardening, and developer alpha packaging
+
+M9-M12: complete
+  structural evidence store, evidence-driven base ranker expansion,
+  opt-in evidence bundles/intake, and domain-pack release loop
+
+M13-M15R: complete through remediation
+  external-style field trials repeatedly found false positives,
+  which were converted into targeted gates, hard negatives, and regression suites
+
+M16: tooling/docs complete
+M16F: measurement integrity fix complete
+M16C local stand-in cohort: passed safety
+M16C true outside-user cohort: pending
 ```
 
-If recall is poor, no LLM can reliably fix the scraper.
-
-### Milestone 3 — Local model chooser
-
-Status: evaluation harness implemented, needs local model bakeoff.
-
-Goal: Let a small local model choose from top-K candidates when deterministic confidence is weak or cached selectors fail.
-
-Implemented:
-
-- `OllamaLocator` using `/api/chat`.
-- JSON-schema response format.
-- Confidence threshold.
-- Validation fallback.
-- `eval-model` command.
-- Per-field JSONL rows.
-- Failure corpus artifacts.
-- Hard fixture corpus with distractors, changed layouts, missing fields, listings, articles, and tables.
-
-Acceptance criteria:
+Current frozen external-cohort target:
 
 ```text
+v0.1.0-alpha.6
+```
+
+Do not mark M16C complete until outside users/projects run the frozen target, produce audited features-only bundles, and pass the cohort gate:
+
+```text
+10+ outside projects/users
+5+ domains
+60+ attempted fields
+bundle_audit_pass_rate = 100%
+aggregate false_positive_rate <= 2%
 candidate_recall@40 >= 95%
-model_choice_accuracy_when_candidate_present >= 90%
-validated_accuracy >= 90%
-false_positive_rate <= 2%
+ranker-local-safe coverage >= 55%
 ```
 
-Next work:
-
-- Run model bakeoff: `qwen3:1.7b`, `gemma3:1b`, `llama3.2:1b`.
-- Compare failure artifacts to classify candidate misses, model mistakes, validator leaks, and ambiguous specs.
-
-### Milestone 4 — Selector repair cache
-
-Status: done.
-
-Goal: Once a field is found, persist the repaired selector so future runs are fast and deterministic.
-
-Implemented:
-
-- `--learn` writes `SPEC.lock.json` by default.
-- Cached selectors are tried first.
-- Cached values must still pass validation.
-- Broken selectors fall through to candidate repair.
-
-### Milestone 4B — Confidence gating and abstention
-
-Status: implemented.
-
-Goal: Avoid silently wrong extractions by making conservative abstention a first-class result.
-
-Implemented:
-
-- Validator reasons, penalties, and hard disqualifiers.
-- Field-specific negative evidence for prices, ratings, titles, and dates.
-- Strict decision gate with `--strict`, `--min-confidence`, `--min-margin`, and `--min-validator-confidence`.
-- `status: abstained` extraction results with reason codes.
-- Eval summaries split coverage, misses, abstentions, model errors, and false positives.
-- Threshold calibration sweep.
-- Markdown reports for eval and calibration runs.
-
-Target:
-
-```text
-strict heuristic false_positive_rate <= 5%
-LLM strict false_positive_rate <= heuristic strict
-LLM strict coverage >= heuristic strict
-```
-
-### Milestone 5 — Local model bakeoff and threshold calibration
-
-Status: calibration/report tooling implemented and validated locally with Ollama models.
-
-Goal: Determine whether local models recover coverage from strict-mode abstentions without reintroducing false positives.
-
-Implemented:
-
-- `eval-model --strict` for local model bakeoffs.
-- `calibrate` threshold sweeps for confidence, margin, and validator gates.
-- `calibrate --from-jsonl` to reuse existing model eval output without calling models again.
-- `report` for Markdown summaries.
-
-Targets:
-
-```text
-Good: coverage >= 45% with false_positive_rate <= 2%
-Great: coverage >= 60% with false_positive_rate <= 2%
-Excellent: coverage >= 70% with false_positive_rate <= 2%
-```
-
-### Milestone 6 — Rendered pages
-
-Status: first pass implemented.
-
-Goal: Support JavaScript-rendered pages.
-
-Implemented:
-
-- URL fetching with `requests`.
-- Optional Playwright rendering with `--render`.
-- Optional `--wait-for` selector.
-
-Next work:
-
-- Snapshot accessibility tree.
-- Include element coordinates and computed visibility.
-- Support iframes.
-- Add login/session storage.
-
-### Milestone 7 — Tiny model or classifier
-
-Status: not started.
-
-Goal: Replace or complement generic Ollama models with a small specialized ranker.
-
-Potential path:
-
-- Generate labeled data from specs and fixtures.
-- Train a pairwise ranker or token classifier.
-- Use the local LLM only as a teacher/data generator.
-- Ship a small ONNX/gguf model for candidate reranking.
+The next milestone after a passing outside cohort is M17: use true cohort evidence to build a public-alpha pack/ranker update candidate, then release-check it against accumulated regression and adversarial suites.
 
 ## Design rules
 
@@ -965,7 +951,10 @@ Potential path:
 - Anti-bot bypassing.
 - Full browser session management.
 - Multi-page crawling workflows.
-- Fine-tuned local model.
-- Visual/coordinate-aware candidate ranking.
+- Hosted dashboards, billing, or team workflows.
+- Automatic cloud upload.
+- Automatic global model training from unverified user runs.
+- Neural fine-tuned local model.
+- Full visual-layout model beyond the current rendered metadata and region features.
 
-Those are later product layers. The first thing to prove is that a local semantic locator can survive DOM drift.
+Those are later product layers. The current proof point is narrower: a local-first extractor with a conservative ranker, validation gates, abstention, and privacy-safe evidence loops.
