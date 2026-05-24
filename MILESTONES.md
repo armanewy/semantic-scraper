@@ -1860,3 +1860,107 @@ Report:
 ```text
 docs/m18b_oracle_label_acquisition_report.md
 ```
+
+## M19: Evidence-Driven Ranker/Pack Update
+
+Status: completed, no promotion.
+
+Question: Can oracle-backed trusted labels improve the default ranker or a domain pack without regressing false-positive safety?
+
+Dataset build:
+
+```text
+source: data/m18b/oracle-training-eligible-evidence.jsonl
+dataset: data/m19/candidate-ranking-oracle.jsonl
+candidate_rows: 3920
+positive_rows: 186
+hard_negative_rows: 1498
+training_splits: train_candidate only
+min_trust: silver
+only_training_eligible: true
+```
+
+Group-aware split:
+
+```text
+train_rows: 2680
+eval_rows: 1240
+train_groups: 16
+eval_groups: 9
+```
+
+Ranker candidate:
+
+```text
+model: models/candidate-ranker-vNext.json
+model_card: models/candidate-ranker-vNext.md
+training_rows: 2680
+positives: 131
+negatives: 2549
+hard_negatives: 1091
+```
+
+Oracle eval split:
+
+```text
+candidate-ranker-v3:
+  coverage_rate:       0.645161
+  false_positive_rate: 0.064516
+  candidate_recall@40: 1.000000
+
+candidate-ranker-vNext:
+  coverage_rate:       0.548387
+  false_positive_rate: 0.000000
+  candidate_recall@40: 1.000000
+```
+
+Ranker release-check:
+
+```text
+passed: false
+promotion: keep_baseline
+base_holdout_v3_coverage:    0.450000
+base_holdout_vnext_coverage: 0.150000
+base_holdout_vnext_fpr:      0.000000
+adversarial_vnext_fpr:       0.000000
+failed_gates:
+  - base_coverage
+  - coverage_not_regressed
+```
+
+Pack candidate:
+
+```text
+pack: packs/ecommerce-vNext
+baseline: packs/ecommerce-v1
+release_check: failed
+promotion: keep_baseline
+baseline_coverage:  0.800000
+candidate_coverage: 0.150000
+candidate_fpr:      0.000000
+adversarial_fpr:    0.000000
+```
+
+Safety result:
+
+```text
+No unverified production positives were used.
+Holdout/adversarial/monitor_only rows were excluded from the oracle-derived training build.
+Candidate recall did not regress in the checked candidate/eval rows.
+Adversarial false_positive_rate remained 0.
+No default ranker or pack was promoted.
+```
+
+Decision:
+
+```text
+M19 proves the update loop can build candidate artifacts and reject unsafe or low-utility candidates.
+The oracle labels were useful for safety, but too narrow and too docs/article/database-heavy to promote a general ranker or ecommerce pack.
+Next evidence step should expand trusted oracle labels across ecommerce/listings/pricing and reserve oracle holdouts for evaluation.
+```
+
+Report:
+
+```text
+docs/m19_evidence_driven_update_report.md
+```

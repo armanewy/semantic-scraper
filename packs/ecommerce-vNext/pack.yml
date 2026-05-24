@@ -1,0 +1,23 @@
+name: ecommerce-vNext
+description: Domain pack built from trusted evidence intake for ecommerce-v1.
+policy: ranker-local-safe
+ranker: ranker.json
+thresholds:
+  min_confidence: 0.78
+  min_margin: 0.18
+  min_validator_confidence: 0.75
+  min_ranker_confidence: 0.7
+  min_ranker_margin: 0.0
+  max_ranker_penalties: 0
+  llm_fallback_policy: recoverable-only
+validators: validators.yml
+supported_fields: supported-fields.yml
+model_card: model-card.md
+metadata:
+  schema_version: 1
+  built_at: '2026-05-24T23:44:36.620609+00:00'
+  source_intake: data/m18b/oracle-training-eligible-evidence.jsonl
+  baseline: packs\ecommerce-v1\pack.yml
+  dataset_rows: 3920
+  positives: 186
+  hard_negatives: 1498

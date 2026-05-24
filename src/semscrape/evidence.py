@@ -312,12 +312,27 @@ def write_evidence_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def dataset_rows_from_evidence_export(path: str | Path) -> list[dict[str, Any]]:
+def dataset_rows_from_evidence_export(
+    path: str | Path,
+    *,
+    min_trust: str = "silver",
+    only_training_eligible: bool = False,
+    training_splits: set[str] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in _read_jsonl(path):
         record = item.get("record") or {}
         label = record.get("label") or {}
-        if label.get("status") != "labeled" or label.get("trust_level") not in TRAINABLE_TRUST_LEVELS:
+        if label.get("status") != "labeled":
+            continue
+        if not _trust_at_least(str(label.get("trust_level") or "untrusted"), min_trust):
+            continue
+        if str(label.get("trust_level") or "untrusted") not in TRAINABLE_TRUST_LEVELS:
+            continue
+        if only_training_eligible and not bool(record.get("training_eligible")):
+            continue
+        split = str(record.get("source_split") or record.get("bucket") or "")
+        if training_splits is not None and split not in training_splits:
             continue
         if label.get("abstention_correct"):
             continue
@@ -332,14 +347,29 @@ def dataset_rows_from_evidence_export(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def write_dataset_from_evidence_export(in_path: str | Path, out_path: str | Path) -> dict[str, Any]:
-    rows = dataset_rows_from_evidence_export(in_path)
+def write_dataset_from_evidence_export(
+    in_path: str | Path,
+    out_path: str | Path,
+    *,
+    min_trust: str = "silver",
+    only_training_eligible: bool = False,
+    training_splits: set[str] | None = None,
+) -> dict[str, Any]:
+    rows = dataset_rows_from_evidence_export(
+        in_path,
+        min_trust=min_trust,
+        only_training_eligible=only_training_eligible,
+        training_splits=training_splits,
+    )
     write_dataset_jsonl(out_path, rows)
     return {
         "out": str(out_path),
         "rows": len(rows),
         "positives": sum(int(bool(row.get("label"))) for row in rows),
         "hard_negatives": sum(int(bool(row.get("hard_negative"))) for row in rows),
+        "min_trust": min_trust,
+        "only_training_eligible": only_training_eligible,
+        "training_splits": sorted(training_splits) if training_splits is not None else None,
     }
 
 

@@ -97,6 +97,67 @@ def test_evidence_label_and_dataset_export(tmp_path, capsys) -> None:
     assert dataset.exists()
 
 
+def test_dataset_export_filters_training_eligible_rows(tmp_path, capsys) -> None:
+    export = tmp_path / "oracle-evidence.jsonl"
+    dataset = tmp_path / "dataset.jsonl"
+    rows = [
+        {
+            "record": {
+                "source_split": "train_candidate",
+                "training_eligible": True,
+                "label": {"status": "labeled", "trust_level": "gold", "abstention_correct": False, "correct_value": "A"},
+            },
+            "candidates": [{"candidate_id": "good", "label": 1}, {"candidate_id": "bad", "label": 0, "hard_negative": True}],
+        },
+        {
+            "record": {
+                "source_split": "holdout",
+                "training_eligible": True,
+                "label": {"status": "labeled", "trust_level": "gold", "abstention_correct": False, "correct_value": "B"},
+            },
+            "candidates": [{"candidate_id": "holdout", "label": 1}],
+        },
+        {
+            "record": {
+                "source_split": "train_candidate",
+                "training_eligible": False,
+                "label": {"status": "labeled", "trust_level": "gold", "abstention_correct": False, "correct_value": "C"},
+            },
+            "candidates": [{"candidate_id": "not_eligible", "label": 1}],
+        },
+    ]
+    export.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    filtered = dataset_rows_from_evidence_export(
+        export,
+        only_training_eligible=True,
+        training_splits={"train_candidate"},
+    )
+    assert {row["candidate_id"] for row in filtered} == {"good", "bad"}
+
+    assert (
+        main(
+            [
+                "dataset",
+                "build",
+                "--from-evidence",
+                str(export),
+                "--only-training-eligible",
+                "--training-split",
+                "train_candidate",
+                "--out",
+                str(dataset),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] == 2
+    assert payload["positives"] == 1
+    assert payload["hard_negatives"] == 1
+    assert payload["training_splits"] == ["train_candidate"]
+
+
 def test_evidence_review_and_stats_cli(tmp_path, capsys) -> None:
     db = tmp_path / "evidence.db"
     assert (

@@ -2399,7 +2399,14 @@ def cmd_pack_build(args: argparse.Namespace) -> int:
         if source.exists():
             shutil.copy2(source, out_dir / filename)
     dataset_path = out_dir / "_candidate-ranking.tmp.jsonl"
-    dataset_summary = write_dataset_from_evidence_export(args.from_intake, dataset_path)
+    training_splits = set(args.training_split or []) or None
+    dataset_summary = write_dataset_from_evidence_export(
+        args.from_intake,
+        dataset_path,
+        min_trust=args.min_trust,
+        only_training_eligible=args.only_training_eligible,
+        training_splits=training_splits,
+    )
     rows = read_dataset_jsonl(dataset_path)
     dataset_summary.pop("out", None)
     dataset_summary["source_intake"] = str(args.from_intake)
@@ -3303,7 +3310,16 @@ def _load_failure_rows(path: str) -> list[dict[str, Any]]:
 
 def cmd_dataset_build(args: argparse.Namespace) -> int:
     if args.from_evidence:
-        _print_json(write_dataset_from_evidence_export(args.from_evidence, args.out))
+        training_splits = set(args.training_split or []) or None
+        _print_json(
+            write_dataset_from_evidence_export(
+                args.from_evidence,
+                args.out,
+                min_trust=args.min_trust,
+                only_training_eligible=args.only_training_eligible,
+                training_splits=training_splits,
+            )
+        )
         return 0
     if not args.paths:
         raise CliError("dataset build requires paths unless --from-evidence is used", 2)
@@ -3686,6 +3702,9 @@ def build_parser() -> argparse.ArgumentParser:
     pack_build.add_argument("--threshold", type=float, default=0.70)
     pack_build.add_argument("--margin", type=float, default=0.00)
     pack_build.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
+    pack_build.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
+    pack_build.add_argument("--only-training-eligible", action="store_true", help="Require record.training_eligible=true for evidence-derived pack rows")
+    pack_build.add_argument("--training-split", choices=sorted(SOURCE_SPLITS), action="append", help="Allow only this source split when building a pack; repeatable")
     pack_build.set_defaults(func=cmd_pack_build)
     pack_release = pack_sub.add_parser("release-check", help="Run pack promotion guardrails")
     pack_release.add_argument("pack", help="Candidate pack name or path")
@@ -3894,6 +3913,10 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_build = dataset_sub.add_parser("build", help="Build candidate-ranking JSONL from specs/manifests")
     dataset_build.add_argument("paths", nargs="*", help="Spec paths or manifest paths")
     dataset_build.add_argument("--from-evidence", default=None, help="Build candidate-ranking JSONL from evidence export JSONL")
+    dataset_build.add_argument("--include-hard-negatives", action="store_true", help="Accepted for milestone workflow clarity; trusted evidence exports already include top-K negative and hard-negative rows")
+    dataset_build.add_argument("--min-trust", choices=sorted(TRUST_LEVEL_ORDER, key=TRUST_LEVEL_ORDER.get), default="silver")
+    dataset_build.add_argument("--only-training-eligible", action="store_true", help="Require record.training_eligible=true for evidence-derived dataset rows")
+    dataset_build.add_argument("--training-split", choices=sorted(SOURCE_SPLITS), action="append", help="Allow only this source split when building from evidence; repeatable")
     dataset_build.add_argument("--top-k", type=int, default=40)
     dataset_build.add_argument("--out", required=True)
     dataset_build.add_argument("--render", action="store_true", help="Deprecated alias for --live")
