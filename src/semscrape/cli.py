@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import importlib.util
 import json
 import platform
@@ -44,6 +45,7 @@ from .evidence import (
     apply_review_jsonl,
     audit_evidence_bundle,
     create_evidence_bundle,
+    evidence_privacy_report,
     intake_evidence_bundles,
     read_evidence_bundle,
     record_report_evidence,
@@ -1811,6 +1813,273 @@ def _write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> None:
     with target.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+REVIEW_PRIORITY_THRESHOLDS = {
+    "all": 0,
+    "medium": 50,
+    "high": 75,
+    "critical": 90,
+}
+TRAINING_REVIEW_DECISIONS = {"gold_hard_negative", "gold_positive", "silver_label", "silver_positive"}
+
+
+def cmd_review_triage(args: argparse.Namespace) -> int:
+    rows = _load_review_queue(args.queue)
+    report = _review_triage_report(rows)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(report, encoding="utf-8", newline="\n")
+    payload = _review_triage_payload(rows)
+    payload["out"] = args.out
+    _print_json(payload)
+    return 0
+
+
+def cmd_review_export(args: argparse.Namespace) -> int:
+    rows = _filter_review_queue(_load_review_queue(args.queue), priority=args.priority, issue_types=args.issue_type)
+    rows = rows[: args.limit] if args.limit is not None else rows
+    review_rows = [_editable_review_row(row) for row in rows]
+    _write_jsonl(args.out, review_rows)
+    _print_json(
+        {
+            "out": args.out,
+            "items": len(review_rows),
+            "priority": args.priority,
+            "issue_type_counts": dict(Counter(str(row.get("issue_type") or "unknown") for row in review_rows)),
+        }
+    )
+    return 0
+
+
+def cmd_review_apply(args: argparse.Namespace) -> int:
+    review_rows = read_jsonl(args.review_file)
+    intake_rows = read_jsonl(args.intake)
+    index = {_review_match_key_for_evidence(row): row for row in intake_rows}
+    training_rows: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    decision_counts = Counter()
+    split_counts = Counter()
+    trust_counts = Counter()
+    excluded_reasons = Counter()
+    reviewed_items = 0
+    for review in review_rows:
+        decision = str(review.get("review_decision") or "needs_review")
+        decision_counts[decision] += 1
+        if decision != "needs_review":
+            reviewed_items += 1
+        evidence = index.get(_review_match_key(review))
+        if evidence is None:
+            missing.append(
+                {
+                    "source_id": review.get("source_id"),
+                    "evidence_id": review.get("evidence_id"),
+                    "field": review.get("field"),
+                }
+            )
+            continue
+        record = evidence.get("record") or {}
+        label = record.get("label") or {}
+        split = str(record.get("source_split") or record.get("bucket") or review.get("split") or "monitor_only")
+        trust = str(label.get("trust_level") or review.get("trust_level") or "untrusted")
+        split_counts[split] += 1
+        trust_counts[trust] += 1
+        allowed, reason = _review_training_allowed(review, evidence)
+        if allowed:
+            training_rows.append(_reviewed_training_row(evidence, review))
+        else:
+            excluded_reasons[reason] += 1
+    _write_jsonl(args.out, training_rows)
+    privacy_report = evidence_privacy_report(training_rows)
+    report = {
+        "review_file": args.review_file,
+        "intake": args.intake,
+        "training_out": args.out,
+        "review_items": len(review_rows),
+        "reviewed_items": reviewed_items,
+        "gold_positive_labels": decision_counts.get("gold_positive", 0),
+        "gold_hard_negatives": decision_counts.get("gold_hard_negative", 0),
+        "silver_labels": decision_counts.get("silver_label", 0) + decision_counts.get("silver_positive", 0),
+        "candidate_generation_issues": decision_counts.get("candidate_generation_issue", 0),
+        "normalization_issues": decision_counts.get("normalization_issue", 0),
+        "spec_ambiguities": decision_counts.get("spec_ambiguity", 0),
+        "training_eligible_rows": len(training_rows),
+        "training_excluded_rows": len(review_rows) - len(training_rows),
+        "missing_review_targets": missing,
+        "decision_counts": dict(sorted(decision_counts.items())),
+        "split_counts": dict(sorted(split_counts.items())),
+        "trust_level_counts": dict(sorted(trust_counts.items())),
+        "excluded_reason_counts": dict(sorted(excluded_reasons.items())),
+        "privacy_report": privacy_report,
+        "privacy_passed": not privacy_report["raw_html_present"] and not privacy_report["full_candidate_text_present"],
+        "training_policy": "Only reviewed gold/silver rows from non-holdout, non-adversarial splits can be exported.",
+    }
+    if args.report:
+        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    _print_json(report)
+    return 0 if report["privacy_passed"] else 2
+
+
+def _load_review_queue(path: str | Path) -> list[dict[str, Any]]:
+    rows = read_jsonl(path)
+    rows.sort(key=lambda item: (-int(item.get("priority") or 0), str(item.get("source_id") or ""), str(item.get("field") or "")))
+    return rows
+
+
+def _filter_review_queue(rows: list[dict[str, Any]], *, priority: str, issue_types: list[str] | None) -> list[dict[str, Any]]:
+    threshold = REVIEW_PRIORITY_THRESHOLDS[priority]
+    selected = [row for row in rows if int(row.get("priority") or 0) >= threshold]
+    if issue_types:
+        wanted = set(issue_types)
+        selected = [row for row in selected if str(row.get("issue_type") or "") in wanted]
+    return selected
+
+
+def _review_triage_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "items": len(rows),
+        "high_priority_items": sum(int(int(row.get("priority") or 0) >= REVIEW_PRIORITY_THRESHOLDS["high"]) for row in rows),
+        "issue_type_counts": dict(Counter(str(row.get("issue_type") or "unknown") for row in rows)),
+        "reason_counts": dict(Counter(str(row.get("reason") or row.get("failure_reason") or "unknown") for row in rows).most_common()),
+        "split_counts": dict(Counter(str(row.get("split") or "unknown") for row in rows)),
+        "field_type_counts": dict(Counter(str(row.get("field_type") or "unknown") for row in rows)),
+        "candidate_recall_counts": dict(Counter(str(row.get("candidate_recall")) for row in rows)),
+        "training_eligible_items": sum(int(bool(row.get("eligible_for_global_training"))) for row in rows),
+    }
+
+
+def _review_triage_report(rows: list[dict[str, Any]]) -> str:
+    payload = _review_triage_payload(rows)
+    lines = [
+        "# semscrape review queue triage",
+        "",
+        "## Summary",
+        "",
+        f"- items: `{payload['items']}`",
+        f"- high_priority_items: `{payload['high_priority_items']}`",
+        f"- training_eligible_items: `{payload['training_eligible_items']}`",
+        "",
+        "## Issue Types",
+        "",
+        "| issue_type | count | suggested_action |",
+        "|---|---:|---|",
+    ]
+    for issue_type, count in payload["issue_type_counts"].items():
+        lines.append(f"| {issue_type} | {count} | {_review_suggested_action(issue_type)} |")
+    lines.extend(["", "## Reasons", "", "| reason | count |", "|---|---:|"])
+    for reason, count in payload["reason_counts"].items():
+        lines.append(f"| {reason} | {count} |")
+    lines.extend(["", "## Splits", "", "| split | count |", "|---|---:|"])
+    for split, count in payload["split_counts"].items():
+        lines.append(f"| {split} | {count} |")
+    lines.extend(["", "## Field Types", "", "| field_type | count |", "|---|---:|"])
+    for field_type, count in payload["field_type_counts"].items():
+        lines.append(f"| {field_type} | {count} |")
+    lines.extend(
+        [
+            "",
+            "## Safety Notes",
+            "",
+            "- False positives should become reviewed gold hard negatives before training.",
+            "- Candidate recall misses should become candidate-generation tests or backlog items.",
+            "- Recoverable abstentions can become positives only after explicit review/correction.",
+            "- Holdout and adversarial split rows must remain excluded from training exports.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _editable_review_row(row: dict[str, Any]) -> dict[str, Any]:
+    issue_type = str(row.get("issue_type") or "unknown")
+    return {
+        "review_id": _review_id(row),
+        "source_id": row.get("source_id"),
+        "evidence_id": row.get("evidence_id"),
+        "case_id": row.get("case_id"),
+        "split": row.get("split"),
+        "issue_type": issue_type,
+        "priority": row.get("priority"),
+        "field": row.get("field"),
+        "field_type": row.get("field_type"),
+        "status": row.get("status"),
+        "failure_reason": row.get("failure_reason"),
+        "candidate_recall": row.get("candidate_recall"),
+        "trust_level": row.get("trust_level"),
+        "eligible_for_global_training": bool(row.get("eligible_for_global_training")),
+        "suggested_action": _review_suggested_action(issue_type),
+        "review_decision": "needs_review",
+        "label_action": None,
+        "allow_training": False,
+        "correct_candidate_id": None,
+        "correct_value": None,
+        "wrong_candidate_id": None,
+        "abstention_correct": False,
+        "notes": "",
+    }
+
+
+def _review_suggested_action(issue_type: str) -> str:
+    return {
+        "false_positive": "review as gold hard negative",
+        "candidate_recall_miss": "classify candidate-generation miss and add recall test",
+        "recoverable_abstention": "sample for possible positive correction",
+        "low_margin_accept": "sample accepted value before training",
+        "risky_region_accept": "sample as possible hard negative",
+        "abstention": "confirm safe abstention or add correction",
+        "unverified_extraction": "telemetry only; do not train as positive",
+    }.get(issue_type, "manual review")
+
+
+def _review_id(row: dict[str, Any]) -> str:
+    return hashlib.sha256("|".join(str(row.get(key) or "") for key in ("source_id", "evidence_id", "field", "case_id")).encode("utf-8")).hexdigest()[:16]
+
+
+def _review_match_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(row.get("case_id") or row.get("source_id") or ""), str(row.get("evidence_id") or ""), str(row.get("field") or ""))
+
+
+def _review_match_key_for_evidence(row: dict[str, Any]) -> tuple[str, str, str]:
+    record = row.get("record") or {}
+    field = record.get("field") or {}
+    return (
+        str(record.get("case_id") or record.get("source_registry_id") or ""),
+        str(row.get("evidence_id") or ""),
+        str(field.get("name") or ""),
+    )
+
+
+def _review_training_allowed(review: dict[str, Any], evidence: dict[str, Any]) -> tuple[bool, str]:
+    if not bool(review.get("allow_training")):
+        return False, "not_allowed_by_review"
+    decision = str(review.get("review_decision") or "")
+    if decision not in TRAINING_REVIEW_DECISIONS:
+        return False, "decision_not_training_label"
+    record = evidence.get("record") or {}
+    label = record.get("label") or {}
+    split = str(record.get("source_split") or record.get("bucket") or review.get("split") or "monitor_only")
+    if split in {"holdout", "adversarial"}:
+        return False, "measurement_split_excluded"
+    trust = str(label.get("trust_level") or review.get("trust_level") or "untrusted")
+    if trust not in TRAINABLE_TRUST:
+        return False, "trust_below_training_threshold"
+    if decision in {"gold_positive", "silver_positive", "silver_label"} and str(label.get("status") or "") != "labeled":
+        return False, "positive_not_trusted_label"
+    return True, "eligible"
+
+
+def _reviewed_training_row(evidence: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    row = json.loads(json.dumps(evidence))
+    record = row.setdefault("record", {})
+    record["review"] = {
+        "review_id": review.get("review_id"),
+        "decision": review.get("review_decision"),
+        "label_action": review.get("label_action"),
+        "notes": review.get("notes"),
+        "reviewed_at": datetime.now(UTC).isoformat(),
+        "allow_training": True,
+    }
+    record["training_eligible"] = True
+    return row
 
 
 def cmd_pilot_run(args: argparse.Namespace) -> int:
@@ -3601,6 +3870,26 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_intake.add_argument("--out", required=True)
     evidence_intake.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in accepted bundles")
     evidence_intake.set_defaults(func=cmd_evidence_intake)
+
+    review = sub.add_parser("review", help="Triage and convert harvester review queues")
+    review_sub = review.add_subparsers(dest="review_cmd", required=True)
+    review_triage = review_sub.add_parser("triage", help="Summarize a harvester review queue")
+    review_triage.add_argument("queue")
+    review_triage.add_argument("--out", required=True)
+    review_triage.set_defaults(func=cmd_review_triage)
+    review_export = review_sub.add_parser("export", help="Write an editable batch review JSONL")
+    review_export.add_argument("queue")
+    review_export.add_argument("--limit", type=int, default=100)
+    review_export.add_argument("--priority", choices=sorted(REVIEW_PRIORITY_THRESHOLDS), default="high")
+    review_export.add_argument("--issue-type", action="append", default=None, help="Restrict to one issue type; repeatable")
+    review_export.add_argument("--out", required=True)
+    review_export.set_defaults(func=cmd_review_export)
+    review_apply = review_sub.add_parser("apply", help="Apply reviewed queue labels to intake evidence")
+    review_apply.add_argument("review_file")
+    review_apply.add_argument("--intake", required=True, help="Evidence intake JSONL from alpha run")
+    review_apply.add_argument("--out", required=True, help="Training-eligible reviewed evidence JSONL")
+    review_apply.add_argument("--report", required=True, help="Trust conversion report JSON")
+    review_apply.set_defaults(func=cmd_review_apply)
 
     cache = sub.add_parser("cache-clear", help="Delete a selector cache/lock file")
     cache.add_argument("cache")

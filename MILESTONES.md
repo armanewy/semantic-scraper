@@ -1731,3 +1731,66 @@ Report:
 ```text
 docs/m17s_harvester_scale_report.md
 ```
+
+## M18: Review Queue Triage and Trusted Label Conversion
+
+Status: passed.
+
+Question: Can the M17S harvester review queue be converted into trusted labels, hard negatives, candidate-generation fixes, and pack/ranker update candidates without poisoning the model?
+
+Implemented commands:
+
+```text
+- semscrape review triage
+- semscrape review export
+- semscrape review apply
+```
+
+M17S triage:
+
+```text
+review_queue_items:        296
+high_priority_items:       144
+training_eligible_before_review: 0
+false_positives:           1
+candidate_recall_misses:   2
+recoverable_abstentions:   141
+low_margin_accepts:        146
+plain_abstentions:         6
+```
+
+M18 batch conversion:
+
+```text
+reviewed_batch_size:       100
+reviewed_items:            100
+gold_hard_negatives:       1
+candidate_generation_issues: 2
+deferred_manual_reviews:   97
+training_eligible_rows:    1
+training_excluded_rows:    99
+privacy_passed:            true
+```
+
+Safety result:
+
+```text
+No unverified accepted extraction was converted into a positive training label.
+Holdout/adversarial rows remain excluded from training exports.
+Recoverable abstentions remain deferred until explicit value review.
+The M17S dev-split false positive became one reviewed gold hard-negative training row.
+```
+
+Decision:
+
+```text
+Do not train a new ranker or pack from M18 alone.
+One reviewed hard-negative row is useful, but not enough for a model update.
+Next data-moat step should acquire more trusted labels through oracle-backed sources and/or larger explicit review batches.
+```
+
+Report:
+
+```text
+docs/m18_review_queue_conversion_report.md
+```

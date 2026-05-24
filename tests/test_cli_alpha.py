@@ -218,6 +218,58 @@ sources:
     assert "invalid split" in captured.err
 
 
+def test_review_triage_export_apply_keeps_training_boundary(tmp_path, capsys) -> None:
+    queue = tmp_path / "review-queue.jsonl"
+    triage = tmp_path / "triage.md"
+    batch = tmp_path / "review-batch.jsonl"
+    reviewed = tmp_path / "reviewed.jsonl"
+    intake = tmp_path / "intake.jsonl"
+    training = tmp_path / "training.jsonl"
+    report = tmp_path / "trust.json"
+    _write_rows(
+        queue,
+        [
+            _review_queue_row("source_a", 1, "price", "false_positive", 100, split="train_candidate"),
+            _review_queue_row("source_b", 2, "title", "candidate_recall_miss", 90, split="holdout", candidate_recall=False),
+            _review_queue_row("source_c", 3, "summary", "recoverable_abstention", 75, split="monitor_only"),
+        ],
+    )
+    _write_rows(
+        intake,
+        [
+            _evidence_row("source_a", 1, "price", split="train_candidate", trust="gold"),
+            _evidence_row("source_b", 2, "title", split="holdout", trust="gold"),
+            _evidence_row("source_c", 3, "summary", split="monitor_only", trust="untrusted"),
+        ],
+    )
+
+    assert main(["review", "triage", str(queue), "--out", str(triage)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["high_priority_items"] == 3
+    assert "false_positive" in triage.read_text(encoding="utf-8")
+
+    assert main(["review", "export", str(queue), "--limit", "2", "--priority", "critical", "--out", str(batch)]) == 0
+    exported_payload = json.loads(capsys.readouterr().out)
+    assert exported_payload["items"] == 2
+    rows = [json.loads(line) for line in batch.read_text(encoding="utf-8").splitlines()]
+    rows[0]["review_decision"] = "gold_hard_negative"
+    rows[0]["label_action"] = "reviewed_false_positive_hard_negative"
+    rows[0]["allow_training"] = True
+    rows[1]["review_decision"] = "candidate_generation_issue"
+    rows[1]["label_action"] = "candidate_missing_backlog"
+    reviewed.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    assert main(["review", "apply", str(reviewed), "--intake", str(intake), "--out", str(training), "--report", str(report)]) == 0
+    apply_payload = json.loads(capsys.readouterr().out)
+    assert apply_payload["gold_hard_negatives"] == 1
+    assert apply_payload["candidate_generation_issues"] == 1
+    assert apply_payload["training_eligible_rows"] == 1
+    training_rows = [json.loads(line) for line in training.read_text(encoding="utf-8").splitlines()]
+    assert len(training_rows) == 1
+    assert training_rows[0]["record"]["training_eligible"] is True
+    assert json.loads(report.read_text(encoding="utf-8"))["privacy_passed"] is True
+
+
 def _write_rows(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
@@ -241,4 +293,56 @@ def _summary_row(field: str, *, expected_present: bool = True, abstained: bool =
         "ranker_called": True,
         "ranker_validated_recovery": expected_present and not abstained,
         "ranker_false_positive": False,
+    }
+
+
+def _review_queue_row(
+    source_id: str,
+    evidence_id: int,
+    field: str,
+    issue_type: str,
+    priority: int,
+    *,
+    split: str,
+    candidate_recall: bool = True,
+) -> dict:
+    return {
+        "priority": priority,
+        "issue_type": issue_type,
+        "reason": issue_type,
+        "evidence_id": evidence_id,
+        "source_id": source_id,
+        "case_id": f"{source_id}_case",
+        "split": split,
+        "field": field,
+        "field_type": "text",
+        "status": "extracted" if issue_type == "false_positive" else "abstained",
+        "failure_reason": "wrong_candidate" if issue_type == "false_positive" else "candidate_missing",
+        "candidate_recall": candidate_recall,
+        "trust_level": "gold",
+        "eligible_for_global_training": split == "train_candidate",
+    }
+
+
+def _evidence_row(source_id: str, evidence_id: int, field: str, *, split: str, trust: str) -> dict:
+    return {
+        "schema_version": 1,
+        "evidence_id": evidence_id,
+        "record": {
+            "source_registry_id": source_id,
+            "source_split": split,
+            "case_id": f"{source_id}_case",
+            "category": "test",
+            "field": {"name": field, "kind": "text"},
+            "status": "extracted",
+            "label": {"status": "labeled" if trust != "untrusted" else "unknown", "trust_level": trust},
+        },
+        "candidates": [
+            {
+                "candidate_id": "c1",
+                "candidate_text_hash": "hash",
+                "label": 1 if trust != "untrusted" else 0,
+                "hard_negative": False,
+            }
+        ],
     }

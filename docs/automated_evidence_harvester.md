@@ -89,6 +89,31 @@ risky_region_accept
 unverified_extraction
 ```
 
+## Review Conversion
+
+Maintainers can triage the queue without treating raw outputs as labels:
+
+```bash
+semscrape review triage runs/auto/latest/review-queue.jsonl \
+  --out runs/review/review-triage.md
+
+semscrape review export runs/auto/latest/review-queue.jsonl \
+  --limit 100 \
+  --priority high \
+  --out runs/review/review-batch.jsonl
+```
+
+After editing the batch file with explicit review decisions, apply it to the intake JSONL:
+
+```bash
+semscrape review apply runs/review/review-batch-reviewed.jsonl \
+  --intake runs/auto/latest/intake.jsonl \
+  --out data/review/training-eligible-evidence.jsonl \
+  --report runs/review/trust-conversion.json
+```
+
+Only reviewed gold/silver rows from non-holdout, non-adversarial splits can be exported by this workflow. Recoverable abstentions and unverified extractions remain non-training telemetry until a reviewer explicitly labels them.
+
 ## Training Rules
 
 Raw extraction outputs are telemetry. They are not positive training labels.
