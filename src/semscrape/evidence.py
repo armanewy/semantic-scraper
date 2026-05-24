@@ -164,7 +164,7 @@ class EvidenceStore:
                     SUM(CASE WHEN label_status = 'labeled' THEN 1 ELSE 0 END) AS labeled,
                     SUM(CASE WHEN label_status != 'labeled' THEN 1 ELSE 0 END) AS unlabeled,
                     SUM(CASE WHEN status = 'abstained' THEN 1 ELSE 0 END) AS abstentions,
-                    SUM(CASE WHEN failure_reason LIKE '%false_positive%' OR failure_reason LIKE '%wrong_candidate%' THEN 1 ELSE 0 END) AS false_positives,
+                    SUM(CASE WHEN status = 'extracted' AND (failure_reason LIKE '%false_positive%' OR failure_reason LIKE '%wrong_candidate%') THEN 1 ELSE 0 END) AS false_positives,
                     SUM(CASE WHEN failure_reason = 'candidate_missing' OR failure_reason = 'candidate_generation_failed' THEN 1 ELSE 0 END) AS candidate_missing
                 FROM evidence_records
                 """

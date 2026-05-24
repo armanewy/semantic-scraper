@@ -2030,6 +2030,35 @@ def _pilot_summary_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _evidence_row_expected_present(row: dict[str, Any]) -> bool:
+    candidates = row.get("candidates") or []
+    expected_flags = [candidate.get("expected_present") for candidate in candidates if candidate.get("expected_present") is not None]
+    if expected_flags:
+        return any(bool(flag) for flag in expected_flags)
+    if any(candidate.get("label") for candidate in candidates):
+        return True
+    record = row.get("record") or {}
+    label = record.get("label") or {}
+    return bool(label.get("correct_candidate_id") or label.get("correct_value") or label.get("expected_value"))
+
+
+def _evidence_row_false_positive(row: dict[str, Any]) -> bool:
+    record = row.get("record") or {}
+    if record.get("status") != "extracted":
+        return False
+    label = record.get("label") or {}
+    if label.get("status") != "labeled":
+        return False
+    selected_id = record.get("selected_candidate_id")
+    if not selected_id:
+        return False
+    candidates = row.get("candidates") or []
+    positives = {candidate.get("candidate_id") for candidate in candidates if candidate.get("label")}
+    if not _evidence_row_expected_present(row):
+        return True
+    return bool(positives and selected_id not in positives)
+
+
 def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list[dict[str, Any]]) -> dict[str, Any]:
     domains = Counter()
     field_types = Counter()
@@ -2038,7 +2067,9 @@ def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list
     failure_reasons = Counter()
     false_positives = 0
     extracted = 0
+    abstentions = 0
     recalled = 0
+    recall_denominator = 0
     hard_negatives = 0
     positive_candidates = 0
     for row in evidence_rows:
@@ -2050,13 +2081,16 @@ def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list
         trust_levels[str(label.get("trust_level") or "untrusted")] += 1
         label_counts[str(label.get("status") or "unknown")] += 1
         failure_reasons[str(record.get("failure_reason") or "none")] += 1
-        extracted += int(record.get("status") == "extracted")
-        recalled += int(bool(record.get("candidate_recall")))
-        selected_id = record.get("selected_candidate_id")
+        status = str(record.get("status") or "")
+        extracted += int(status == "extracted")
+        abstentions += int(status == "abstained")
+        if _evidence_row_expected_present(row):
+            recall_denominator += 1
+            recalled += int(bool(record.get("candidate_recall")))
         positives = {candidate.get("candidate_id") for candidate in row.get("candidates") or [] if candidate.get("label")}
         hard_negatives += sum(int(bool(candidate.get("hard_negative"))) for candidate in row.get("candidates") or [])
         positive_candidates += len(positives)
-        if label.get("status") == "labeled" and selected_id and positives and selected_id not in positives:
+        if _evidence_row_false_positive(row):
             false_positives += 1
     bundle_count = len(bundle_rows)
     accepted_bundles = sum(int(bool(row.get("audit_ok"))) for row in bundle_rows)
@@ -2070,8 +2104,10 @@ def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list
         "domain_names": sorted(domain for domain in domains if domain != "unknown"),
         "coverage_rate": extracted / fields_attempted if fields_attempted else 0.0,
         "false_positive_rate": false_positives / fields_attempted if fields_attempted else 0.0,
-        "candidate_recall_at_40": recalled / fields_attempted if fields_attempted else 0.0,
-        "abstention_rate": (fields_attempted - extracted) / fields_attempted if fields_attempted else 0.0,
+        "false_positive_among_extracted": false_positives / extracted if extracted else 0.0,
+        "candidate_recall_at_40": recalled / recall_denominator if recall_denominator else 0.0,
+        "candidate_recall_denominator": recall_denominator,
+        "abstention_rate": abstentions / fields_attempted if fields_attempted else 0.0,
         "false_positives": false_positives,
         "gold_labels_created": trust_levels.get("gold", 0),
         "hard_negatives_created": hard_negatives,
@@ -2095,7 +2131,9 @@ def _alpha_summary_report(bundle_rows: list[dict[str, Any]], metrics: dict[str, 
         f"- fields_attempted: `{metrics['fields_attempted']}`",
         f"- coverage_rate: `{metrics['coverage_rate']:.6f}`",
         f"- false_positive_rate: `{metrics['false_positive_rate']:.6f}`",
+        f"- false_positive_among_extracted: `{metrics['false_positive_among_extracted']:.6f}`",
         f"- candidate_recall_at_40: `{metrics['candidate_recall_at_40']:.6f}`",
+        f"- candidate_recall_denominator: `{metrics['candidate_recall_denominator']}`",
         f"- abstention_rate: `{metrics['abstention_rate']:.6f}`",
         f"- bundle_audit_pass_rate: `{metrics['bundle_audit_pass_rate']:.6f}`",
         f"- gold_labels_created: `{metrics['gold_labels_created']}`",
@@ -2390,7 +2428,7 @@ def _pack_gaps_summary(evidence_rows: list[dict[str, Any]]) -> dict[str, Any]:
         if record.get("candidate_recall") is False:
             candidate_missing += 1
             stats["candidate_missing"] += 1
-        if record.get("label", {}).get("status") == "false_positive":
+        if _evidence_row_false_positive(row):
             false_positives += 1
         for candidate in row.get("candidates") or []:
             if candidate.get("hard_negative"):

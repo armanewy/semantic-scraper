@@ -1297,4 +1297,40 @@ Exit criteria:
 - All false positives become gold hard negatives.
 - No unverified production positives are used for global training.
 
-Status: ready for execution. Do not change the cohort target, default ranker, or safety gates during measurement unless a blocking bug is found.
+Status: local stand-in cohort passed safety under corrected final-result metrics; true outside-user field gate pending. `v0.1.0-alpha.5` found a measurement bug where `alpha summarize` overcounted final abstentions with rejected trace candidates as false positives. Do not use `v0.1.0-alpha.5` for the true outside-user cohort.
+
+## M16F: Measurement Integrity Fix
+
+**Question:** Do alpha/cohort/reporting commands compute false positives, abstentions, coverage, and recall consistently with the final extraction result?
+
+Deliverables:
+
+- Final-result false-positive definition:
+  - final `status = extracted`
+  - labeled expected value/candidate exists or expected field is absent
+  - selected value/candidate is wrong
+- `semscrape alpha summarize` fixed so safe abstentions are not false positives.
+- `semscrape pack gaps` fixed to use the same final-result false-positive definition.
+- Evidence stats fixed to require final extracted status for false-positive counts.
+- Regression tests for:
+  - abstained row with rejected wrong trace candidate
+  - extracted wrong row
+  - extracted correct row
+  - expected-absent extracted row
+  - candidate recall denominator independent from final extraction status
+- `v0.1.0-alpha.6` tag for the true outside-user cohort target.
+
+Exit criteria:
+
+- M16C local stand-in cohort corrected summary:
+  - 25 bundles/projects
+  - 6 domains
+  - 69 attempted fields
+  - coverage_rate = 0.753623
+  - false_positive_rate = 0.000000
+  - candidate_recall@40 = 1.000000
+  - bundle_audit_pass_rate = 1.000000
+- `python -m ruff check .` passes.
+- `python -m pytest -q` passes.
+
+Status: complete. `v0.1.0-alpha.6` is the frozen target for true outside-user M16C execution. `v0.1.0-alpha.5` remains a valid packaging tag but contains the alpha-summary measurement bug.

@@ -1,6 +1,6 @@
 # Public Alpha
 
-`v0.1.0-alpha.4` is a limited public-alpha candidate for local, repeatable extraction workflows.
+`v0.1.0-alpha.6` is a limited public-alpha cohort candidate for local, repeatable extraction workflows.
 
 The default posture is conservative:
 

@@ -1,6 +1,6 @@
 # Known Limitations
 
-`v0.1.0-alpha.4` is a controlled public alpha. It is safe enough for limited external use, but it is not a universal scraper.
+`v0.1.0-alpha.6` is a controlled public alpha cohort target. It is safe enough for limited external use, but it is not a universal scraper.
 
 ## Scope
 

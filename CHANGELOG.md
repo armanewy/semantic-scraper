@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.0-alpha.6 - 2026-05-23
+
+Controlled public-alpha cohort target with corrected measurement semantics.
+
+### Fixed
+
+- `semscrape alpha summarize` now counts false positives only when the final field result is an extracted wrong value.
+- Final abstentions with rejected wrong candidates in their traces are counted as abstentions, not false positives.
+- `semscrape pack gaps` uses the same final-result false-positive definition.
+- Evidence-store false-positive stats now require final `status = extracted`.
+
+### Validation
+
+M16C local stand-in cohort under corrected final-result metrics:
+
+```text
+projects/bundles:        25
+domains:                 6
+fields_attempted:        69
+coverage_rate:           0.753623
+false_positive_rate:     0.000000
+candidate_recall_at_40:  1.000000
+bundle_audit_pass_rate:  1.000000
+```
+
+This was a local external-style cohort, not the true outside-user cohort.
+
 ## v0.1.0-alpha.4 - 2026-05-23
 
 Limited public-alpha candidate.

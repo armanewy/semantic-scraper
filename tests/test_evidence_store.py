@@ -4,7 +4,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from semscrape.cli import main
+from semscrape.cli import _alpha_bundle_metrics, _pack_gaps_summary, main
 from semscrape.evidence import EvidenceStore, dataset_rows_from_evidence_export
 
 
@@ -204,6 +204,121 @@ def test_evidence_bundle_audit_and_intake_features_only(tmp_path, capsys) -> Non
     assert alpha["bundle_audit_pass_rate"] == 1.0
     assert alpha["false_positive_rate"] == 0.0
     assert "public alpha summary" in alpha_report.read_text(encoding="utf-8")
+
+
+def test_alpha_metrics_use_final_result_for_false_positives() -> None:
+    rows = [
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c1",
+            positive_ids={"c1"},
+            expected_present=True,
+            candidate_recall=True,
+        ),
+        _evidence_export_row(
+            status="abstained",
+            selected_id="c2",
+            positive_ids={"c1"},
+            expected_present=True,
+            candidate_recall=True,
+            failure_reason="ranker_abstained",
+        ),
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c3",
+            positive_ids={"c4"},
+            expected_present=True,
+            candidate_recall=True,
+            failure_reason="wrong_candidate",
+        ),
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c5",
+            positive_ids=set(),
+            expected_present=False,
+            candidate_recall=None,
+            failure_reason="false_positive_missing_field",
+        ),
+    ]
+
+    metrics = _alpha_bundle_metrics([{"audit_ok": True}], rows)
+
+    assert metrics["fields_attempted"] == 4
+    assert metrics["coverage_rate"] == 0.75
+    assert metrics["abstention_rate"] == 0.25
+    assert metrics["false_positives"] == 2
+    assert metrics["false_positive_rate"] == 0.5
+    assert metrics["false_positive_among_extracted"] == 2 / 3
+    assert metrics["candidate_recall_denominator"] == 3
+    assert metrics["candidate_recall_at_40"] == 1.0
+
+
+def test_pack_gaps_use_final_result_for_false_positives() -> None:
+    rows = [
+        _evidence_export_row(
+            status="abstained",
+            selected_id="c2",
+            positive_ids={"c1"},
+            expected_present=True,
+            candidate_recall=True,
+            failure_reason="ranker_abstained",
+        ),
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c3",
+            positive_ids={"c4"},
+            expected_present=True,
+            candidate_recall=True,
+            failure_reason="wrong_candidate",
+        ),
+    ]
+
+    summary = _pack_gaps_summary(rows)
+
+    assert summary["abstentions"] == 1
+    assert summary["false_positives"] == 1
+    assert summary["candidate_missing"] == 0
+
+
+def _evidence_export_row(
+    *,
+    status: str,
+    selected_id: str | None,
+    positive_ids: set[str],
+    expected_present: bool,
+    candidate_recall: bool | None,
+    failure_reason: str | None = None,
+) -> dict[str, object]:
+    candidate_ids = set(positive_ids)
+    if selected_id:
+        candidate_ids.add(selected_id)
+    candidates = [
+        {
+            "candidate_id": candidate_id,
+            "label": candidate_id in positive_ids,
+            "expected_present": expected_present,
+            "hard_negative": candidate_id not in positive_ids,
+            "validation_passed": True,
+        }
+        for candidate_id in sorted(candidate_ids)
+    ]
+    return {
+        "record": {
+            "category": "test",
+            "field": {"kind": "text"},
+            "status": status,
+            "selected_candidate_id": selected_id,
+            "candidate_recall": candidate_recall,
+            "failure_reason": failure_reason,
+            "label": {
+                "status": "labeled",
+                "trust_level": "gold",
+                "correct_candidate_id": next(iter(positive_ids), None),
+                "correct_value": "expected" if expected_present else None,
+            },
+        },
+        "candidates": candidates,
+    }
 
 
 def test_evidence_review_file_apply_review(tmp_path, capsys) -> None:
