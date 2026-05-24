@@ -59,7 +59,8 @@ M16F: passed
 M16C local stand-in cohort: passed safety
 M16C founder-operated external cohort on alpha.6: failed safety/privacy
 M16R-Founder: passed
-v0.1.0-alpha.7: safety-remediated founder-cohort target
+M16U safe coverage recovery: passed
+v0.1.0-alpha.8: safety-remediated, coverage-recovered outside-cohort target
 M16C true outside-user cohort: pending
 ```
 
@@ -103,7 +104,25 @@ fresh_mini_holdout:
   bundle_audit_pass_rate: 1.000000
 ```
 
-The coverage drop is intentional: alpha.7 restores abstention as the safety default. The next gate is still a true outside-user cohort on the frozen `v0.1.0-alpha.7` tag.
+The alpha.7 coverage drop was intentional: it restored abstention as the safety default, but it was too quiet for a useful outside-user alpha. M16U recovered coverage with a narrow safe acceptance ladder for structurally grounded low-margin ranker choices:
+
+```text
+founder_external_m16u:
+  fields_attempted:       91
+  coverage_rate:          0.769231
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.989011
+  bundle_audit_pass_rate: 1.000000
+
+fresh_mini_holdout_m16u:
+  fields_attempted:       27
+  coverage_rate:          0.555556
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.962963
+  bundle_audit_pass_rate: 1.000000
+```
+
+The next gate is still a true outside-user cohort on the frozen `v0.1.0-alpha.8` tag.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -705,7 +724,25 @@ fresh_mini_holdout:
   bundle_audit_pass_rate: 1.000000
 ```
 
-The incident report is in [docs/m16r_founder_external_incident_report.md](docs/m16r_founder_external_incident_report.md). This is still preflight evidence only. M16C remains pending until outside users/projects reproduce the workflow without direct maintainer steering.
+The incident report is in [docs/m16r_founder_external_incident_report.md](docs/m16r_founder_external_incident_report.md). M16U then recovered useful safe-policy coverage without reopening false positives:
+
+```text
+founder_external_m16u:
+  fields_attempted:       91
+  coverage_rate:          0.769231
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.989011
+  bundle_audit_pass_rate: 1.000000
+
+fresh_mini_holdout_m16u:
+  fields_attempted:       27
+  coverage_rate:          0.555556
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.962963
+  bundle_audit_pass_rate: 1.000000
+```
+
+The M16U report is in [docs/m16u_safe_coverage_recovery_report.md](docs/m16u_safe_coverage_recovery_report.md). This is still preflight evidence only. M16C remains pending until outside users/projects reproduce the workflow without direct maintainer steering.
 
 Run the M8C OOD hardening workflow:
 
@@ -970,13 +1007,14 @@ M16: tooling/docs complete
 M16F: measurement integrity fix complete
 M16C local stand-in cohort: passed safety
 M16R-Founder: founder external safety remediation passed
+M16U: safe coverage recovery passed
 M16C true outside-user cohort: pending
 ```
 
 Current frozen external-cohort target:
 
 ```text
-v0.1.0-alpha.7
+v0.1.0-alpha.8
 ```
 
 Do not mark M16C complete until outside users/projects run the frozen target, produce audited features-only bundles, and pass the cohort gate:

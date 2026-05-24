@@ -515,8 +515,6 @@ def _ranker_gate_reason(
 ) -> str | None:
     if confidence < min_confidence:
         return "low_ranker_confidence"
-    if margin < min_margin and not _allow_low_margin_stable_scalar(row, min_validator_confidence):
-        return "low_ranker_margin"
     if row.get("hard_negative"):
         return "ranker_hard_negative"
     if row.get("candidate_hidden"):
@@ -534,6 +532,8 @@ def _ranker_gate_reason(
     field_reason = _field_specific_gate_reason(row)
     if field_reason:
         return field_reason
+    if margin < min_margin and not _allow_low_margin_recoverable(row, min_validator_confidence):
+        return "low_ranker_margin"
     return None
 
 
@@ -591,6 +591,8 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if _is_title_prompt(prompt, field):
         if _looks_like_price_value(value_lower):
             return "ranker_title_price_candidate"
+        if "..." in value:
+            return "ranker_truncated_title_candidate"
         if _is_recent_item_title_prompt(prompt):
             if tag in {"h1", "title"}:
                 return "ranker_recent_title_featured_candidate"
@@ -645,6 +647,14 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
         if not (tag in {"h1", "h2", "h3", "title"} or any(term in selector for term in {"title", "headline", "heading"})):
             return "ranker_title_context_required"
 
+    if "quote" in field and "text" in field:
+        if tag != "span" or not value.startswith(("“", '"', "'")):
+            return "ranker_quote_text_context_required"
+
+    repeated_reason = _repeated_ordinal_gate_reason(prompt, field, selector, context, tag)
+    if repeated_reason:
+        return repeated_reason
+
     if "author" in prompt:
         if any(term in selector or term in value_lower for term in {"section", "category", "topic", "tag", "kicker", "markets"}):
             return "ranker_author_section_label"
@@ -689,11 +699,20 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
             if tag != "h1":
                 return "ranker_main_heading_required"
 
-    if "navigation link back" in prompt and not any(term in value_lower for term in {"tutorial", "home", "index"}):
-        return "ranker_navigation_link_intent_required"
+    if "navigation link back" in prompt:
+        if "python tutorial" in prompt:
+            if "tutorial" not in value_lower:
+                return "ranker_navigation_link_intent_required"
+        elif not any(term in value_lower for term in {"tutorial", "home", "index"}):
+            return "ranker_navigation_link_intent_required"
 
-    if "rfc" in prompt and not re.search(r"\brfc\s*\d+\b", value_lower):
-        return "ranker_rfc_value_required"
+    if "rfc" in prompt:
+        if not re.search(r"\brfc\s*\d+\b", value_lower):
+            return "ranker_rfc_value_required"
+        ordinal = _requested_ordinal(prompt)
+        anchor_position = _last_nth_of_type(selector, "a")
+        if ordinal is not None and anchor_position is not None and anchor_position != ordinal:
+            return "ranker_wrong_rfc_ordinal_candidate"
 
     if field_type == "date" or "published" in prompt:
         if own_terms.intersection({"updated", "joined", "copyright", "commented", "related article"}):
@@ -749,24 +768,122 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _allow_low_margin_stable_scalar(row: dict[str, Any], min_validator_confidence: float) -> bool:
+def _allow_low_margin_recoverable(row: dict[str, Any], min_validator_confidence: float) -> bool:
     field = str(row.get("field") or "").lower()
     field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
     selector = str(row.get("candidate_selector") or "").lower()
+    tag = str(row.get("candidate_tag") or "").lower()
+    value = str(row.get("candidate_value") or "").strip()
+    value_lower = value.lower()
     context = str(row.get("candidate_context") or "").lower()
     haystack = f"{selector} {context}"
     validator_confidence = float(row.get("validator_confidence") or 0.0)
-    if validator_confidence < max(0.90, min_validator_confidence):
+    if validator_confidence < min_validator_confidence:
         return False
     if int(row.get("validator_penalty_count") or 0) > 0:
         return False
     if row.get("hard_disqualified") or int(row.get("hard_disqualifier_count") or 0) > 0:
         return False
     if field_type == "price" or "price" in field:
+        if validator_confidence < 0.90:
+            return False
         return any(term in haystack for term in {"data-qa", "data-testid", "data-role", "itemprop", "price", "deal", "offer"})
     if field_type == "number" and any(term in field for term in {"rating", "score", "stars"}):
+        if validator_confidence < 0.90:
+            return False
         return any(term in haystack for term in {"data-qa", "data-testid", "itemprop", "rating", "score", "stars", "review"})
+    if _is_repeated_ordinal_prompt(prompt, field):
+        return _candidate_matches_repeated_ordinal(prompt, field, selector, context, tag)
+    if _is_table_data_prompt(prompt, field):
+        return tag in {"td", "a"} and _candidate_in_table_region(selector, context)
+    if _is_metadata_value_prompt(prompt, field):
+        return tag in {"td", "dd", "abbr"} and _metadata_label_matches(row, field)
+    if _is_title_prompt(prompt, field) and not (_is_recent_item_title_prompt(prompt) or _is_listing_item_prompt(prompt)):
+        if _is_main_page_title_prompt(prompt):
+            return _is_page_heading_candidate(row, tag, selector, context)
+        return tag in {"h1", "h2", "h3", "title"} or any(term in selector for term in {"title", "headline", "heading"})
+    if "availability" in prompt or "stock" in prompt:
+        return any(term in value_lower for term in {"stock", "ship", "available", "sold out", "backorder"})
+    if "install command" in prompt:
+        return value_lower.startswith("pip install")
+    if "project tab" in prompt or "release history" in prompt:
+        return tag == "a" and any(term in value_lower for term in {"project description", "release history"})
+    if "rfc" in prompt:
+        if not re.search(r"\brfc\s*\d+\b", value_lower):
+            return False
+        ordinal = _requested_ordinal(prompt)
+        anchor_position = _last_nth_of_type(selector, "a")
+        return ordinal is None or anchor_position is None or anchor_position == ordinal
+    if "navigation link back" in prompt:
+        if tag != "a":
+            return False
+        if "python tutorial" in prompt:
+            return "tutorial" in value_lower
+        return any(term in value_lower for term in {"tutorial", "home", "index"})
     return False
+
+
+def _repeated_ordinal_gate_reason(prompt: str, field: str, selector: str, context: str, tag: str) -> str | None:
+    if not _is_repeated_ordinal_prompt(prompt, field):
+        return None
+    if not _candidate_matches_repeated_ordinal(prompt, field, selector, context, tag):
+        return "ranker_wrong_repeated_ordinal_candidate"
+    return None
+
+
+def _is_repeated_ordinal_prompt(prompt: str, field: str) -> bool:
+    if _is_table_data_prompt(prompt, field):
+        return False
+    if _requested_ordinal(prompt) is None:
+        return False
+    return any(
+        term in prompt or term in field
+        for term in {
+            "quote",
+            "author",
+            "tag",
+            "product",
+            "book",
+            "item",
+            "team",
+        }
+    )
+
+
+def _candidate_matches_repeated_ordinal(prompt: str, field: str, selector: str, context: str, tag: str) -> bool:
+    ordinal = _requested_ordinal(prompt)
+    if ordinal is None:
+        return True
+    if _is_tag_prompt(prompt):
+        tag_position = _last_nth_of_type(selector, "a")
+        if tag_position is not None and tag_position != 1:
+            return False
+    position = _listing_position(selector, context) or _quote_card_position(selector, context) or _table_row_position(selector, context)
+    if position is None:
+        if ordinal == 1 and _is_tag_prompt(prompt) and tag == "a" and any(term in f"{selector} {context}" for term in {"tag", "tags"}):
+            return True
+        return False
+    if _table_row_position(selector, context) is not None and any(term in prompt for term in {"table", "team", "country", "capital", "population", "area"}):
+        return position in {ordinal, ordinal + 1}
+    return position == ordinal
+
+
+def _quote_card_position(selector: str, context: str) -> int | None:
+    haystack = f"{selector} {context}".lower()
+    if not any(term in haystack for term in {"quote", "span:nth-of-type", "small:nth-of-type", "tags"}):
+        return None
+    matches = [int(match) for match in re.findall(r"div:nth-of-type\((\d+)\)", selector)]
+    if "a:nth-of-type" in selector and len(matches) >= 2:
+        return matches[-2]
+    return matches[-1] if matches else None
+
+
+def _last_nth_of_type(selector: str, tag: str) -> int | None:
+    matches = [int(match) for match in re.findall(rf"{re.escape(tag)}:nth-of-type\((\d+)\)", selector)]
+    return matches[-1] if matches else None
 
 
 def _is_title_prompt(prompt: str, field: str) -> bool:

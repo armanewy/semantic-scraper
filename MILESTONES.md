@@ -1428,3 +1428,82 @@ Exit criteria:
 - No unverified positives are used for training.
 
 Status: passed. `v0.1.0-alpha.7` is the safety-remediated founder external cohort tag. Coverage is intentionally conservative; true outside-user M16C remains pending.
+
+## M16U: Safe Coverage Recovery
+
+**Question:** Can we recover useful public-alpha coverage after M16R-Founder without reintroducing false positives or privacy risk?
+
+M16R-Founder fixed safety and privacy, but made `ranker-local-safe` too quiet for outside-user alpha validation:
+
+```text
+founder_external_remediation:
+  coverage_rate:          0.296703
+  false_positive_rate:    0.000000
+  candidate_recall@40:    0.989011
+  bundle_audit_pass_rate: 1.000000
+
+fresh_mini_holdout:
+  coverage_rate:          0.318182
+  false_positive_rate:    0.000000
+  candidate_recall@40:    1.000000
+  bundle_audit_pass_rate: 1.000000
+```
+
+Deliverables:
+
+- Safe acceptance ladder for low-margin ranker choices that have strong structural evidence.
+- Recoverable-vs-unsafe abstention split:
+  - recover structured candidates in safe regions with strong validator evidence
+  - keep abstaining on known trap regions, candidate misses, ambiguous docs/list/table contexts, and weak generic text
+- Narrow fixes for:
+  - quote/card ordinals
+  - RFC ordinal anchors
+  - truncated product titles
+  - Python tutorial navigation links vs module index links
+  - quote text fields vs quote-page title fields
+- Refreshed founder and fresh mini-holdout evidence bundles.
+- Regression checks against base and adversarial holdouts.
+- Report:
+  - `docs/m16u_safe_coverage_recovery_report.md`
+
+Founder-operated external remediation set after M16U:
+
+```text
+bundles:                18
+fields_attempted:       91
+coverage_rate:          0.769231
+false_positive_rate:    0.000000
+candidate_recall@40:    0.989011
+abstention_rate:        0.230769
+bundle_audit_pass_rate: 1.000000
+```
+
+Fresh M16R mini-holdout after M16U:
+
+```text
+bundles:                6
+fields_attempted:       27
+domains:                5
+coverage_rate:          0.555556
+false_positive_rate:    0.000000
+candidate_recall@40:    0.962963
+abstention_rate:        0.444444
+bundle_audit_pass_rate: 1.000000
+```
+
+Regression:
+
+```text
+base_holdout:
+  fields_attempted:     20
+  coverage_rate:        0.450000
+  false_positive_rate:  0.000000
+  candidate_recall@40:  1.000000
+
+adversarial_holdout:
+  fields_attempted:     6
+  coverage_rate:        0.000000
+  false_positive_rate:  0.000000
+```
+
+Status: passed. M16C true outside-user execution remains pending. `v0.1.0-alpha.8` is the intended frozen outside-user cohort target because `v0.1.0-alpha.7` is safe but over-abstains.
