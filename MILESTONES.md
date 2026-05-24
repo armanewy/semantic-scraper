@@ -1257,4 +1257,44 @@ Exit criteria:
 - All false positives become gold hard negatives.
 - No unverified production positives are used for global training.
 
-Status: tooling/docs ready, field-trial gate pending. `v0.1.0-alpha.4` remains a limited public-alpha candidate until a real cohort completes the workflow and clears the safety gate.
+Status: tooling/docs ready, field-trial gate pending. `v0.1.0-alpha.5` is the frozen controlled public-alpha cohort target because it includes the M15R safety fixes plus M16 onboarding/tooling. `v0.1.0-alpha.4` remains the safety-remediation extraction tag.
+
+## M16C: Controlled Public Alpha Execution
+
+**Question:** Can outside users/projects use the frozen public-alpha build end to end, produce audited evidence bundles, and preserve false-positive safety?
+
+Frozen target:
+
+```text
+v0.1.0-alpha.5
+commit: f70905186976132db1764f91c784e19f1a40e40f
+```
+
+Deliverables:
+
+- 10+ completed alpha projects/users.
+- 5+ represented domains.
+- 60+ attempted fields.
+- Aggregate public-alpha summary:
+  - `semscrape alpha summarize alpha_bundles/*.zip --out runs/m16/public-alpha-summary.md`
+- Evidence intake:
+  - `semscrape evidence intake alpha_bundles/*.zip --out data/intake/m16-public-alpha-evidence.jsonl`
+- Pack/domain gap report:
+  - `semscrape pack gaps data/intake/m16-public-alpha-evidence.jsonl --pack ecommerce --out runs/m16/public-alpha-gaps.md`
+- Issue triage summary.
+
+Exit criteria:
+
+- 10+ projects/users complete the workflow.
+- 5+ domains represented.
+- 60+ attempted fields.
+- Every project produces a report, evidence DB, features-only bundle, and privacy audit.
+- Aggregate false_positive_rate <= 2%.
+- Candidate_recall@40 >= 95%.
+- `ranker-local-safe` coverage >= 55%.
+- Bundle audit pass rate = 100%.
+- Regression/adversarial suites remain FPR = 0.
+- All false positives become gold hard negatives.
+- No unverified production positives are used for global training.
+
+Status: ready for execution. Do not change the cohort target, default ranker, or safety gates during measurement unless a blocking bug is found.
