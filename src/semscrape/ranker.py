@@ -153,6 +153,7 @@ class CandidateRanker:
         margin_threshold = self.margin if min_margin is None else min_margin
         working_rows = [dict(row) for row in rows]
         _annotate_first_listing_candidate(working_rows)
+        _annotate_first_section_candidate(working_rows)
         scored = sorted(((self.confidence_row(row), row) for row in working_rows), key=lambda item: item[0], reverse=True)
         first_blocked: RankerPrediction | None = None
         for index, (best_conf, best) in enumerate(scored):
@@ -513,9 +514,9 @@ def _ranker_gate_reason(
     max_penalties: int,
     require_visible: bool,
 ) -> str | None:
-    if confidence < min_confidence:
+    if confidence < min_confidence and not _allow_low_confidence_recoverable(row, min_validator_confidence):
         return "low_ranker_confidence"
-    if row.get("hard_negative"):
+    if row.get("hard_negative") and not _allow_prompt_specific_hard_negative(row):
         return "ranker_hard_negative"
     if row.get("candidate_hidden"):
         return "ranker_hidden_candidate"
@@ -551,6 +552,12 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     context = str(row.get("candidate_context") or "").lower()
     own_terms = set(row.get("own_negative_terms") or [])
 
+    if _is_meta_description_prompt(prompt, field):
+        if tag != "meta":
+            return "ranker_meta_description_candidate_required"
+        if not any(term in f"{selector} {context}" for term in {"description", "og:description", "twitter:description"}):
+            return "ranker_meta_description_candidate_required"
+
     if _is_generic_sentence_prompt(prompt, field):
         if tag in {"h1", "h2", "h3", "title"} or _word_count(value) < 8:
             return "ranker_generic_text_low_intent_evidence"
@@ -560,6 +567,10 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if "link" in field or " link " in prompt:
         if tag != "a" and "href" not in context and "href" not in selector:
             return "ranker_link_anchor_required"
+        if _is_first_content_link_prompt(prompt, field):
+            anchor_position = _last_nth_of_type(selector, "a")
+            if anchor_position is not None and anchor_position != 1:
+                return "ranker_wrong_link_ordinal_candidate"
 
     if _is_table_data_prompt(prompt, field):
         if tag not in {"td", "th", "a"} or not _candidate_in_table_region(selector, context):
@@ -581,10 +592,18 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
     if _is_section_prompt(prompt, field):
         if _is_non_content_section_region(selector, context, value_lower):
             return "ranker_section_non_content_region"
+        if _is_first_section_prompt(prompt, field) and not _candidate_in_section_content_region(selector, context):
+            return "ranker_section_non_content_region"
+        if _is_heading_nested_in_paragraph(selector):
+            return "ranker_section_non_content_region"
         if tag in {"h1", "title"}:
             return "ranker_section_page_title_candidate"
         if tag not in {"h2", "h3", "h4"}:
             return "ranker_section_heading_required"
+        first_section_id = row.get("_first_section_candidate_id")
+        candidate_index = _candidate_index(row.get("candidate_id"))
+        if _is_first_section_prompt(prompt, field) and first_section_id is not None and candidate_index is not None and candidate_index > int(first_section_id):
+            return "ranker_non_first_section_candidate"
         if _is_first_section_prompt(prompt, field) and _heading_index(selector) not in {0, 1}:
             return "ranker_non_first_section_candidate"
 
@@ -693,7 +712,7 @@ def _field_specific_gate_reason(row: dict[str, Any]) -> str | None:
 
     if _is_heading_prompt(prompt, field):
         if "html document title" in prompt:
-            if tag != "title":
+            if tag != "title" or "head:nth-of-type" not in selector:
                 return "ranker_document_title_required"
         elif "h1" in prompt or "main heading" in prompt:
             if tag != "h1":
@@ -826,6 +845,69 @@ def _allow_low_margin_recoverable(row: dict[str, Any], min_validator_confidence:
     return False
 
 
+def _allow_low_confidence_recoverable(row: dict[str, Any], min_validator_confidence: float) -> bool:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    selector = str(row.get("candidate_selector") or "").lower()
+    tag = str(row.get("candidate_tag") or "").lower()
+    value = str(row.get("candidate_value") or "").strip()
+    value_lower = value.lower()
+    context = str(row.get("candidate_context") or "").lower()
+    haystack = f"{selector} {context}"
+    validator_confidence = float(row.get("validator_confidence") or 0.0)
+    if validator_confidence < min_validator_confidence:
+        return False
+    if int(row.get("validator_penalty_count") or 0) > 0:
+        return False
+    if row.get("hard_disqualified") or int(row.get("hard_disqualifier_count") or 0) > 0:
+        return False
+    if _field_specific_gate_reason(row):
+        return False
+    if _is_repeated_ordinal_prompt(prompt, field) and _candidate_matches_repeated_ordinal(prompt, field, selector, context, tag):
+        if "quote" in prompt:
+            if "text" in field:
+                return tag == "span" and value.startswith(("“", '"', "'"))
+            if "author" in prompt:
+                return tag in {"small", "span", "a"} and _looks_like_person_name(value)
+            if _is_tag_prompt(prompt):
+                return tag == "a" and any(term in haystack for term in {"tag", "tags"})
+        if _is_listing_item_prompt(prompt):
+            if field_type == "price" or "price" in field:
+                return validator_confidence >= 0.90 and _looks_like_price_value(value_lower) and "product" in haystack
+            if _is_title_prompt(prompt, field):
+                return tag in {"a", "h2", "h3", "h4"} and "product" in haystack and not _looks_like_price_value(value_lower)
+    if _is_meta_description_prompt(prompt, field):
+        return tag == "meta" and any(term in haystack for term in {"description", "og:description", "twitter:description"})
+    if _is_heading_prompt(prompt, field):
+        if "html document title" in prompt:
+            return tag == "title"
+        if "main heading" in prompt or "h1" in prompt:
+            return tag == "h1"
+    return False
+
+
+def _allow_prompt_specific_hard_negative(row: dict[str, Any]) -> bool:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    if not _is_tag_prompt(prompt):
+        return False
+    own_terms = {str(term).lower() for term in (row.get("own_negative_terms") or [])}
+    if not own_terms.issubset({"tag", "tags", "category", "categories"}):
+        return False
+    selector = str(row.get("candidate_selector") or "").lower()
+    context = str(row.get("candidate_context") or "").lower()
+    tag = str(row.get("candidate_tag") or "").lower()
+    if tag != "a" or not any(term in f"{selector} {context}" for term in {"tag", "tags"}):
+        return False
+    return _candidate_matches_repeated_ordinal(prompt, field, selector, context, tag)
+
+
 def _repeated_ordinal_gate_reason(prompt: str, field: str, selector: str, context: str, tag: str) -> str | None:
     if not _is_repeated_ordinal_prompt(prompt, field):
         return None
@@ -857,6 +939,11 @@ def _candidate_matches_repeated_ordinal(prompt: str, field: str, selector: str, 
     ordinal = _requested_ordinal(prompt)
     if ordinal is None:
         return True
+    if "quote" in prompt and _is_tag_prompt(prompt):
+        quote_position = _quote_card_position(selector, context)
+        if quote_position is None and ordinal == 1 and "quote" in f"{selector} {context}":
+            return tag == "a" and _last_nth_of_type(selector, "a") in {None, 1}
+        return quote_position == ordinal and tag == "a" and _last_nth_of_type(selector, "a") == 1
     if _is_tag_prompt(prompt):
         tag_position = _last_nth_of_type(selector, "a")
         if tag_position is not None and tag_position != 1:
@@ -875,14 +962,14 @@ def _quote_card_position(selector: str, context: str) -> int | None:
     haystack = f"{selector} {context}".lower()
     if not any(term in haystack for term in {"quote", "span:nth-of-type", "small:nth-of-type", "tags"}):
         return None
-    matches = [int(match) for match in re.findall(r"div:nth-of-type\((\d+)\)", selector)]
+    matches = [int(match) for match in re.findall(r"div(?:[.#][^ >:]+)*:nth-of-type\((\d+)\)", selector)]
     if "a:nth-of-type" in selector and len(matches) >= 2:
         return matches[-2]
     return matches[-1] if matches else None
 
 
 def _last_nth_of_type(selector: str, tag: str) -> int | None:
-    matches = [int(match) for match in re.findall(rf"{re.escape(tag)}:nth-of-type\((\d+)\)", selector)]
+    matches = [int(match) for match in re.findall(rf"{re.escape(tag)}(?:[.#][^ >:]+)*:nth-of-type\((\d+)\)", selector)]
     return matches[-1] if matches else None
 
 
@@ -906,11 +993,53 @@ def _is_title_prompt(prompt: str, field: str) -> bool:
 def safe_policy_gate_reason(field: FieldSpec, chosen: RankedCandidate, ranked: list[RankedCandidate]) -> str | None:
     rank = next((index for index, item in enumerate(ranked, start=1) if item.candidate.id == chosen.candidate.id), 1)
     row = runtime_candidate_row(field, chosen, rank, top_k=max(1, len(ranked)))
+    _annotate_runtime_section_gate(field, row, ranked)
     return _field_specific_gate_reason(row)
+
+
+def _annotate_runtime_section_gate(field: FieldSpec, row: dict[str, Any], ranked: list[RankedCandidate]) -> None:
+    prompt = field.prompt_text.lower()
+    field_name = field.name.lower()
+    if not _is_first_section_prompt(prompt, field_name):
+        return
+    first_candidate_id: int | None = None
+    for index, item in enumerate(ranked, start=1):
+        candidate_row = runtime_candidate_row(field, item, index, top_k=max(1, len(ranked)))
+        selector = str(candidate_row.get("candidate_selector") or "").lower()
+        context = str(candidate_row.get("candidate_context") or "").lower()
+        tag = str(candidate_row.get("candidate_tag") or "").lower()
+        value = str(candidate_row.get("candidate_value") or "").strip().lower()
+        candidate_id = _candidate_index(candidate_row.get("candidate_id"))
+        if candidate_id is None or tag not in {"h2", "h3", "h4"}:
+            continue
+        if _is_non_content_section_region(selector, context, value) or not _candidate_in_section_content_region(selector, context):
+            continue
+        if not candidate_row.get("validation_passed") or int(candidate_row.get("hard_disqualifier_count") or 0) > 0:
+            continue
+        first_candidate_id = candidate_id if first_candidate_id is None else min(first_candidate_id, candidate_id)
+    if first_candidate_id is not None:
+        row["_first_section_candidate_id"] = first_candidate_id
 
 
 def _is_section_prompt(prompt: str, field: str) -> bool:
     return "section" in field or any(term in prompt for term in {"section heading", "tutorial section"})
+
+
+def _is_first_content_link_prompt(prompt: str, field: str) -> bool:
+    return "first_content_link" in field or "first content link" in prompt or "first link" in prompt
+
+
+def _is_meta_description_prompt(prompt: str, field: str) -> bool:
+    return "meta_description" in field or "meta description" in prompt or "metadata description" in prompt
+
+
+def _is_heading_nested_in_paragraph(selector: str) -> bool:
+    return bool(re.search(r"p:nth-of-type\(\d+\)\s*>\s*h[1-6]:nth-of-type", selector))
+
+
+def _candidate_in_section_content_region(selector: str, context: str) -> bool:
+    haystack = f"{selector} {context}".lower()
+    return any(term in haystack for term in {"main", "article", "section", "content", "document", "body-content"})
 
 
 def _is_heading_prompt(prompt: str, field: str) -> bool:
@@ -922,7 +1051,7 @@ def _is_first_section_prompt(prompt: str, field: str) -> bool:
 
 
 def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
-    selector_region = selector.lower()
+    selector_region = selector.lower().replace("sidebar-right", "").replace("sidebar-left", "")
     context_region = context.lower()
     if any(
         term in selector_region
@@ -1120,6 +1249,40 @@ def _annotate_first_listing_candidate(rows: list[dict[str, Any]]) -> None:
                 row["_first_listing_candidate_id"] = first_candidate_id
 
 
+def _annotate_first_section_candidate(rows: list[dict[str, Any]]) -> None:
+    first_candidate_id: int | None = None
+    for row in rows:
+        field = str(row.get("field") or "").lower()
+        field_type = str(row.get("field_type") or "").lower()
+        description = str(row.get("field_description") or "").lower()
+        hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+        prompt = " ".join([field, field_type, description, hints])
+        if not _is_first_section_prompt(prompt, field):
+            continue
+        selector = str(row.get("candidate_selector") or "").lower()
+        context = str(row.get("candidate_context") or "").lower()
+        tag = str(row.get("candidate_tag") or "").lower()
+        value = str(row.get("candidate_value") or "").strip().lower()
+        candidate_id = _candidate_index(row.get("candidate_id"))
+        if candidate_id is None or tag not in {"h2", "h3", "h4"}:
+            continue
+        if _is_non_content_section_region(selector, context, value) or not _candidate_in_section_content_region(selector, context):
+            continue
+        if not row.get("validation_passed") or int(row.get("hard_disqualifier_count") or 0) > 0:
+            continue
+        first_candidate_id = candidate_id if first_candidate_id is None else min(first_candidate_id, candidate_id)
+    if first_candidate_id is None:
+        return
+    for row in rows:
+        field = str(row.get("field") or "").lower()
+        field_type = str(row.get("field_type") or "").lower()
+        description = str(row.get("field_description") or "").lower()
+        hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+        prompt = " ".join([field, field_type, description, hints])
+        if _is_first_section_prompt(prompt, field):
+            row["_first_section_candidate_id"] = first_candidate_id
+
+
 def _candidate_index(candidate_id: Any) -> int | None:
     match = re.search(r"\d+", str(candidate_id or ""))
     return int(match.group(0)) if match else None
@@ -1127,7 +1290,7 @@ def _candidate_index(candidate_id: Any) -> int | None:
 
 def _listing_position(selector: str, context: str) -> int | None:
     haystack = f"{selector} {context}".lower()
-    matches = [int(match) for match in re.findall(r"(?:li|article):nth-of-type\((\d+)\)", haystack)]
+    matches = [int(match) for match in re.findall(r"(?:li|article)(?:[.#][^ >:]+)*:nth-of-type\((\d+)\)", haystack)]
     return max(matches) if matches else None
 
 

@@ -258,7 +258,12 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             validation.errors.append("main title not page heading")
             validation.passed = False
             reasons.append("disqualified non-page-heading title")
-        if any(_contains_context_term(attr_ctx, term) for term in TITLE_NEGATIVE_TERMS):
+        document_title_in_head = (
+            "html document title" in field.prompt_text.lower()
+            and candidate.tag == "title"
+            and "head:nth-of-type" in candidate.selector.lower()
+        )
+        if not document_title_in_head and any(_contains_context_term(attr_ctx, term) for term in TITLE_NEGATIVE_TERMS):
             score -= 1.2
             validation.penalties.append("non-primary title context")
             reasons.append("penalized non-primary title context")
@@ -277,11 +282,15 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
 
     if _is_heading_prompt(field.prompt_text.lower(), name):
         if "html document title" in field.prompt_text.lower():
-            if candidate.tag == "title":
+            if candidate.tag == "title" and "head:nth-of-type" in candidate.selector.lower():
                 score += 1.8
                 reasons.append("document title tag")
             else:
                 score -= 1.6
+                if candidate.tag == "title":
+                    validation.hard_disqualifiers.append("document title outside head")
+                    validation.errors.append("document title outside head")
+                    validation.passed = False
                 validation.penalties.append("document title should use title tag")
                 reasons.append("penalized non-title document title candidate")
         elif ("main heading" in field.prompt_text.lower() or "h1" in field.prompt_text.lower()) and candidate.tag == "h1":
@@ -296,6 +305,26 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             score -= 1.0
             validation.penalties.append("quote prompt matched tag/link")
             reasons.append("penalized tag/link for quote text")
+
+    if _is_paragraph_prompt(field):
+        if candidate.tag == "p":
+            score += 1.8
+            reasons.append("paragraph tag cue")
+            if _candidate_in_main_content_region(candidate.selector, ctx):
+                score += 0.8
+                reasons.append("main content paragraph cue")
+        else:
+            score -= 1.8
+            validation.hard_disqualifiers.append("paragraph prompt matched non-paragraph")
+            validation.errors.append("paragraph prompt matched non-paragraph")
+            validation.passed = False
+            reasons.append("disqualified non-paragraph for paragraph prompt")
+        if _unsafe_text_region(candidate.selector, ctx):
+            score -= 2.0
+            validation.hard_disqualifiers.append("paragraph prompt matched unsafe region")
+            validation.errors.append("paragraph prompt matched unsafe region")
+            validation.passed = False
+            reasons.append("disqualified unsafe paragraph region")
 
     if _is_documentation_label_prompt(field.prompt_text.lower(), name):
         if candidate.tag == "title" and "documentation" in value.lower():
@@ -555,7 +584,17 @@ def _is_heading_prompt(prompt: str, name: str) -> bool:
 
 
 def _is_quote_text_prompt(prompt: str, name: str) -> bool:
-    return "quote" in name or "quote text" in prompt
+    if "quote" not in name and "quote" not in prompt:
+        return False
+    if any(term in name for term in {"author", "tag"}) or any(term in prompt for term in {"quote author", "quote tag"}):
+        return False
+    return "text" in name or "quote text" in prompt or "text of the first quote" in prompt
+
+
+def _is_paragraph_prompt(field: FieldSpec) -> bool:
+    prompt = field.prompt_text.lower()
+    name = field.name.lower()
+    return "paragraph" in name or "paragraph" in prompt
 
 
 def _is_documentation_label_prompt(prompt: str, name: str) -> bool:
@@ -584,7 +623,7 @@ def _is_first_section_prompt(field: FieldSpec, name: str) -> bool:
 
 
 def _is_non_content_section_region(selector: str, context: str, value: str) -> bool:
-    selector_region = selector.lower()
+    selector_region = selector.lower().replace("sidebar-right", "").replace("sidebar-left", "")
     context_region = context.lower()
     if any(
         term in selector_region
@@ -746,6 +785,16 @@ def _is_listing_item_prompt(prompt: str) -> bool:
 
 def _candidate_in_listing_region(selector: str, context: str) -> bool:
     return any(term in selector or term in context for term in {"article", "li:nth-of-type", "card", "product", "quote", "result"})
+
+
+def _candidate_in_main_content_region(selector: str, context: str) -> bool:
+    haystack = f"{selector} {context}".lower()
+    return any(term in haystack for term in {"main", "article", "content", "document", "body-content", "entry"})
+
+
+def _unsafe_text_region(selector: str, context: str) -> bool:
+    haystack = f"{selector} {context}".lower()
+    return any(term in haystack for term in {"nav", "footer", "sidebar", "breadcrumb", "skip", "toc", "table of contents", "survey"})
 
 
 def _listing_position(selector: str, context: str) -> int | None:

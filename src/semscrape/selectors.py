@@ -102,8 +102,38 @@ def selector_for_part(element: Tag) -> str:
 
     classes = _class_tokens(element)
     if classes:
-        return tag + "".join(f".{css_ident(c)}" for c in classes[:2])
+        selector = tag + "".join(f".{css_ident(c)}" for c in classes[:2])
+        if _has_same_selector_sibling(element, selector):
+            return f"{selector}:nth-of-type({nth_of_type(element)})"
+        return selector
     return f"{tag}:nth-of-type({nth_of_type(element)})"
+
+
+def _has_same_selector_sibling(element: Tag, selector: str) -> bool:
+    if not element.parent:
+        return False
+    tag = element.name or "*"
+    classes = set(_class_tokens(element)[:2])
+    for sibling in element.parent.children:
+        if not isinstance(sibling, Tag) or sibling is element or sibling.name != tag:
+            continue
+        sibling_classes = set(_class_tokens(sibling)[:2])
+        if classes and classes.issubset(sibling_classes):
+            return True
+        if not classes and selector == (sibling.name or "*"):
+            return True
+    return False
+
+
+def structural_selector(element: Tag) -> str:
+    """Return a deterministic full path without document-wide uniqueness probes."""
+
+    parts: list[str] = []
+    current: Tag | None = element
+    while current is not None and isinstance(current, Tag) and current.name not in ("[document]", None):
+        parts.append(f"{current.name}:nth-of-type({nth_of_type(current)})")
+        current = current.parent if isinstance(current.parent, Tag) else None
+    return " > ".join(reversed(parts))
 
 
 def unique_selector(soup: BeautifulSoup, element: Tag) -> str:
@@ -188,7 +218,7 @@ def selector_quality(selector: str) -> float:
         base -= 0.12
     if selector.count(":nth-of-type") >= 2:
         base -= 0.10
-    return max(0.0, min(1.0, base))
+    return max(0.05, min(1.0, base)) if selector else 0.0
 
 
 def element_path(element: Tag) -> str:

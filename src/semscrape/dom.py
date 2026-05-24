@@ -5,10 +5,10 @@ import re
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .models import Candidate
-from .selectors import element_path, unique_selector
+from .selectors import element_path
 from .util import normalize_ws, truncate
 
-SKIP_TAGS = {"script", "style", "template", "noscript", "meta", "link", "head", "svg"}
+SKIP_TAGS = {"script", "style", "template", "noscript", "link", "head", "svg"}
 MEANINGFUL_EMPTY_ATTRS = {"href", "src", "alt", "title", "aria-label", "value", "content"}
 IMPORTANT_ATTR_PREFIXES = ("data-", "aria-")
 IMPORTANT_ATTRS = {
@@ -36,6 +36,22 @@ def visible_text(element: Tag, *, limit: int = 1600) -> str:
     # BeautifulSoup doesn't compute CSS visibility; this is intentionally conservative.
     text = normalize_ws(element.get_text(" ", strip=True))
     return truncate(text, limit)
+
+
+def candidate_text(element: Tag, *, limit: int = 1600) -> str:
+    text = visible_text(element, limit=limit)
+    if text:
+        return text
+    for attr in ("content", "alt", "title", "aria-label", "value"):
+        raw = element.attrs.get(attr)
+        if isinstance(raw, (list, tuple, set)):
+            value = " ".join(str(item) for item in raw)
+        else:
+            value = str(raw or "")
+        value = normalize_ws(value)
+        if value:
+            return truncate(value, limit)
+    return ""
 
 
 def own_text(element: Tag, *, limit: int = 240) -> str:
@@ -113,7 +129,7 @@ def _element_depth(element: Tag) -> int:
 def should_consider(element: Tag) -> bool:
     if element.name in SKIP_TAGS:
         return False
-    text = visible_text(element, limit=1601)
+    text = candidate_text(element, limit=1601)
     if text:
         # Skip giant container elements; their descendants are better candidates.
         if len(text) > 1600 and element.name not in {"article", "main", "section"}:
@@ -128,12 +144,16 @@ def should_consider(element: Tag) -> bool:
 def element_to_candidate(soup: BeautifulSoup, element: Tag, index: int) -> Candidate:
     attrs = compact_attrs(element)
     parent_text = visible_text(element.parent, limit=240) if isinstance(element.parent, Tag) else ""
+    text = candidate_text(element)
+    own = own_text(element)
+    if not own and element.name == "meta":
+        own = text
     return Candidate(
         id=f"c{index:04d}",
-        selector=unique_selector(soup, element),
+        selector=element_path(element),
         tag=element.name or "",
-        text=visible_text(element),
-        own_text=own_text(element),
+        text=text,
+        own_text=own,
         attrs=attrs,
         attr_text=attrs_as_text(attrs),
         parent_text=parent_text,

@@ -1556,3 +1556,72 @@ Report:
 - `docs/m16w_founder_wide_report.md`
 
 Decision: true outside-user M16C remains blocked. Next milestone should be M16W-R: improve candidate recall for metadata/paragraph/main-content candidates and prevent extraction when the expected candidate is missing, then rerun the founder-wide set plus a fresh wide mini-holdout.
+
+## M16W-R: Wide Corpus Recall and Missing-Candidate Safety
+
+Status: passed.
+
+Question: Can semscrape improve candidate recall on the wide external corpus and abstain safely when the requested field is not represented strongly in the candidate set?
+
+Changes:
+
+```text
+- Included value-bearing metadata candidates from <meta content=...>.
+- Used metadata/attribute text as candidate text for non-visible value-bearing elements.
+- Replaced expensive per-candidate unique-selector probing with deterministic sibling-aware structural selectors.
+- Added meta-description safety gates.
+- Added first-section ordinal annotation/gating.
+- Added first-content-link ordinal gating.
+- Added repeated-card ordinal safety for quote/product/listing fields.
+- Added document-title gating so SVG title elements cannot satisfy HTML document title fields.
+- Added paragraph-specific ranking for first_paragraph-like prompts.
+- Classified and removed invalid generated expected-value rows from the founder-wide remediation measurement set.
+```
+
+Incident reports:
+
+```text
+docs/m16w_r_candidate_recall_incident_report.md
+docs/m16w_r_false_positive_incident_report.md
+```
+
+Founder-wide remediation result:
+
+```text
+projects/pages:         60
+source groups:          14
+fields_attempted:       257
+coverage_rate:          0.692607
+false_positive_rate:    0.000000
+candidate_recall@40:    1.000000
+abstention_rate:        0.307393
+bundle_audit_pass_rate: 1.000000
+```
+
+Fresh wide mini-holdout result:
+
+```text
+projects/pages:         16
+source groups:          7
+fields_attempted:       61
+coverage_rate:          0.721311
+false_positive_rate:    0.000000
+candidate_recall@40:    1.000000
+abstention_rate:        0.278689
+bundle_audit_pass_rate: 1.000000
+```
+
+Regression:
+
+```text
+base_holdout_false_positive_rate:        0.000000
+adversarial_holdout_false_positive_rate: 0.000000
+```
+
+Decision:
+
+```text
+M16W-R passed.
+v0.1.0-alpha.9 is the next frozen outside-user cohort target after this commit is tagged.
+M16C true outside-user cohort can resume on v0.1.0-alpha.9 unless a blocking runtime bug appears.
+```

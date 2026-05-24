@@ -62,6 +62,8 @@ M16R-Founder: passed
 M16U safe coverage recovery: passed
 v0.1.0-alpha.8: safety-remediated, coverage-recovered outside-cohort target
 M16W founder-operated wide external corpus: executed, failed safety/recall
+M16W-R wide corpus recall and missing-candidate safety: passed
+v0.1.0-alpha.9: next frozen true outside-user cohort target after tagging
 M16C true outside-user cohort: pending
 ```
 
@@ -123,7 +125,7 @@ fresh_mini_holdout_m16u:
   bundle_audit_pass_rate: 1.000000
 ```
 
-The next gate is still a true outside-user cohort on the frozen `v0.1.0-alpha.8` tag.
+At that point, the next gate was a true outside-user cohort on the frozen `v0.1.0-alpha.8` tag.
 
 Before inviting true outside users, M16W widened founder-operated validation to 54 projects, 14 source groups, and 267 attempted fields. Privacy and coverage passed, but false-positive rate and candidate recall failed:
 
@@ -135,6 +137,33 @@ bundle_audit_pass_rate: 1.000000
 ```
 
 The M16W report is in [docs/m16w_founder_wide_report.md](docs/m16w_founder_wide_report.md). M16C true outside-user testing remains blocked until M16W-R remediates candidate recall and extracted-wrong behavior on missing candidates.
+
+M16W-R remediated the wide-corpus blocker. The main fixes were metadata candidates, fast sibling-aware structural selectors, first-section and repeated-card ordinal safety, paragraph-specific evidence, quote/product safe recovery, document-title head-only gating, and removal of invalid generated expected-value rows from the remediation measurement set:
+
+```text
+founder_wide_remediation:
+  fields_attempted:       257
+  coverage_rate:          0.692607
+  false_positive_rate:    0.000000
+  candidate_recall@40:    1.000000
+  bundle_audit_pass_rate: 1.000000
+
+fresh_wide_mini_holdout:
+  projects/pages:         16
+  source_groups:          7
+  fields_attempted:       61
+  coverage_rate:          0.721311
+  false_positive_rate:    0.000000
+  candidate_recall@40:    1.000000
+  bundle_audit_pass_rate: 1.000000
+```
+
+Incident reports:
+
+- [M16W-R candidate recall incident report](docs/m16w_r_candidate_recall_incident_report.md)
+- [M16W-R false-positive incident report](docs/m16w_r_false_positive_incident_report.md)
+
+The next frozen target after M16W-R is `v0.1.0-alpha.9`.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
