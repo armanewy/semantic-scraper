@@ -258,18 +258,26 @@ def test_alpha_metrics_use_final_result_for_false_positives() -> None:
             candidate_recall=None,
             failure_reason="false_positive_missing_field",
         ),
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c6",
+            positive_ids=set(),
+            expected_present=True,
+            candidate_recall=False,
+            failure_reason="candidate_missing",
+        ),
     ]
 
     metrics = _alpha_bundle_metrics([{"audit_ok": True}], rows)
 
-    assert metrics["fields_attempted"] == 4
-    assert metrics["coverage_rate"] == 0.75
-    assert metrics["abstention_rate"] == 0.25
-    assert metrics["false_positives"] == 2
-    assert metrics["false_positive_rate"] == 0.5
-    assert metrics["false_positive_among_extracted"] == 2 / 3
-    assert metrics["candidate_recall_denominator"] == 3
-    assert metrics["candidate_recall_at_40"] == 1.0
+    assert metrics["fields_attempted"] == 5
+    assert metrics["coverage_rate"] == 0.8
+    assert metrics["abstention_rate"] == 0.2
+    assert metrics["false_positives"] == 3
+    assert metrics["false_positive_rate"] == 0.6
+    assert metrics["false_positive_among_extracted"] == 3 / 4
+    assert metrics["candidate_recall_denominator"] == 4
+    assert metrics["candidate_recall_at_40"] == 0.75
 
 
 def test_pack_gaps_use_final_result_for_false_positives() -> None:
@@ -290,13 +298,21 @@ def test_pack_gaps_use_final_result_for_false_positives() -> None:
             candidate_recall=True,
             failure_reason="wrong_candidate",
         ),
+        _evidence_export_row(
+            status="extracted",
+            selected_id="c5",
+            positive_ids=set(),
+            expected_present=True,
+            candidate_recall=False,
+            failure_reason="candidate_missing",
+        ),
     ]
 
     summary = _pack_gaps_summary(rows)
 
     assert summary["abstentions"] == 1
-    assert summary["false_positives"] == 1
-    assert summary["candidate_missing"] == 0
+    assert summary["false_positives"] == 2
+    assert summary["candidate_missing"] == 1
 
 
 def _evidence_export_row(

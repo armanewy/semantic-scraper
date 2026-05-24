@@ -2060,7 +2060,9 @@ def _evidence_row_false_positive(row: dict[str, Any]) -> bool:
     positives = {candidate.get("candidate_id") for candidate in candidates if candidate.get("label")}
     if not _evidence_row_expected_present(row):
         return True
-    return bool(positives and selected_id not in positives)
+    if positives:
+        return selected_id not in positives
+    return record.get("candidate_recall") is False
 
 
 def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list[dict[str, Any]]) -> dict[str, Any]:

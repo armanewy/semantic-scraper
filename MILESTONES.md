@@ -1507,3 +1507,52 @@ adversarial_holdout:
 ```
 
 Status: passed. M16C true outside-user execution remains pending. `v0.1.0-alpha.8` is the intended frozen outside-user cohort target because `v0.1.0-alpha.7` is safe but over-abstains.
+
+## M16W: Founder-Operated Wide External Corpus
+
+**Question:** Can `v0.1.0-alpha.8` maintain low false positives across a much wider set of fresh public pages when operated by the founder under a frozen protocol?
+
+Status: executed, failed safety/recall gate.
+
+This is not a true outside-user cohort. It tests content/page generalization under founder operation, not independent-user onboarding, spec writing, or workflow comprehension.
+
+Completed corpus:
+
+```text
+projects_completed:     54
+fields_attempted:       267
+domains/source groups:  14
+bundle_audit_pass_rate: 1.000000
+```
+
+Results:
+
+```text
+coverage_rate:          0.629213
+false_positive_rate:    0.026217
+false_positives:        7
+candidate_recall@40:    0.850187
+candidate_missing:      40
+abstention_rate:        0.370787
+bundle_audit_pass_rate: 1.000000
+```
+
+Gate result:
+
+```text
+50+ projects/pages:                pass
+8+ domains/source groups:          pass
+200+ attempted fields:             pass
+bundle audit pass rate = 100%:     pass
+ranker-local-safe coverage >= 50%: pass
+false_positive_rate <= 2%:         fail
+candidate_recall@40 >= 95%:        fail
+```
+
+M16W also found a measurement bug: `alpha summarize` and `pack gaps` undercounted extracted-wrong rows when `candidate_recall=false` and no positive candidate row existed in a features-only evidence export. The metric now counts those rows as false positives, matching the M16F final-result definition.
+
+Report:
+
+- `docs/m16w_founder_wide_report.md`
+
+Decision: true outside-user M16C remains blocked. Next milestone should be M16W-R: improve candidate recall for metadata/paragraph/main-content candidates and prevent extraction when the expected candidate is missing, then rerun the founder-wide set plus a fresh wide mini-holdout.

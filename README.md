@@ -61,6 +61,7 @@ M16C founder-operated external cohort on alpha.6: failed safety/privacy
 M16R-Founder: passed
 M16U safe coverage recovery: passed
 v0.1.0-alpha.8: safety-remediated, coverage-recovered outside-cohort target
+M16W founder-operated wide external corpus: executed, failed safety/recall
 M16C true outside-user cohort: pending
 ```
 
@@ -123,6 +124,17 @@ fresh_mini_holdout_m16u:
 ```
 
 The next gate is still a true outside-user cohort on the frozen `v0.1.0-alpha.8` tag.
+
+Before inviting true outside users, M16W widened founder-operated validation to 54 projects, 14 source groups, and 267 attempted fields. Privacy and coverage passed, but false-positive rate and candidate recall failed:
+
+```text
+coverage_rate:          0.629213
+false_positive_rate:    0.026217
+candidate_recall@40:    0.850187
+bundle_audit_pass_rate: 1.000000
+```
+
+The M16W report is in [docs/m16w_founder_wide_report.md](docs/m16w_founder_wide_report.md). M16C true outside-user testing remains blocked until M16W-R remediates candidate recall and extracted-wrong behavior on missing candidates.
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -1008,6 +1020,7 @@ M16F: measurement integrity fix complete
 M16C local stand-in cohort: passed safety
 M16R-Founder: founder external safety remediation passed
 M16U: safe coverage recovery passed
+M16W: founder-operated wide external corpus failed safety/recall
 M16C true outside-user cohort: pending
 ```
 
