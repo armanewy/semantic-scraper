@@ -54,6 +54,13 @@ This repo is a developer-alpha semantic scraper CLI:
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
+Public-alpha notes:
+
+- [Public alpha guide](docs/public_alpha.md)
+- [Known limitations](docs/known_limitations.md)
+- [Evidence intake runbook](docs/evidence_intake_runbook.md)
+- [Changelog](CHANGELOG.md)
+
 ## Install
 
 ```bash
@@ -459,6 +466,13 @@ semscrape evidence bundle .semscrape/evidence.db \
   --out semscrape-evidence-bundle.zip
 
 semscrape evidence audit semscrape-evidence-bundle.zip
+```
+
+Summarize a controlled alpha cohort from audited bundles:
+
+```bash
+semscrape alpha summarize alpha_bundles/*.zip \
+  --out runs/m16/public-alpha-summary.md
 ```
 
 Maintainer-side intake validates privacy, schema version, and duplicate records before writing merged evidence:

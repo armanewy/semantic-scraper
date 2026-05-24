@@ -1,0 +1,37 @@
+name: Unexpected abstention
+description: semscrape abstained where you expected an extraction.
+title: "[Abstention]: "
+labels: ["abstention", "alpha"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Which field abstained, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: field
+    attributes:
+      label: Field name
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected value
+  - type: input
+    id: policy
+    attributes:
+      label: Policy
+      placeholder: ranker-local-safe
+  - type: textarea
+    id: reason
+    attributes:
+      label: Abstention reason
+      description: Paste the trace or failure reason if available.
+  - type: textarea
+    id: inspect
+    attributes:
+      label: Inspect/candidate context
+      description: Did the expected value appear in the top candidates?

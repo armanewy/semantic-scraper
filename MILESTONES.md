@@ -1215,3 +1215,46 @@ Exit criteria:
 - `v0.1.0-alpha.4` is tagged only after the full gate passes.
 
 Status: passed. M15R restored false-positive safety on the M15 fresh set, passed a separate mini-holdout, preserved all accumulated regression suites, and kept the release posture conservative through `ranker-local-safe`.
+
+## M16: Controlled Public Alpha
+
+**Question:** Can outside users install `v0.1.0-alpha.4`, use semscrape on their own workflows, and contribute privacy-safe evidence while preserving false-positive safety?
+
+Deliverables:
+
+- Public alpha release notes:
+  - `CHANGELOG.md`
+  - `docs/public_alpha.md`
+  - `docs/known_limitations.md`
+- Evidence intake runbook:
+  - `docs/evidence_intake_runbook.md`
+- GitHub issue templates:
+  - false positive
+  - unexpected abstention
+  - candidate recall miss
+  - spec help
+  - pack/domain request
+  - privacy/evidence bundle issue
+- Alpha cohort summary command:
+  - `semscrape alpha summarize alpha_bundles/*.zip --out runs/m16/public-alpha-summary.md`
+- Controlled cohort:
+  - 10+ alpha projects/users
+  - 5+ domains
+  - 60+ attempted fields
+
+Exit criteria:
+
+- `v0.1.0-alpha.4` public alpha notes exist.
+- Known limitations are documented.
+- Install/doctor/init/extract/evidence bundle workflow is documented.
+- 10+ projects/users complete the workflow.
+- 5+ domains are represented.
+- 60+ fields are attempted.
+- Features-only bundle audit pass rate = 100%.
+- Aggregate false_positive_rate <= 2%.
+- Candidate_recall@40 >= 95%.
+- `ranker-local-safe` coverage >= 55%.
+- All false positives become gold hard negatives.
+- No unverified production positives are used for global training.
+
+Status: tooling/docs ready, field-trial gate pending. `v0.1.0-alpha.4` remains a limited public-alpha candidate until a real cohort completes the workflow and clears the safety gate.

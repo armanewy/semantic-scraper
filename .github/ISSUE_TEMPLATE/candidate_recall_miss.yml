@@ -1,0 +1,35 @@
+name: Candidate recall miss
+description: The correct value does not appear in the candidate set.
+title: "[Candidate recall]: "
+labels: ["candidate-recall", "alpha"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Which expected value was missing from the candidates?
+    validations:
+      required: true
+  - type: input
+    id: field
+    attributes:
+      label: Field name
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected value
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Field spec
+      description: Paste the relevant field spec.
+      render: yaml
+  - type: textarea
+    id: inspect
+    attributes:
+      label: Inspect output
+      description: Paste redacted `semscrape inspect` output or top candidates.

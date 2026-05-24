@@ -1,0 +1,54 @@
+name: False positive
+description: semscrape extracted a wrong value instead of abstaining.
+title: "[False positive]: "
+labels: ["false-positive", "alpha"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What field was wrong, and why is the selected value unsafe?
+    validations:
+      required: true
+  - type: input
+    id: field
+    attributes:
+      label: Field name
+      placeholder: price
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected value
+    validations:
+      required: true
+  - type: input
+    id: actual
+    attributes:
+      label: Actual value
+    validations:
+      required: true
+  - type: input
+    id: policy
+    attributes:
+      label: Policy
+      placeholder: ranker-local-safe
+    validations:
+      required: true
+  - type: textarea
+    id: ranker
+    attributes:
+      label: semscrape ranker info
+      description: Paste the relevant output from `semscrape ranker info`.
+      render: json
+  - type: textarea
+    id: recall
+    attributes:
+      label: Candidate recall
+      description: Did the correct value appear in `inspect` or canary candidate_recall@40?
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence bundle or redacted candidates
+      description: Attach an audited features-only bundle when possible, or paste redacted candidate details.

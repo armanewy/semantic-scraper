@@ -1,0 +1,29 @@
+name: Privacy or evidence bundle issue
+description: Evidence bundle audit, privacy report, or intake problem.
+title: "[Evidence/privacy]: "
+labels: ["evidence", "privacy", "alpha"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What audit/intake/privacy behavior was unexpected?
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Paste the command you ran.
+      render: bash
+  - type: textarea
+    id: audit
+    attributes:
+      label: Audit output
+      description: Paste `semscrape evidence audit` output when possible.
+      render: json
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Do not paste raw private HTML or sensitive scraped data.

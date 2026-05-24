@@ -44,6 +44,7 @@ from .evidence import (
     audit_evidence_bundle,
     create_evidence_bundle,
     intake_evidence_bundles,
+    read_evidence_bundle,
     record_report_evidence,
     write_dataset_from_evidence_export,
     write_evidence_jsonl,
@@ -1395,6 +1396,39 @@ def cmd_evidence_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_alpha_summarize(args: argparse.Namespace) -> int:
+    bundle_rows: list[dict[str, Any]] = []
+    evidence_rows: list[dict[str, Any]] = []
+    for bundle in _expand_paths(args.bundles):
+        try:
+            audit = audit_evidence_bundle(bundle, allow_values=args.allow_values)
+            manifest, records, _privacy_report, summary = read_evidence_bundle(bundle)
+        except (ValueError, FileNotFoundError) as exc:
+            bundle_rows.append({"path": str(bundle), "accepted": False, "audit_ok": False, "errors": [str(exc)], "records": 0})
+            continue
+        bundle_rows.append(
+            {
+                "path": str(bundle),
+                "accepted": bool(audit.get("ok")),
+                "audit_ok": bool(audit.get("ok")),
+                "errors": audit.get("errors", []),
+                "records": len(records),
+                "privacy_mode": manifest.get("privacy_mode"),
+                "labeled_count": manifest.get("labeled_count", 0),
+                "trust_level_counts": (summary or {}).get("trust_level_counts", {}),
+                "field_type_counts": (summary or {}).get("field_type_counts", {}),
+            }
+        )
+        if audit.get("ok"):
+            evidence_rows.extend(records)
+    metrics = _alpha_bundle_metrics(bundle_rows, evidence_rows)
+    report = _alpha_summary_report(bundle_rows, metrics)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(report, encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, **metrics})
+    return 0 if all(row["audit_ok"] for row in bundle_rows) else 2
+
+
 def cmd_pilot_run(args: argparse.Namespace) -> int:
     project = Path(args.project)
     manifest = project / "manifest.yml"
@@ -1994,6 +2028,116 @@ def _pilot_summary_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_recall_at_40": _weighted_average(rows, "candidate_recall_at_40", "fields"),
         "bundle_audit_pass_rate": bundle_ok / len(rows) if rows else 0.0,
     }
+
+
+def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    domains = Counter()
+    field_types = Counter()
+    trust_levels = Counter()
+    label_counts = Counter()
+    failure_reasons = Counter()
+    false_positives = 0
+    extracted = 0
+    recalled = 0
+    hard_negatives = 0
+    positive_candidates = 0
+    for row in evidence_rows:
+        record = row.get("record") or {}
+        label = record.get("label") or {}
+        domains[str(record.get("category") or "unknown")] += 1
+        field = record.get("field") or {}
+        field_types[str(field.get("kind") or "unknown")] += 1
+        trust_levels[str(label.get("trust_level") or "untrusted")] += 1
+        label_counts[str(label.get("status") or "unknown")] += 1
+        failure_reasons[str(record.get("failure_reason") or "none")] += 1
+        extracted += int(record.get("status") == "extracted")
+        recalled += int(bool(record.get("candidate_recall")))
+        selected_id = record.get("selected_candidate_id")
+        positives = {candidate.get("candidate_id") for candidate in row.get("candidates") or [] if candidate.get("label")}
+        hard_negatives += sum(int(bool(candidate.get("hard_negative"))) for candidate in row.get("candidates") or [])
+        positive_candidates += len(positives)
+        if label.get("status") == "labeled" and selected_id and positives and selected_id not in positives:
+            false_positives += 1
+    bundle_count = len(bundle_rows)
+    accepted_bundles = sum(int(bool(row.get("audit_ok"))) for row in bundle_rows)
+    fields_attempted = len(evidence_rows)
+    return {
+        "bundles": bundle_count,
+        "accepted_bundles": accepted_bundles,
+        "bundle_audit_pass_rate": accepted_bundles / bundle_count if bundle_count else 0.0,
+        "fields_attempted": fields_attempted,
+        "domains": len([domain for domain, count in domains.items() if domain != "unknown" and count > 0]),
+        "domain_names": sorted(domain for domain in domains if domain != "unknown"),
+        "coverage_rate": extracted / fields_attempted if fields_attempted else 0.0,
+        "false_positive_rate": false_positives / fields_attempted if fields_attempted else 0.0,
+        "candidate_recall_at_40": recalled / fields_attempted if fields_attempted else 0.0,
+        "abstention_rate": (fields_attempted - extracted) / fields_attempted if fields_attempted else 0.0,
+        "false_positives": false_positives,
+        "gold_labels_created": trust_levels.get("gold", 0),
+        "hard_negatives_created": hard_negatives,
+        "positive_candidate_rows": positive_candidates,
+        "trust_level_counts": dict(sorted(trust_levels.items())),
+        "label_counts": dict(sorted(label_counts.items())),
+        "field_type_counts": dict(sorted(field_types.items())),
+        "top_failure_reasons": dict(failure_reasons.most_common(10)),
+    }
+
+
+def _alpha_summary_report(bundle_rows: list[dict[str, Any]], metrics: dict[str, Any]) -> str:
+    lines = [
+        "# semscrape public alpha summary",
+        "",
+        "## Aggregate",
+        "",
+        f"- bundles: `{metrics['bundles']}`",
+        f"- accepted_bundles: `{metrics['accepted_bundles']}`",
+        f"- domains: `{metrics['domains']}`",
+        f"- fields_attempted: `{metrics['fields_attempted']}`",
+        f"- coverage_rate: `{metrics['coverage_rate']:.6f}`",
+        f"- false_positive_rate: `{metrics['false_positive_rate']:.6f}`",
+        f"- candidate_recall_at_40: `{metrics['candidate_recall_at_40']:.6f}`",
+        f"- abstention_rate: `{metrics['abstention_rate']:.6f}`",
+        f"- bundle_audit_pass_rate: `{metrics['bundle_audit_pass_rate']:.6f}`",
+        f"- gold_labels_created: `{metrics['gold_labels_created']}`",
+        f"- hard_negatives_created: `{metrics['hard_negatives_created']}`",
+        "",
+        "## Trust Levels",
+        "",
+    ]
+    for key, value in (metrics.get("trust_level_counts") or {}).items():
+        lines.append(f"- {key}: `{value}`")
+    lines.extend(["", "## Top Failure Reasons", ""])
+    for key, value in (metrics.get("top_failure_reasons") or {}).items():
+        lines.append(f"- {key}: `{value}`")
+    lines.extend(
+        [
+            "",
+            "## Bundles",
+            "",
+            "| bundle | audit | records | privacy | labels | errors |",
+            "|---|---:|---:|---|---:|---|",
+        ]
+    )
+    for row in bundle_rows:
+        errors = ", ".join(str(item) for item in row.get("errors") or [])
+        bundle_path = Path(str(row["path"]))
+        bundle_label = f"{bundle_path.parent.name}/{bundle_path.name}" if bundle_path.parent.name else bundle_path.name
+        lines.append(
+            f"| {bundle_label} | {str(bool(row.get('audit_ok'))).lower()} | "
+            f"{int(row.get('records') or 0)} | {row.get('privacy_mode') or ''} | "
+            f"{int(row.get('labeled_count') or 0)} | {errors} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Gate Notes",
+            "",
+            "- Public-alpha success requires aggregate false-positive rate <= 2%.",
+            "- Features-only bundle audit pass rate should be 100%.",
+            "- Unverified production positives must not be used for global ranker training.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _weighted_average(rows: list[dict[str, Any]], value_key: str, weight_key: str) -> float:
@@ -2651,6 +2795,14 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_summary.add_argument("projects", nargs="+")
     pilot_summary.add_argument("--out", required=True)
     pilot_summary.set_defaults(func=cmd_pilot_summarize)
+
+    alpha = sub.add_parser("alpha", help="Summarize public alpha evidence bundles")
+    alpha_sub = alpha.add_subparsers(dest="alpha_cmd", required=True)
+    alpha_summary = alpha_sub.add_parser("summarize", help="Summarize audited alpha evidence bundles")
+    alpha_summary.add_argument("bundles", nargs="+")
+    alpha_summary.add_argument("--out", required=True)
+    alpha_summary.add_argument("--allow-values", action="store_true", help="Allow candidate/value text in audited bundles")
+    alpha_summary.set_defaults(func=cmd_alpha_summarize)
 
     pack = sub.add_parser("pack", help="Build, inspect, and release-check domain packs")
     pack_sub = pack.add_subparsers(dest="pack_cmd", required=True)

@@ -1,0 +1,29 @@
+name: Pack or domain request
+description: Request support for a domain pack or repeated page family.
+title: "[Pack request]: "
+labels: ["pack-request", "alpha"]
+body:
+  - type: input
+    id: domain
+    attributes:
+      label: Domain/page family
+      placeholder: ecommerce, docs, listings, pricing tables
+    validations:
+      required: true
+  - type: textarea
+    id: fields
+    attributes:
+      label: Fields needed
+      description: List the fields and tricky negative examples.
+    validations:
+      required: true
+  - type: textarea
+    id: traps
+    attributes:
+      label: Known traps
+      description: Old prices, sponsored cards, updated dates, hidden duplicates, table row/column issues, etc.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Attach an audited features-only bundle if available.

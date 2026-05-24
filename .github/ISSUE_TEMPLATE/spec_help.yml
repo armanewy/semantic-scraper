@@ -1,0 +1,27 @@
+name: Spec help
+description: Help writing or clarifying a semscrape field spec.
+title: "[Spec help]: "
+labels: ["spec-help", "alpha"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Extraction goal
+      description: What value do you want semscrape to extract?
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Current spec
+      render: yaml
+  - type: textarea
+    id: examples
+    attributes:
+      label: Positive and negative examples
+      description: Include values that should and should not match.
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is going wrong?
+      description: Abstention, false positive, candidate missing, or unclear output shape.

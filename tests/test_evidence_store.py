@@ -197,6 +197,14 @@ def test_evidence_bundle_audit_and_intake_features_only(tmp_path, capsys) -> Non
     assert result["records"] == 4
     assert intake.exists()
 
+    alpha_report = tmp_path / "alpha-summary.md"
+    assert main(["alpha", "summarize", str(bundle), "--out", str(alpha_report)]) == 0
+    alpha = json.loads(capsys.readouterr().out)
+    assert alpha["fields_attempted"] == 4
+    assert alpha["bundle_audit_pass_rate"] == 1.0
+    assert alpha["false_positive_rate"] == 0.0
+    assert "public alpha summary" in alpha_report.read_text(encoding="utf-8")
+
 
 def test_evidence_review_file_apply_review(tmp_path, capsys) -> None:
     db = tmp_path / "evidence.db"
