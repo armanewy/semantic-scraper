@@ -143,6 +143,92 @@ def test_ranker_release_check_passes_with_safe_candidate(tmp_path, capsys) -> No
     assert json.loads(out.read_text(encoding="utf-8"))["passed"] is True
 
 
+def test_dataset_balance_caps_negatives_and_sets_weights(tmp_path, capsys) -> None:
+    dataset = tmp_path / "dataset.jsonl"
+    out = tmp_path / "balanced.jsonl"
+    rows = [
+        {"example_id": "ex1", "candidate_id": "pos", "label": 1, "rank_position": 1},
+        {"example_id": "ex1", "candidate_id": "hard1", "label": 0, "hard_negative": True, "rank_position": 2},
+        {"example_id": "ex1", "candidate_id": "hard2", "label": 0, "hard_negative": True, "rank_position": 3},
+        {"example_id": "ex1", "candidate_id": "neg1", "label": 0, "hard_negative": False, "rank_position": 4},
+        {"example_id": "ex1", "candidate_id": "neg2", "label": 0, "hard_negative": False, "rank_position": 5},
+        {"example_id": "ex1", "candidate_id": "neg3", "label": 0, "hard_negative": False, "rank_position": 6},
+    ]
+    _write_rows(dataset, rows)
+
+    assert (
+        main(
+            [
+                "dataset",
+                "balance",
+                str(dataset),
+                "--out",
+                str(out),
+                "--max-hard-negatives-per-positive",
+                "1",
+                "--max-negatives-per-positive",
+                "2",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] == 4
+    balanced = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert {row["candidate_id"] for row in balanced} == {"pos", "hard1", "neg1", "neg2"}
+    assert next(row for row in balanced if row["candidate_id"] == "pos")["sample_weight"] == 10.0
+    assert next(row for row in balanced if row["candidate_id"] == "hard1")["sample_weight"] == 3.0
+
+
+def test_ranker_diff_reports_fp_fixes_and_coverage_loss(tmp_path, capsys) -> None:
+    left = tmp_path / "left.jsonl"
+    right = tmp_path / "right.jsonl"
+    out = tmp_path / "diff.jsonl"
+    summary = tmp_path / "diff.md"
+    _write_rows(
+        left,
+        [
+            _eval_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong"),
+            _eval_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+        ],
+    )
+    _write_rows(
+        right,
+        [
+            _eval_row("case_a", "price", correct=False, status="abstained", reason="low_ranker_confidence"),
+            _eval_row("case_b", "title", correct=False, status="abstained", reason="low_ranker_confidence"),
+        ],
+    )
+
+    assert (
+        main(
+            [
+                "ranker",
+                "diff",
+                str(left),
+                str(right),
+                "--left-label",
+                "v3",
+                "--right-label",
+                "vNext",
+                "--out",
+                str(out),
+                "--summary-out",
+                str(summary),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transitions"]["false_positive_fixed"] == 1
+    assert payload["transitions"]["coverage_lost_correct"] == 1
+    diff_rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert {row["transition"] for row in diff_rows} == {"false_positive_fixed", "coverage_lost_correct"}
+    assert "false_positive_fixed" in summary.read_text(encoding="utf-8")
+
+
 def test_alpha_run_collects_untrusted_evidence_without_training_export(tmp_path, capsys) -> None:
     spec = tmp_path / "spec.yml"
     html = tmp_path / "page.html"
@@ -371,6 +457,37 @@ def _summary_row(field: str, *, expected_present: bool = True, abstained: bool =
         "ranker_called": True,
         "ranker_validated_recovery": expected_present and not abstained,
         "ranker_false_positive": False,
+    }
+
+
+def _eval_row(
+    case_id: str,
+    field: str,
+    *,
+    correct: bool,
+    false_positive: bool = False,
+    status: str,
+    candidate_id: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    return {
+        "model": "ranker",
+        "case_id": case_id,
+        "category": "test",
+        "field": field,
+        "status": status,
+        "abstained": status == "abstained",
+        "correct": correct,
+        "false_positive": false_positive,
+        "candidate_present": True,
+        "model_candidate_id": candidate_id,
+        "expected_candidate_ids": ["good"],
+        "ranker_confidence": 0.95 if status == "extracted" else 0.4,
+        "ranker_margin": 0.1,
+        "failure_reason": reason,
+        "validator_confidence": 0.9 if status == "extracted" else 0.0,
+        "validator_penalties": [],
+        "hard_disqualifiers": [],
     }
 
 

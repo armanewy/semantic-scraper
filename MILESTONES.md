@@ -1964,3 +1964,81 @@ Report:
 ```text
 docs/m19_evidence_driven_update_report.md
 ```
+
+## M19R: Ranker Update Diagnostics and Safe Coverage Preservation
+
+Status: completed, no promotion.
+
+Question: Can the oracle-trained safety signal be used without collapsing coverage on existing holdouts?
+
+Diagnostic tooling:
+
+```text
+semscrape ranker diff
+semscrape dataset balance
+```
+
+Baseline vs vNext oracle eval diff:
+
+```text
+rows: 31
+false_positive_fixed: 2
+coverage_lost_correct: 1
+same_correct: 17
+same_abstained: 11
+```
+
+Baseline vs vNext base holdout diff:
+
+```text
+rows: 20
+coverage_lost_correct: 6
+same_correct: 3
+same_abstained: 11
+loss_categories:
+  ecommerce: price, rating, availability
+  docs: page_title, install_command
+  recipes: servings
+```
+
+Balanced training recipe:
+
+```text
+train_rows: 799
+positives: 131
+hard_negatives: 254
+hard_negatives_per_positive_cap: 3
+plain_negatives_per_positive_cap: 4
+positive_weight: 10
+hard_negative_weight: 2
+negative_weight: 1
+```
+
+Balanced candidate:
+
+```text
+oracle_eval_coverage:       0.548387
+oracle_eval_fpr:            0.000000
+oracle_eval_recall@40:      1.000000
+base_holdout_coverage:      0.550000
+base_holdout_fpr:           0.000000
+base_holdout_recall@40:     1.000000
+adversarial_fpr:            0.000000
+release_check_passed:       false
+failed_gate:                base_coverage
+promotion:                  keep_baseline
+```
+
+Decision:
+
+```text
+No replacement ranker, pack, or safety-veto policy is promoted.
+vNext is useful as training signal, not as the default ranker or a simple veto yet.
+The next bottleneck is trusted label distribution across ecommerce, listings, pricing, and base-holdout-like positives.
+```
+
+Report:
+
+```text
+docs/m19r_ranker_regression_diagnosis.md
+```

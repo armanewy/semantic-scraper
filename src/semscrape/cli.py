@@ -9,7 +9,7 @@ import platform
 import shutil
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2608,6 +2608,142 @@ def cmd_ranker_release_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ranker_diff(args: argparse.Namespace) -> int:
+    left_rows = [row for row in read_jsonl(args.left) if row.get("field") is not None]
+    right_rows = [row for row in read_jsonl(args.right) if row.get("field") is not None]
+    left_by_key = {_ranker_diff_key(row): row for row in left_rows}
+    right_by_key = {_ranker_diff_key(row): row for row in right_rows}
+    diff_rows: list[dict[str, Any]] = []
+    for key in sorted(set(left_by_key) | set(right_by_key)):
+        left = left_by_key.get(key)
+        right = right_by_key.get(key)
+        diff_rows.append(_ranker_diff_row(key, left, right, args.left_label, args.right_label))
+    _write_jsonl(args.out, diff_rows)
+    summary = _ranker_diff_summary(diff_rows, args.left_label, args.right_label)
+    if args.summary_out:
+        Path(args.summary_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.summary_out).write_text(_ranker_diff_markdown(summary, diff_rows), encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "summary_out": args.summary_out, **summary})
+    return 0
+
+
+def _ranker_diff_key(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(row.get("case_id") or row.get("spec") or row.get("group") or ""),
+            str(row.get("fixture") or row.get("version") or ""),
+            str(row.get("field") or ""),
+        ]
+    )
+
+
+def _ranker_diff_row(key: str, left: dict[str, Any] | None, right: dict[str, Any] | None, left_label: str, right_label: str) -> dict[str, Any]:
+    transition = _ranker_diff_transition(left, right)
+    return {
+        "key": key,
+        "transition": transition,
+        "field": (left or right or {}).get("field"),
+        "category": (left or right or {}).get("category"),
+        "case_id": (left or right or {}).get("case_id"),
+        left_label: _ranker_diff_side(left),
+        right_label: _ranker_diff_side(right),
+    }
+
+
+def _ranker_diff_side(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "status": row.get("status") or ("abstained" if row.get("abstained") else "extracted"),
+        "correct": bool(row.get("correct")),
+        "false_positive": bool(row.get("false_positive")),
+        "candidate_present": row.get("candidate_present"),
+        "model_candidate_id": row.get("model_candidate_id") or row.get("proposed_candidate_id"),
+        "expected_candidate_ids": row.get("expected_candidate_ids") or [],
+        "ranker_confidence": row.get("ranker_confidence") if row.get("ranker_confidence") is not None else row.get("model_confidence"),
+        "ranker_margin": row.get("ranker_margin") if row.get("ranker_margin") is not None else row.get("decision_margin"),
+        "reason": row.get("failure_reason") or row.get("ranker_reason") or row.get("model_reason"),
+        "validator_confidence": row.get("validator_confidence"),
+        "validator_penalties": row.get("validator_penalties") or [],
+        "hard_disqualifiers": row.get("hard_disqualifiers") or [],
+    }
+
+
+def _ranker_diff_transition(left: dict[str, Any] | None, right: dict[str, Any] | None) -> str:
+    if left is None:
+        return "added"
+    if right is None:
+        return "removed"
+    left_correct = bool(left.get("correct"))
+    right_correct = bool(right.get("correct"))
+    left_fp = bool(left.get("false_positive"))
+    right_fp = bool(right.get("false_positive"))
+    left_abstained = bool(left.get("abstained")) or left.get("status") == "abstained"
+    right_abstained = bool(right.get("abstained")) or right.get("status") == "abstained"
+    if left_fp and not right_fp:
+        return "false_positive_fixed"
+    if right_fp and not left_fp:
+        return "false_positive_regressed"
+    if left_correct and right_abstained:
+        return "coverage_lost_correct"
+    if left_abstained and right_correct:
+        return "coverage_gained_correct"
+    if left_correct and right_correct:
+        left_candidate = left.get("model_candidate_id") or left.get("proposed_candidate_id")
+        right_candidate = right.get("model_candidate_id") or right.get("proposed_candidate_id")
+        return "same_correct" if left_candidate == right_candidate else "changed_correct"
+    if left_abstained and right_abstained:
+        return "same_abstained"
+    if left.get("status") != right.get("status"):
+        return "status_changed"
+    return "other"
+
+
+def _ranker_diff_summary(diff_rows: list[dict[str, Any]], left_label: str, right_label: str) -> dict[str, Any]:
+    transitions = Counter(str(row.get("transition") or "unknown") for row in diff_rows)
+    fields = Counter(str(row.get("field") or "unknown") for row in diff_rows if row.get("transition") in {"false_positive_fixed", "false_positive_regressed", "coverage_lost_correct"})
+    categories = Counter(str(row.get("category") or "unknown") for row in diff_rows if row.get("transition") in {"false_positive_fixed", "false_positive_regressed", "coverage_lost_correct"})
+    return {
+        "left_label": left_label,
+        "right_label": right_label,
+        "rows": len(diff_rows),
+        "transitions": dict(sorted(transitions.items())),
+        "top_regression_fields": dict(fields.most_common(10)),
+        "top_regression_categories": dict(categories.most_common(10)),
+    }
+
+
+def _ranker_diff_markdown(summary: dict[str, Any], diff_rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "# Ranker Diff",
+        "",
+        f"Compared `{summary['left_label']}` to `{summary['right_label']}`.",
+        "",
+        "## Transition Counts",
+        "",
+        "| transition | count |",
+        "|---|---:|",
+    ]
+    for transition, count in summary["transitions"].items():
+        lines.append(f"| {transition} | {count} |")
+    interesting = [
+        row
+        for row in diff_rows
+        if row.get("transition") in {"false_positive_fixed", "false_positive_regressed", "coverage_lost_correct", "coverage_gained_correct"}
+    ][:30]
+    if interesting:
+        lines.extend(["", "## Interesting Rows", "", "| transition | case | field | category | left reason | right reason |", "|---|---|---|---|---|---|"])
+        for row in interesting:
+            left = row.get(summary["left_label"]) or {}
+            right = row.get(summary["right_label"]) or {}
+            lines.append(
+                f"| {row.get('transition')} | {row.get('case_id')} | {row.get('field')} | {row.get('category')} | "
+                f"{left.get('reason') or ''} | {right.get('reason') or ''} |"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _ranker_training_summary(path: str) -> dict[str, Any]:
     rows = read_dataset_jsonl(path)
     categories = sorted({str(row.get("category") or "unknown") for row in rows})
@@ -3360,6 +3496,82 @@ def cmd_dataset_split(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dataset_balance(args: argparse.Namespace) -> int:
+    rows = read_dataset_jsonl(args.input)
+    balanced = _balance_dataset_rows(
+        rows,
+        by=args.by,
+        max_negatives_per_positive=args.max_negatives_per_positive,
+        max_hard_negatives_per_positive=args.max_hard_negatives_per_positive,
+        positive_weight=args.positive_weight,
+        hard_negative_weight=args.hard_negative_weight,
+        negative_weight=args.negative_weight,
+    )
+    write_dataset_jsonl(args.out, balanced)
+    _print_json(
+        {
+            "out": args.out,
+            "rows": len(balanced),
+            "positives": sum(int(bool(row.get("label"))) for row in balanced),
+            "hard_negatives": sum(int(bool(row.get("hard_negative"))) for row in balanced),
+            "split_by": args.by,
+            "max_negatives_per_positive": args.max_negatives_per_positive,
+            "max_hard_negatives_per_positive": args.max_hard_negatives_per_positive,
+        }
+    )
+    return 0
+
+
+def _balance_dataset_rows(
+    rows: list[dict[str, Any]],
+    *,
+    by: str,
+    max_negatives_per_positive: int,
+    max_hard_negatives_per_positive: int,
+    positive_weight: float,
+    hard_negative_weight: float,
+    negative_weight: float,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        key = str(row.get(by) or row.get("example_id") or row.get("case_id") or f"row-{index}")
+        grouped[key].append(row)
+
+    balanced: list[dict[str, Any]] = []
+    for key in sorted(grouped):
+        group_rows = grouped[key]
+        positives = [row for row in group_rows if bool(row.get("label"))]
+        hard_negatives = [row for row in group_rows if not bool(row.get("label")) and bool(row.get("hard_negative"))]
+        negatives = [row for row in group_rows if not bool(row.get("label")) and not bool(row.get("hard_negative"))]
+        positive_count = max(1, len(positives))
+        hard_limit = max_hard_negatives_per_positive * positive_count
+        negative_limit = max_negatives_per_positive * positive_count
+        for row in positives:
+            item = dict(row)
+            item["sample_weight"] = positive_weight
+            balanced.append(item)
+        for row in _ranked_dataset_negatives(hard_negatives)[:hard_limit]:
+            item = dict(row)
+            item["sample_weight"] = hard_negative_weight
+            balanced.append(item)
+        for row in _ranked_dataset_negatives(negatives)[:negative_limit]:
+            item = dict(row)
+            item["sample_weight"] = negative_weight
+            balanced.append(item)
+    return balanced
+
+
+def _ranked_dataset_negatives(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("rank_position") or 999_999),
+            -float(row.get("heuristic_score") or 0.0),
+            str(row.get("candidate_id") or ""),
+        ),
+    )
+
+
 def cmd_ranker_train(args: argparse.Namespace) -> int:
     ranker = train_ranker_from_jsonl(args.input, threshold=args.min_ranker_confidence, margin=args.min_ranker_margin)
     ranker.save(args.out)
@@ -3933,6 +4145,17 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_split.add_argument("--test-out", required=True)
     dataset_split.set_defaults(func=cmd_dataset_split)
 
+    dataset_balance = dataset_sub.add_parser("balance", help="Cap negatives and set sample weights for candidate-ranking JSONL")
+    dataset_balance.add_argument("input")
+    dataset_balance.add_argument("--out", required=True)
+    dataset_balance.add_argument("--by", default="example_id")
+    dataset_balance.add_argument("--max-negatives-per-positive", type=int, default=4)
+    dataset_balance.add_argument("--max-hard-negatives-per-positive", type=int, default=3)
+    dataset_balance.add_argument("--positive-weight", type=float, default=10.0)
+    dataset_balance.add_argument("--hard-negative-weight", type=float, default=3.0)
+    dataset_balance.add_argument("--negative-weight", type=float, default=1.0)
+    dataset_balance.set_defaults(func=cmd_dataset_balance)
+
     ranker = sub.add_parser("ranker", help="Train/evaluate a tiny offline candidate ranker")
     ranker_sub = ranker.add_subparsers(dest="ranker_cmd", required=True)
     ranker_info = ranker_sub.add_parser("info", help="Show metadata for the packaged or supplied ranker")
@@ -3989,6 +4212,15 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_release.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
     ranker_release.add_argument("--max-fpr-regression", type=float, default=0.0)
     ranker_release.set_defaults(func=cmd_ranker_release_check)
+
+    ranker_diff = ranker_sub.add_parser("diff", help="Compare two ranker evaluation JSONL outputs")
+    ranker_diff.add_argument("left")
+    ranker_diff.add_argument("right")
+    ranker_diff.add_argument("--left-label", default="left")
+    ranker_diff.add_argument("--right-label", default="right")
+    ranker_diff.add_argument("--out", required=True)
+    ranker_diff.add_argument("--summary-out", default=None)
+    ranker_diff.set_defaults(func=cmd_ranker_diff)
 
     failures = sub.add_parser("failures", help="Inspect failure artifacts")
     failure_sub = failures.add_subparsers(dest="failure_cmd", required=True)

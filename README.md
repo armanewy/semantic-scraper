@@ -70,6 +70,7 @@ v0.1.0-alpha.10: frozen harvester-scale target
 M18 review queue triage and trusted label conversion: implemented
 M18B trusted label acquisition / oracle sources: passed
 M19 evidence-driven ranker/pack update: completed, no promotion
+M19R ranker update diagnostics: completed, no promotion
 M16C true outside-user cohort: pending
 ```
 
@@ -197,6 +198,8 @@ The M18 pass converted the M17S dev-split false positive into one reviewed gold 
 M18B adds oracle-backed expected values via `semscrape oracle resolve`, `semscrape oracle report`, and `semscrape alpha run --resolve-oracles`. Supported oracle types are `manual_expected`, `pypi_json`, `npm_registry`, `github_repo`, and `json_ld`. The M18B run generated 98 gold oracle-backed labels and 98 training-eligible evidence rows without using raw extraction guesses as positives. See [M18B Oracle Label Acquisition Report](docs/m18b_oracle_label_acquisition_report.md).
 
 M19 used the M18B oracle labels to build an evidence-derived candidate-ranking dataset with 3,920 rows, 186 positives, and 1,498 hard negatives. A `candidate-ranker-vNext` and `ecommerce-vNext` pack candidate were trained and release-checked. Both kept false positives at zero on the checked suites, but both lost too much coverage, so neither was promoted. The packaged default remains `candidate-ranker-v3`, and the current ecommerce pack remains `packs/ecommerce-v1`. See [M19 Evidence-Driven Ranker/Pack Update Report](docs/m19_evidence_driven_update_report.md).
+
+M19R diagnosed the M19 coverage regression and added `semscrape ranker diff` plus `semscrape dataset balance` for future update attempts. The oracle-trained candidate fixed two oracle-eval false positives but lost correct base/ecommerce rows; a balanced recipe improved base holdout coverage while preserving zero FPR, but still did not clear the release gate. No replacement ranker, pack, or veto policy was promoted. See [M19R Ranker Regression Diagnosis](docs/m19r_ranker_regression_diagnosis.md).
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -956,12 +959,14 @@ semscrape snapshot SPEC URL --out DIR [--screenshot] [--candidates] [--accessibi
 semscrape canary SPEC_OR_MANIFEST [...] --policy ranker-local-safe --out RUN.jsonl
 semscrape dataset build SPEC_OR_MANIFEST [...] --out DATASET.jsonl
 semscrape dataset split DATASET.jsonl --by group --train-out TRAIN.jsonl --test-out TEST.jsonl
+semscrape dataset balance DATASET.jsonl --out BALANCED.jsonl
 semscrape ranker info [--model RANKER.json]
 semscrape ranker train TRAIN.jsonl --out RANKER.json
 semscrape ranker eval TEST.jsonl --model RANKER.json --out RUN.jsonl
 semscrape ranker calibrate TEST.jsonl --model RANKER.json --out RUN.jsonl
 semscrape ranker model-card RANKER.json --out MODEL_CARD.md
 semscrape ranker release-check --baseline BASE.jsonl --candidate CANDIDATE.jsonl --adversarial ADV.jsonl --out CHECK.json
+semscrape ranker diff LEFT.jsonl RIGHT.jsonl --out DIFF.jsonl --summary-out DIFF.md
 semscrape evidence stats .semscrape/evidence.db
 semscrape evidence review .semscrape/evidence.db [--status abstained]
 semscrape evidence label .semscrape/evidence.db RECORD_ID --correct-candidate CANDIDATE_ID
