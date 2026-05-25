@@ -403,7 +403,14 @@ def _run_eval_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list
             expected_for_file = spec.benchmarks.get(basename_key(input_ref), {})
             if not expected_for_file and args.expect_like:
                 expected_for_file = spec.benchmarks.get(args.expect_like, {})
-            if getattr(args, "policy", None) in {"safe-local", "ranker-local", "ranker-local-safe", "ranker-plus-llm"}:
+            if getattr(args, "policy", None) in {
+                "safe-local",
+                "ranker-local",
+                "ranker-local-safe",
+                "ranker-local-safe-veto",
+                "ranker-local-safe-trap-veto",
+                "ranker-plus-llm",
+            }:
                 rows.extend(_run_policy_eval_rows(args, spec, input_ref, html, expected_for_file, failures_dir))
             else:
                 for field in spec.fields:
@@ -450,7 +457,8 @@ def _run_policy_eval_rows(
             html,
             input_name=basename_key(input_ref),
             cache=cache,
-            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"},
+            use_llm=model not in {"heuristic", "ranker"}
+            and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"},
             model=model if model not in {"heuristic", "ranker"} else "qwen3:1.7b",
             ollama_host=args.ollama_host,
             top_k=args.top_k,
@@ -511,7 +519,7 @@ def _run_policy_eval_rows(
             ranker_error = any(item.get("stage") == "ranker" and item.get("status") == "error" for item in extraction.trace)
             ranker_recovered = extraction.source == "ranker_recovery" and extraction.ok
             ranker_event = next((item for item in extraction.trace if item.get("stage") == "ranker" and item.get("status") in {"choose", "abstained", "error"}), {})
-            veto_event = next((item for item in extraction.trace if item.get("stage") == "safety_veto"), {})
+            veto_event = next((item for item in extraction.trace if item.get("stage") in {"safety_veto", "trap_veto"}), {})
             cache_attempted = any(item.get("stage") == "cache" and item.get("status") == "attempted" for item in extraction.trace)
             cache_hit = any(item.get("stage") == "cache" and item.get("status") == "hit" for item in extraction.trace)
             cache_rejected = any(
@@ -556,6 +564,8 @@ def _run_policy_eval_rows(
                 "ranker_reason": ranker_event.get("reason"),
                 "veto_called": bool(veto_event),
                 "vetoed": veto_event.get("status") == "vetoed",
+                "trap_vetoed": veto_event.get("stage") == "trap_veto" and veto_event.get("status") == "vetoed",
+                "veto_stage": veto_event.get("stage"),
                 "veto_confidence": veto_event.get("confidence"),
                 "veto_reason": veto_event.get("reason"),
                 "model_confidence": model_event.get("confidence"),
@@ -702,7 +712,7 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.min_ranker_margin = float(defaults["min_ranker_margin"])
     if not getattr(args, "_veto_confidence_below_explicit", False) and "veto_confidence_below" in defaults:
         args.veto_confidence_below = float(defaults["veto_confidence_below"])
-    ranker_policies = {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-plus-llm"}
+    ranker_policies = {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto", "ranker-plus-llm"}
     if policy in ranker_policies and not getattr(args, "ranker", None):
         try:
             args.ranker = default_ranker_path()
@@ -1210,7 +1220,7 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
-        if args.policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
+        if args.policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
             model = args.model or "ranker"
         elif args.policy in {"safe-local", "ranker-plus-llm"}:
             model = args.model or "qwen3:1.7b"
@@ -2696,6 +2706,44 @@ def cmd_ranker_veto_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ranker_trap_veto_report(args: argparse.Namespace) -> int:
+    suites = [_ranker_veto_report_suite(value) for value in args.suite]
+    if not suites:
+        raise CliError("At least one --suite is required", 2)
+    suite_rows = [_ranker_trap_veto_suite_report(suite) for suite in suites]
+    aggregate = _ranker_veto_aggregate(suite_rows, set())
+    gates = _ranker_trap_veto_promotion_gates(
+        suite_rows,
+        aggregate,
+        max_total_coverage_loss=args.max_total_coverage_loss,
+        max_suite_coverage_loss=args.max_suite_coverage_loss,
+        max_known_correct_vetoes=args.max_known_correct_vetoes,
+        max_fpr_regression=args.max_fpr_regression,
+        max_adversarial_false_positive_rate=args.max_adversarial_false_positive_rate,
+    )
+    payload = {
+        "passed": all(gates.values()),
+        "decision": "promote_trap_veto_policy" if all(gates.values()) else "keep_internal_or_opt_in",
+        "suites": suite_rows,
+        "aggregate": aggregate,
+        "gates": gates,
+        "thresholds": {
+            "max_total_coverage_loss": args.max_total_coverage_loss,
+            "max_suite_coverage_loss": args.max_suite_coverage_loss,
+            "max_known_correct_vetoes": args.max_known_correct_vetoes,
+            "max_fpr_regression": args.max_fpr_regression,
+            "max_adversarial_false_positive_rate": args.max_adversarial_false_positive_rate,
+        },
+    }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_ranker_trap_veto_report_markdown(payload), encoding="utf-8", newline="\n")
+    json_out = args.json_out or str(Path(args.out).with_suffix(".json"))
+    Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(json_out).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "json_out": json_out, "passed": payload["passed"], "decision": payload["decision"]})
+    return 0
+
+
 def cmd_ranker_veto_calibrate(args: argparse.Namespace) -> int:
     suites = [_ranker_veto_report_suite(value) for value in args.suite]
     must_keep_keys = _ranker_veto_label_keys(args.must_keep) if args.must_keep else set()
@@ -3056,12 +3104,18 @@ def _ranker_row_abstained(row: dict[str, Any]) -> bool:
 def _ranker_row_vetoed(row: dict[str, Any]) -> bool:
     if bool(row.get("vetoed")):
         return True
+    if bool(row.get("trap_vetoed")):
+        return True
     if row.get("failure_reason") == "safety_veto_low_positive_confidence":
+        return True
+    if str(row.get("failure_reason") or "").startswith("trap_"):
         return True
     if row.get("abstention_reason") == "safety_veto_low_positive_confidence":
         return True
+    if str(row.get("abstention_reason") or "").startswith("trap_"):
+        return True
     for event in row.get("trace") or []:
-        if isinstance(event, dict) and event.get("stage") == "safety_veto" and event.get("status") == "vetoed":
+        if isinstance(event, dict) and event.get("stage") in {"safety_veto", "trap_veto"} and event.get("status") == "vetoed":
             return True
     return False
 
@@ -3071,7 +3125,7 @@ def _ranker_veto_reason(row: dict[str, Any]) -> str | None:
     if reason:
         return str(reason)
     for event in row.get("trace") or []:
-        if isinstance(event, dict) and event.get("stage") == "safety_veto" and event.get("reason"):
+        if isinstance(event, dict) and event.get("stage") in {"safety_veto", "trap_veto"} and event.get("reason"):
             return str(event["reason"])
     return None
 
@@ -3108,6 +3162,44 @@ def _ranker_veto_aggregate(suites: list[dict[str, Any]], must_keep_keys: set[str
         "must_keep_seen": must_keep_seen,
         "must_keep_vetoed": must_keep_vetoed,
         "must_keep_positive_veto_rate": must_keep_vetoed / must_keep_seen if must_keep_seen else 0.0,
+    }
+
+
+def _ranker_trap_veto_suite_report(suite: dict[str, str]) -> dict[str, Any]:
+    report = _ranker_veto_suite_report(suite, set())
+    veto_rows = [row for row in read_jsonl(suite["veto"]) if row.get("field") is not None and _ranker_row_vetoed(row)]
+    report["veto_reasons"] = dict(Counter(_ranker_veto_reason(row) or "unknown" for row in veto_rows))
+    return report
+
+
+def _ranker_trap_veto_promotion_gates(
+    suites: list[dict[str, Any]],
+    aggregate: dict[str, Any],
+    *,
+    max_total_coverage_loss: float,
+    max_suite_coverage_loss: float,
+    max_known_correct_vetoes: int,
+    max_fpr_regression: float,
+    max_adversarial_false_positive_rate: float,
+) -> dict[str, bool]:
+    return {
+        "fpr_not_regressed_everywhere": all(
+            float(row["veto_metrics"].get("false_positive_rate", 1.0)) <= float(row["baseline_metrics"].get("false_positive_rate", 0.0)) + max_fpr_regression
+            for row in suites
+        ),
+        "adversarial_fpr_zero": all(
+            float(row["veto_metrics"].get("false_positive_rate", 1.0)) <= max_adversarial_false_positive_rate
+            for row in suites
+            if "adversarial" in str(row["name"]).lower()
+        ),
+        "total_coverage_loss_within_limit": float(aggregate["coverage_loss"]) <= max_total_coverage_loss,
+        "suite_coverage_loss_within_limit": all(float(row["coverage_loss"]) <= max_suite_coverage_loss for row in suites),
+        "known_correct_vetoes_within_limit": int(aggregate["coverage_lost_to_veto"]) <= max_known_correct_vetoes,
+        "candidate_recall_not_regressed": all(
+            float(row["veto_metrics"].get("candidate_recall_at_k", 0.0)) + 1e-9 >= float(row["baseline_metrics"].get("candidate_recall_at_k", 0.0))
+            for row in suites
+        ),
+        "veto_reason_codes_present": int(aggregate["missing_veto_reason_codes"]) == 0,
     }
 
 
@@ -3197,6 +3289,78 @@ def _ranker_veto_report_markdown(payload: dict[str, Any]) -> str:
             "- `veto_true_positive_count` counts baseline false positives blocked by the veto.",
             "- `veto_false_positive_count` counts known-correct baseline extractions blocked by the veto.",
             "- This report evaluates promotion readiness only; it does not export labels or train models.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ranker_trap_veto_report_markdown(payload: dict[str, Any]) -> str:
+    aggregate = payload["aggregate"]
+    lines = [
+        "# Trap-Only Veto Promotion Readiness",
+        "",
+        f"Decision: `{payload['decision']}`.",
+        f"Passed: `{str(payload['passed']).lower()}`.",
+        "",
+        "## Aggregate",
+        "",
+        f"- suites: `{aggregate['suites']}`",
+        f"- rows: `{aggregate['rows']}`",
+        f"- baseline_coverage_rate: `{aggregate['baseline_coverage_rate']:.6f}`",
+        f"- trap_veto_coverage_rate: `{aggregate['veto_coverage_rate']:.6f}`",
+        f"- coverage_loss: `{aggregate['coverage_loss']:.6f}`",
+        f"- baseline_false_positive_rate: `{aggregate['baseline_false_positive_rate']:.6f}`",
+        f"- trap_veto_false_positive_rate: `{aggregate['veto_false_positive_rate']:.6f}`",
+        f"- baseline_candidate_recall_at_k: `{aggregate['baseline_candidate_recall_at_k']:.6f}`",
+        f"- trap_veto_candidate_recall_at_k: `{aggregate['veto_candidate_recall_at_k']:.6f}`",
+        f"- veto_count: `{aggregate['veto_count']}`",
+        f"- true_veto_positive_count: `{aggregate['veto_true_positive_count']}`",
+        f"- known_correct_vetoes: `{aggregate['coverage_lost_to_veto']}`",
+        f"- false_positives_prevented: `{aggregate['false_positives_prevented']}`",
+        "",
+        "## Gates",
+        "",
+        "| gate | passed |",
+        "|---|---:|",
+    ]
+    for gate, passed in payload["gates"].items():
+        lines.append(f"| {gate} | {str(passed).lower()} |")
+    lines.extend(
+        [
+            "",
+            "## Suites",
+            "",
+            "| suite | rows | baseline coverage | trap coverage | coverage loss | baseline FPR | trap FPR | baseline recall@40 | trap recall@40 | vetoes | saved FPs | known-correct vetoes |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload["suites"]:
+        base = row["baseline_metrics"]
+        veto = row["veto_metrics"]
+        lines.append(
+            f"| {row['name']} | {row['rows']} | "
+            f"{float(base.get('coverage_rate', 0.0)):.6f} | {float(veto.get('coverage_rate', 0.0)):.6f} | {row['coverage_loss']:.6f} | "
+            f"{float(base.get('false_positive_rate', 0.0)):.6f} | {float(veto.get('false_positive_rate', 0.0)):.6f} | "
+            f"{float(base.get('candidate_recall_at_k', 0.0)):.6f} | {float(veto.get('candidate_recall_at_k', 0.0)):.6f} | "
+            f"{row['veto_count']} | {row['false_positives_prevented']} | {row['coverage_lost_to_veto']} |"
+        )
+    lines.extend(["", "## Veto Reasons", ""])
+    for row in payload["suites"]:
+        lines.append(f"### {row['name']}")
+        reasons = row.get("veto_reasons") or {}
+        if reasons:
+            for reason, count in sorted(reasons.items()):
+                lines.append(f"- {reason}: `{count}`")
+        else:
+            lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "- This report evaluates trap-only veto promotion readiness only.",
+            "- Trap-only vetoes are blocking-only and must carry reason codes.",
             "",
         ]
     )
@@ -4816,6 +4980,17 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_veto_report.add_argument("--max-fpr-regression", type=float, default=0.0)
     ranker_veto_report.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
     ranker_veto_report.set_defaults(func=cmd_ranker_veto_report)
+
+    ranker_trap_veto_report = ranker_sub.add_parser("trap-veto-report", help="Compare baseline and trap-only-veto runs for promotion readiness")
+    ranker_trap_veto_report.add_argument("--suite", action="append", required=True, help="Named pair as name=baseline.jsonl=>trap-veto.jsonl")
+    ranker_trap_veto_report.add_argument("--out", required=True, help="Markdown report path")
+    ranker_trap_veto_report.add_argument("--json-out", default=None, help="Optional JSON report path; defaults beside --out")
+    ranker_trap_veto_report.add_argument("--max-total-coverage-loss", type=float, default=0.01)
+    ranker_trap_veto_report.add_argument("--max-suite-coverage-loss", type=float, default=0.03)
+    ranker_trap_veto_report.add_argument("--max-known-correct-vetoes", type=int, default=3)
+    ranker_trap_veto_report.add_argument("--max-fpr-regression", type=float, default=0.0)
+    ranker_trap_veto_report.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    ranker_trap_veto_report.set_defaults(func=cmd_ranker_trap_veto_report)
 
     ranker_veto_calibrate = ranker_sub.add_parser("veto-calibrate", help="Sweep safety-veto thresholds across baseline/veto result pairs")
     ranker_veto_calibrate.add_argument("--suite", action="append", required=True, help="Named pair as name=baseline.jsonl=>veto.jsonl")

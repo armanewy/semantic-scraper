@@ -204,6 +204,8 @@ M19R diagnosed the M19 coverage regression and added `semscrape ranker diff` plu
 
 M20 added an internal opt-in `ranker-local-safe-veto` policy and `semscrape ranker veto-eval`. The veto uses `candidate-ranker-v3` for normal extraction and lets `candidate-ranker-vNext` block accepted candidates only when its positive-confidence score is below the veto threshold. On M20 checks it fixed the 2 oracle-eval false positives, preserved base-holdout coverage at `0.450000`, and kept adversarial FPR at `0.000000`. Defaults are unchanged pending broader validation. See [M20 Safety Veto Report](docs/m20_safety_veto_report.md).
 
+M21 calibrated the broad veto and found it too coverage-destructive for promotion. M22 adds the narrower opt-in `ranker-local-safe-trap-veto` policy and `semscrape ranker trap-veto-report` so high-precision trap rules can be evaluated separately from the broad learned veto. Defaults remain unchanged: `candidate-ranker-v3`, `packs/ecommerce-v1`, and `ranker-local-safe`. See [M21 Veto Distillation Report](docs/m21_veto_distillation_report.md) and [M22 Trap-Only Veto Promotion Trial](docs/m22_trap_only_veto_promotion_trial.md).
+
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
 Public-alpha notes:

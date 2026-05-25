@@ -19,6 +19,7 @@ from .ranker import (
     RankerLocator,
     runtime_candidate_row,
     safe_policy_gate_reason,
+    trap_only_veto_event,
 )
 from .validators import extract_value, validate_value
 
@@ -75,6 +76,19 @@ POLICY_DEFAULTS = {
         "min_ranker_margin": 0.008,
         "max_ranker_penalties": 0,
         "veto_confidence_below": 0.60,
+    },
+    "ranker-local-safe-trap-veto": {
+        "strict": True,
+        "use_llm": False,
+        "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
+        "min_confidence": 0.78,
+        "min_margin": 0.18,
+        "min_validator_confidence": 0.75,
+        "min_ranker_confidence": 0.90,
+        "min_ranker_margin": 0.008,
+        "max_ranker_penalties": 0,
+        "veto_confidence_below": 0.34,
     },
     "ranker-plus-llm": {
         "strict": True,
@@ -487,6 +501,30 @@ def _safety_veto_event(
     veto_ranker_path: str | None,
     veto_confidence_below: float,
 ) -> dict | None:
+    if policy == "ranker-local-safe-trap-veto":
+        veto_ranker = None
+        if veto_ranker_path:
+            try:
+                veto_ranker = CandidateRanker.load(veto_ranker_path)
+            except RankerError as exc:
+                return {
+                    "stage": "trap_veto",
+                    "status": "error",
+                    "candidate_id": chosen.candidate.id,
+                    "reason": str(exc),
+                    "model": veto_ranker_path,
+                    "mode": "trap_only",
+                }
+        event = trap_only_veto_event(
+            field,
+            chosen,
+            ranked,
+            veto_ranker=veto_ranker,
+            field_thresholds={"first_content_link": veto_confidence_below},
+        )
+        if event and veto_ranker_path:
+            event["model"] = veto_ranker_path
+        return event
     if policy != "ranker-local-safe-veto":
         return None
     if not veto_ranker_path:
@@ -786,7 +824,7 @@ def extract_field(
             min_validator_confidence=min_validator_confidence,
             enforce_margin=True,
         )
-        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto"} else None
+        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"} else None
         if decision.ok and safe_gate_reason is None:
             veto_event = _safety_veto_event(
                 field,
@@ -813,7 +851,7 @@ def extract_field(
             }
         )
         ranker_abstention_reason = None
-        if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-plus-llm"}:
+        if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto", "ranker-plus-llm"}:
             ranker_attempt = _call_ranker(
                 field,
                 ranked,
@@ -827,7 +865,7 @@ def extract_field(
             if ranker_attempt.error:
                 trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
                 ranker_abstention_reason = "ranker_error"
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
             elif ranker_attempt.chosen is None:
                 ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
@@ -841,7 +879,7 @@ def extract_field(
                         "latency_ms": ranker_attempt.latency_ms,
                     }
                 )
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
                 if not _ranker_abstention_allows_model(ranker_abstention_reason):
                     return _abstention(
@@ -871,9 +909,7 @@ def extract_field(
                         "latency_ms": ranker_attempt.latency_ms,
                     }
                 )
-                safe_ranker_reason = (
-                    safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto"} else None
-                )
+                safe_ranker_reason = safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"} else None
                 if (
                     ranker_decision.ok
                     and safe_ranker_reason is None
@@ -904,7 +940,7 @@ def extract_field(
                     )
                 reason = safe_ranker_reason or ranker_decision.reason or "low_ranker_confidence"
                 trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
                     return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
                 return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
 

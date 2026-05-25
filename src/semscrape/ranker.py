@@ -67,6 +67,12 @@ CATEGORICAL_FEATURES = (
     "aria_role",
 )
 
+TRAP_ONLY_VETO_FIELD_THRESHOLDS: dict[str, float] = {
+    # M21 found this narrow learned veto caught oracle false positives while
+    # avoiding the broad veto's known-correct coverage loss.
+    "first_content_link": 0.34,
+}
+
 
 class RankerError(RuntimeError):
     pass
@@ -1091,6 +1097,129 @@ def safe_policy_gate_reason(field: FieldSpec, chosen: RankedCandidate, ranked: l
     row = runtime_candidate_row(field, chosen, rank, top_k=max(1, len(ranked)))
     _annotate_runtime_section_gate(field, row, ranked)
     return _field_specific_gate_reason(row)
+
+
+def trap_only_veto_event(
+    field: FieldSpec,
+    chosen: RankedCandidate,
+    ranked: list[RankedCandidate],
+    *,
+    veto_ranker: CandidateRanker | None = None,
+    field_thresholds: dict[str, float] | None = None,
+) -> dict[str, Any] | None:
+    """Return a high-precision trap-only veto event for an accepted candidate."""
+
+    rank = next((index for index, item in enumerate(ranked, start=1) if item.candidate.id == chosen.candidate.id), 1)
+    row = runtime_candidate_row(field, chosen, rank, top_k=max(1, len(ranked)))
+    _annotate_runtime_section_gate(field, row, ranked)
+    rule_reason = _trap_only_rule_reason(row)
+    if rule_reason:
+        return {
+            "stage": "trap_veto",
+            "status": "vetoed",
+            "candidate_id": chosen.candidate.id,
+            "reason": rule_reason,
+            "mode": "trap_only",
+            "confidence": None,
+            "threshold": None,
+        }
+
+    threshold = _trap_only_threshold_for_row(row, field_thresholds or TRAP_ONLY_VETO_FIELD_THRESHOLDS)
+    if threshold is None:
+        return None
+    if veto_ranker is None:
+        return {
+            "stage": "trap_veto",
+            "status": "passed",
+            "candidate_id": chosen.candidate.id,
+            "reason": "trap_only_no_learned_veto_for_field",
+            "mode": "trap_only",
+            "confidence": None,
+            "threshold": threshold,
+        }
+    confidence = veto_ranker.confidence_row(row)
+    if confidence < threshold:
+        return {
+            "stage": "trap_veto",
+            "status": "vetoed",
+            "candidate_id": chosen.candidate.id,
+            "confidence": confidence,
+            "threshold": threshold,
+            "reason": _trap_only_learned_reason(row),
+            "mode": "trap_only",
+        }
+    return {
+        "stage": "trap_veto",
+        "status": "passed",
+        "candidate_id": chosen.candidate.id,
+        "confidence": confidence,
+        "threshold": threshold,
+        "reason": "trap_only_veto_passed",
+        "mode": "trap_only",
+    }
+
+
+def _trap_only_threshold_for_row(row: dict[str, Any], thresholds: dict[str, float]) -> float | None:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    for name, threshold in thresholds.items():
+        key = name.lower().strip()
+        if not key:
+            continue
+        if key == field or key in prompt:
+            return float(threshold)
+    if _is_first_content_link_prompt(prompt, field):
+        return float(thresholds.get("first_content_link", 0.34))
+    return None
+
+
+def _trap_only_learned_reason(row: dict[str, Any]) -> str:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    if _is_first_content_link_prompt(prompt, field):
+        return "trap_first_content_link_low_positive_confidence"
+    return "trap_only_low_positive_confidence"
+
+
+def _trap_only_rule_reason(row: dict[str, Any]) -> str | None:
+    field = str(row.get("field") or "").lower()
+    field_type = str(row.get("field_type") or "").lower()
+    description = str(row.get("field_description") or "").lower()
+    hints = " ".join(str(item).lower() for item in (row.get("field_hints") or []))
+    prompt = " ".join([field, field_type, description, hints])
+    selector = str(row.get("candidate_selector") or "").lower()
+    tag = str(row.get("candidate_tag") or "").lower()
+    value = str(row.get("candidate_value") or "").strip()
+    value_lower = value.lower()
+    context = str(row.get("candidate_context") or "").lower()
+
+    if _is_first_content_link_prompt(prompt, field):
+        anchor_position = _last_nth_of_type(selector, "a")
+        if anchor_position is not None and anchor_position != 1:
+            return "trap_first_content_link_ordinal"
+
+    if (field_type == "date" or "published" in prompt) and _prompt_wants_published_date(prompt) and _has_negative_date_role(context, value_lower):
+        return "trap_updated_date_for_published_date"
+
+    if _is_title_prompt(prompt, field):
+        if _is_tag_or_category_title(value_lower, selector, context):
+            return "trap_tag_cloud_title"
+        if any(term in context for term in {"sponsored", "recommended", "related", "also viewed", "advertisement"}):
+            return "trap_related_or_recommended_title"
+
+    if field_type == "price" and any(term in context for term in {"shipping", "delivery", "tax", "add-on", "addon", "training fee", "workshop"}):
+        return "trap_shipping_or_addon_price"
+
+    if _is_table_data_prompt(prompt, field) and tag not in {"td", "th", "a"}:
+        return "trap_table_context_mismatch"
+
+    return None
 
 
 def _annotate_runtime_section_gate(field: FieldSpec, row: dict[str, Any], ranked: list[RankedCandidate]) -> None:

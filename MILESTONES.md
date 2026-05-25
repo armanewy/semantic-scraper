@@ -2315,3 +2315,68 @@ Report:
 ```text
 docs/m21_veto_distillation_report.md
 ```
+
+## M22: Trap-Only Veto Promotion Trial
+
+Status: implementation completed as an opt-in promotion-trial policy.
+
+Question: Can the narrow M21 trap signal reduce false positives with negligible coverage loss, without promoting the broad veto?
+
+Implemented:
+
+```text
+ranker-local-safe-trap-veto
+trap_only_veto_event(...)
+explicit trap-only veto reason codes
+M21 first_content_link threshold default: 0.34
+semscrape ranker trap-veto-report
+tests/test_m22_trap_veto.py
+docs/m22_trap_only_veto_promotion_trial.md
+```
+
+Trap-only deterministic veto families:
+
+```text
+trap_first_content_link_ordinal
+trap_updated_date_for_published_date
+trap_tag_cloud_title
+trap_related_or_recommended_title
+trap_shipping_or_addon_price
+trap_table_context_mismatch
+```
+
+Smoke validation on `corpus/repro_minimized/manifest.yml`:
+
+```text
+baseline coverage_rate:       0.585714
+trap_veto coverage_rate:      0.585714
+coverage_loss:                0.000000
+baseline false_positive_rate: 0.000000
+trap_veto false_positive_rate: 0.000000
+candidate_recall@40:          1.000000
+trap_veto_report:             passed
+```
+
+Verification:
+
+```text
+python -m ruff check .
+python -m pytest -q
+```
+
+Result:
+
+```text
+117 passed
+```
+
+Decision:
+
+```text
+Do not change defaults from this implementation alone.
+Keep ranker-local-safe-trap-veto opt-in until accumulated-suite and fresh holdout promotion checks pass.
+Defaults remain:
+  candidate-ranker-v3
+  packs/ecommerce-v1
+  ranker-local-safe
+```
