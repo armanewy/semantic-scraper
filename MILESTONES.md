@@ -2380,3 +2380,76 @@ Defaults remain:
   packs/ecommerce-v1
   ranker-local-safe
 ```
+
+## M22E: Trap-Only Veto Evaluation
+
+Status: executed; promotion blocked.
+
+Question: Does `ranker-local-safe-trap-veto` reduce false positives with negligible coverage loss across the accumulated suites and a fresh mini-holdout?
+
+Aggregate result:
+
+```text
+suites:                         11
+rows:                           1093
+baseline_coverage_rate:         0.667886
+trap_veto_coverage_rate:        0.664227
+coverage_loss:                  0.003660
+baseline_false_positive_rate:   0.004574
+trap_veto_false_positive_rate:  0.004574
+candidate_recall@40:            0.988997 -> 0.988997
+veto_count:                     4
+true_veto_positive_count:       0
+known_correct_vetoes:           4
+false_positives_prevented:      0
+must_keep_positive_veto_rate:   0.000000
+must_veto_block_rate:           1.000000
+```
+
+Passed gates:
+
+```text
+FPR did not regress
+adversarial FPR remained 0
+aggregate coverage loss stayed below 1%
+must-keep veto rate stayed 0
+must-veto rows were blocked
+candidate recall did not regress
+all vetoes had reason codes
+```
+
+Failed gates:
+
+```text
+suite_coverage_loss_within_limit
+known_correct_vetoes_within_limit
+```
+
+Primary regression:
+
+```text
+original_external coverage:
+  baseline:   0.800000
+  trap-veto:  0.666667
+
+reason:
+  trap_shipping_or_addon_price vetoed 2 known-correct rows
+```
+
+Decision:
+
+```text
+Do not promote ranker-local-safe-trap-veto.
+Keep it internal/opt-in.
+Defaults remain:
+  candidate-ranker-v3
+  packs/ecommerce-v1
+  ranker-local-safe
+```
+
+Report:
+
+```text
+docs/m22e_trap_only_veto_evaluation_report.md
+runs/m22e/trap-veto-promotion-report.md
+```

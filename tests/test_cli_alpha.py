@@ -300,7 +300,7 @@ def test_ranker_veto_report_checks_promotion_gates(tmp_path, capsys) -> None:
         [
             _metric_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong"),
             _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
-            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(40)],
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(120)],
         ],
     )
     _write_rows(
@@ -308,7 +308,7 @@ def test_ranker_veto_report_checks_promotion_gates(tmp_path, capsys) -> None:
         [
             _metric_row("case_a", "price", correct=False, status="abstained", reason="safety_veto_low_positive_confidence", vetoed=True),
             _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
-            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(40)],
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(120)],
         ],
     )
     _write_rows(must_keep, [{"key": "case_b||title", "field": "title"}])
@@ -335,6 +335,58 @@ def test_ranker_veto_report_checks_promotion_gates(tmp_path, capsys) -> None:
     report_text = report.read_text(encoding="utf-8")
     assert "oracle_false_positives_prevented: `1`" in report_text
     assert "| fpr_not_regressed_everywhere | true |" in report_text
+
+
+def test_ranker_trap_veto_report_checks_must_keep_and_must_veto(tmp_path, capsys) -> None:
+    baseline = tmp_path / "baseline.jsonl"
+    trap = tmp_path / "trap.jsonl"
+    must_keep = tmp_path / "must_keep.jsonl"
+    must_veto = tmp_path / "must_veto.jsonl"
+    report = tmp_path / "trap-veto-report.md"
+    _write_rows(
+        baseline,
+        [
+            _metric_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong"),
+            _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(120)],
+        ],
+    )
+    _write_rows(
+        trap,
+        [
+            _metric_row("case_a", "price", correct=False, status="abstained", reason="trap_shipping_or_addon_price", vetoed=True),
+            _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(120)],
+        ],
+    )
+    _write_rows(must_keep, [{"key": "case_b||title", "field": "title"}])
+    _write_rows(must_veto, [{"key": "case_a||price", "field": "price"}])
+
+    assert (
+        main(
+            [
+                "ranker",
+                "trap-veto-report",
+                "--suite",
+                f"oracle={baseline}=>{trap}",
+                "--must-keep",
+                str(must_keep),
+                "--must-veto",
+                str(must_veto),
+                "--out",
+                str(report),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["passed"] is True
+    assert payload["decision"] == "promote_trap_veto_policy"
+    report_text = report.read_text(encoding="utf-8")
+    assert "must_keep_positive_veto_rate: `0.000000`" in report_text
+    assert "must_veto_block_rate: `1.000000`" in report_text
+    assert "| must_veto_block_rate_within_limit | true |" in report_text
 
 
 def test_ranker_veto_calibrate_finds_narrow_threshold(tmp_path, capsys) -> None:
