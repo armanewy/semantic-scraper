@@ -31,6 +31,15 @@ def test_rating_validator_rejects_review_count_as_rating():
     assert "rating outside 0-5 range" in result.hard_disqualifiers
 
 
+def test_rating_validation_preserves_parsed_value():
+    field = FieldSpec(name="rating", kind="number")
+    result = validate_value(field, "4.7")
+
+    assert result.parsed is not None
+    assert result.parsed.kind == "number"
+    assert result.parsed.amount == Decimal("4.7")
+
+
 def test_price_parse_result_captures_monthly_amount_and_currency():
     parsed = parse_price_value("$29 / mo")
 

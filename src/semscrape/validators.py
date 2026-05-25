@@ -331,8 +331,8 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
         if "rating" in field.name.lower():
             match = NUMBER_RE.search(normalized)
             if match:
-                parsed = float(match.group(0).replace(",", "."))
-                if parsed < 0 or parsed > 5:
+                rating_value = float(match.group(0).replace(",", "."))
+                if rating_value < 0 or rating_value > 5:
                     hard_disqualifiers.append("rating outside 0-5 range")
 
     elif field.kind == "date":
