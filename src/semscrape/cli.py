@@ -2656,6 +2656,293 @@ def cmd_ranker_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ranker_veto_report(args: argparse.Namespace) -> int:
+    suites = [_ranker_veto_report_suite(value) for value in args.suite]
+    if not suites:
+        raise CliError("At least one --suite is required", 2)
+    must_keep_keys = _ranker_veto_must_keep_keys(args.must_keep) if args.must_keep else set()
+    suite_rows = [_ranker_veto_suite_report(suite, must_keep_keys) for suite in suites]
+    aggregate = _ranker_veto_aggregate(suite_rows, must_keep_keys)
+    gates = _ranker_veto_promotion_gates(
+        suite_rows,
+        aggregate,
+        max_total_coverage_loss=args.max_total_coverage_loss,
+        max_suite_coverage_loss=args.max_suite_coverage_loss,
+        max_must_keep_veto_rate=args.max_must_keep_veto_rate,
+        max_fpr_regression=args.max_fpr_regression,
+        max_adversarial_false_positive_rate=args.max_adversarial_false_positive_rate,
+    )
+    decision = "promote_recommended_high_precision" if all(gates.values()) else "keep_opt_in_internal"
+    payload = {
+        "passed": all(gates.values()),
+        "decision": decision,
+        "suites": suite_rows,
+        "aggregate": aggregate,
+        "gates": gates,
+        "thresholds": {
+            "max_total_coverage_loss": args.max_total_coverage_loss,
+            "max_suite_coverage_loss": args.max_suite_coverage_loss,
+            "max_must_keep_veto_rate": args.max_must_keep_veto_rate,
+            "max_fpr_regression": args.max_fpr_regression,
+            "max_adversarial_false_positive_rate": args.max_adversarial_false_positive_rate,
+        },
+    }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_ranker_veto_report_markdown(payload), encoding="utf-8", newline="\n")
+    json_out = args.json_out or str(Path(args.out).with_suffix(".json"))
+    Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(json_out).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "json_out": json_out, "passed": payload["passed"], "decision": decision})
+    return 0
+
+
+def _ranker_veto_report_suite(value: str) -> dict[str, str]:
+    if "=" not in value:
+        raise CliError("--suite must use name=baseline.jsonl=>veto.jsonl", 2)
+    name, paths = value.split("=", 1)
+    if "=>" in paths:
+        parts = paths.split("=>", 1)
+    elif "|" in paths:
+        parts = paths.split("|", 1)
+    else:
+        parts = paths.split(":", 1)
+    if len(parts) != 2 or not name.strip() or not parts[0].strip() or not parts[1].strip():
+        raise CliError("--suite must use name=baseline.jsonl=>veto.jsonl", 2)
+    return {"name": name.strip(), "baseline": parts[0].strip(), "veto": parts[1].strip()}
+
+
+def _ranker_veto_must_keep_keys(path: str) -> set[str]:
+    rows = read_jsonl(path)
+    keys: set[str] = set()
+    for row in rows:
+        key = row.get("key")
+        if key:
+            keys.add(str(key))
+        else:
+            keys.add(_ranker_diff_key(row))
+    return keys
+
+
+def _ranker_veto_suite_report(suite: dict[str, str], must_keep_keys: set[str]) -> dict[str, Any]:
+    baseline_rows = [row for row in read_jsonl(suite["baseline"]) if row.get("field") is not None]
+    veto_rows = [row for row in read_jsonl(suite["veto"]) if row.get("field") is not None]
+    baseline_by_key = {_ranker_diff_key(row): row for row in baseline_rows}
+    veto_by_key = {_ranker_diff_key(row): row for row in veto_rows}
+    keys = sorted(set(baseline_by_key) | set(veto_by_key))
+    saved_fps = 0
+    fpr_regressions = 0
+    coverage_lost_correct = 0
+    coverage_lost_to_veto = 0
+    veto_count = 0
+    veto_true_positive_count = 0
+    veto_false_positive_count = 0
+    missing_reason_codes = 0
+    must_keep_seen = 0
+    must_keep_vetoed = 0
+    for key in keys:
+        baseline = baseline_by_key.get(key)
+        veto = veto_by_key.get(key)
+        if veto and _ranker_row_vetoed(veto):
+            veto_count += 1
+            if not _ranker_veto_reason(veto):
+                missing_reason_codes += 1
+        if baseline and veto and bool(baseline.get("false_positive")) and not bool(veto.get("false_positive")):
+            saved_fps += 1
+            if _ranker_row_vetoed(veto) or _ranker_row_abstained(veto):
+                veto_true_positive_count += 1
+        if baseline and veto and bool(veto.get("false_positive")) and not bool(baseline.get("false_positive")):
+            fpr_regressions += 1
+        if baseline and veto and bool(baseline.get("correct")) and _ranker_row_abstained(veto):
+            coverage_lost_correct += 1
+            if _ranker_row_vetoed(veto):
+                coverage_lost_to_veto += 1
+                veto_false_positive_count += 1
+        if key in must_keep_keys:
+            must_keep_seen += 1
+            if veto and _ranker_row_vetoed(veto):
+                must_keep_vetoed += 1
+    baseline_metrics = _first_metrics(baseline_rows)
+    veto_metrics = _first_metrics(veto_rows)
+    rows = max(int(veto_metrics.get("rows") or len(veto_rows)), len(veto_rows), 1)
+    coverage_loss = max(0.0, float(baseline_metrics.get("coverage_rate", 0.0)) - float(veto_metrics.get("coverage_rate", 0.0)))
+    return {
+        "name": suite["name"],
+        "baseline": suite["baseline"],
+        "veto": suite["veto"],
+        "rows": rows,
+        "baseline_metrics": baseline_metrics,
+        "veto_metrics": veto_metrics,
+        "coverage_loss": coverage_loss,
+        "fpr_delta": float(veto_metrics.get("false_positive_rate", 0.0)) - float(baseline_metrics.get("false_positive_rate", 0.0)),
+        "recall_delta": float(veto_metrics.get("candidate_recall_at_k", 0.0)) - float(baseline_metrics.get("candidate_recall_at_k", 0.0)),
+        "veto_count": veto_count,
+        "veto_true_positive_count": veto_true_positive_count,
+        "veto_false_positive_count": veto_false_positive_count,
+        "false_positives_prevented": saved_fps,
+        "false_positive_regressions": fpr_regressions,
+        "coverage_lost_correct": coverage_lost_correct,
+        "coverage_lost_to_veto": coverage_lost_to_veto,
+        "missing_veto_reason_codes": missing_reason_codes,
+        "must_keep_seen": must_keep_seen,
+        "must_keep_vetoed": must_keep_vetoed,
+        "must_keep_positive_veto_rate": must_keep_vetoed / must_keep_seen if must_keep_seen else 0.0,
+    }
+
+
+def _ranker_row_abstained(row: dict[str, Any]) -> bool:
+    return bool(row.get("abstained")) or row.get("status") == "abstained"
+
+
+def _ranker_row_vetoed(row: dict[str, Any]) -> bool:
+    if bool(row.get("vetoed")):
+        return True
+    if row.get("failure_reason") == "safety_veto_low_positive_confidence":
+        return True
+    if row.get("abstention_reason") == "safety_veto_low_positive_confidence":
+        return True
+    for event in row.get("trace") or []:
+        if isinstance(event, dict) and event.get("stage") == "safety_veto" and event.get("status") == "vetoed":
+            return True
+    return False
+
+
+def _ranker_veto_reason(row: dict[str, Any]) -> str | None:
+    reason = row.get("veto_reason") or row.get("abstention_reason") or row.get("failure_reason")
+    if reason:
+        return str(reason)
+    for event in row.get("trace") or []:
+        if isinstance(event, dict) and event.get("stage") == "safety_veto" and event.get("reason"):
+            return str(event["reason"])
+    return None
+
+
+def _ranker_veto_aggregate(suites: list[dict[str, Any]], must_keep_keys: set[str]) -> dict[str, Any]:
+    total_rows = sum(int(row["rows"]) for row in suites)
+    baseline_extracted = sum(float(row["baseline_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]) for row in suites)
+    veto_extracted = sum(float(row["veto_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]) for row in suites)
+    baseline_fps = sum(float(row["baseline_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]) for row in suites)
+    veto_fps = sum(float(row["veto_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]) for row in suites)
+    baseline_recall_rows = sum(float(row["baseline_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"]) for row in suites)
+    veto_recall_rows = sum(float(row["veto_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"]) for row in suites)
+    must_keep_seen = sum(int(row["must_keep_seen"]) for row in suites)
+    must_keep_vetoed = sum(int(row["must_keep_vetoed"]) for row in suites)
+    return {
+        "suites": len(suites),
+        "rows": total_rows,
+        "baseline_coverage_rate": baseline_extracted / total_rows if total_rows else 0.0,
+        "veto_coverage_rate": veto_extracted / total_rows if total_rows else 0.0,
+        "coverage_loss": max(0.0, (baseline_extracted - veto_extracted) / total_rows) if total_rows else 0.0,
+        "baseline_false_positive_rate": baseline_fps / total_rows if total_rows else 0.0,
+        "veto_false_positive_rate": veto_fps / total_rows if total_rows else 0.0,
+        "baseline_candidate_recall_at_k": baseline_recall_rows / total_rows if total_rows else 0.0,
+        "veto_candidate_recall_at_k": veto_recall_rows / total_rows if total_rows else 0.0,
+        "veto_count": sum(int(row["veto_count"]) for row in suites),
+        "veto_true_positive_count": sum(int(row["veto_true_positive_count"]) for row in suites),
+        "veto_false_positive_count": sum(int(row["veto_false_positive_count"]) for row in suites),
+        "coverage_lost_to_veto": sum(int(row["coverage_lost_to_veto"]) for row in suites),
+        "false_positives_prevented": sum(int(row["false_positives_prevented"]) for row in suites),
+        "oracle_false_positives_prevented": sum(int(row["false_positives_prevented"]) for row in suites if "oracle" in str(row["name"]).lower()),
+        "false_positive_regressions": sum(int(row["false_positive_regressions"]) for row in suites),
+        "missing_veto_reason_codes": sum(int(row["missing_veto_reason_codes"]) for row in suites),
+        "must_keep_total": len(must_keep_keys),
+        "must_keep_seen": must_keep_seen,
+        "must_keep_vetoed": must_keep_vetoed,
+        "must_keep_positive_veto_rate": must_keep_vetoed / must_keep_seen if must_keep_seen else 0.0,
+    }
+
+
+def _ranker_veto_promotion_gates(
+    suites: list[dict[str, Any]],
+    aggregate: dict[str, Any],
+    *,
+    max_total_coverage_loss: float,
+    max_suite_coverage_loss: float,
+    max_must_keep_veto_rate: float,
+    max_fpr_regression: float,
+    max_adversarial_false_positive_rate: float,
+) -> dict[str, bool]:
+    fpr_not_regressed = all(float(row["veto_metrics"].get("false_positive_rate", 1.0)) <= float(row["baseline_metrics"].get("false_positive_rate", 0.0)) + max_fpr_regression for row in suites)
+    recall_not_regressed = all(float(row["veto_metrics"].get("candidate_recall_at_k", 0.0)) + 1e-9 >= float(row["baseline_metrics"].get("candidate_recall_at_k", 0.0)) for row in suites)
+    adversarial_rows = [row for row in suites if "adversarial" in str(row["name"]).lower()]
+    oracle_rows = [row for row in suites if "oracle" in str(row["name"]).lower()]
+    return {
+        "fpr_not_regressed_everywhere": fpr_not_regressed,
+        "adversarial_fpr_zero": all(float(row["veto_metrics"].get("false_positive_rate", 1.0)) <= max_adversarial_false_positive_rate for row in adversarial_rows),
+        "oracle_fpr_improved_or_equal": all(float(row["veto_metrics"].get("false_positive_rate", 1.0)) <= float(row["baseline_metrics"].get("false_positive_rate", 0.0)) for row in oracle_rows),
+        "total_coverage_loss_within_limit": float(aggregate["coverage_loss"]) <= max_total_coverage_loss,
+        "suite_coverage_loss_within_limit": all(float(row["coverage_loss"]) <= max_suite_coverage_loss for row in suites),
+        "must_keep_positive_veto_rate_within_limit": float(aggregate["must_keep_positive_veto_rate"]) <= max_must_keep_veto_rate,
+        "candidate_recall_not_regressed": recall_not_regressed,
+        "veto_reason_codes_present": int(aggregate["missing_veto_reason_codes"]) == 0,
+    }
+
+
+def _ranker_veto_report_markdown(payload: dict[str, Any]) -> str:
+    aggregate = payload["aggregate"]
+    lines = [
+        "# Safety Veto Promotion Readiness",
+        "",
+        f"Decision: `{payload['decision']}`.",
+        f"Passed: `{str(payload['passed']).lower()}`.",
+        "",
+        "## Aggregate",
+        "",
+        f"- suites: `{aggregate['suites']}`",
+        f"- rows: `{aggregate['rows']}`",
+        f"- baseline_coverage_rate: `{aggregate['baseline_coverage_rate']:.6f}`",
+        f"- veto_coverage_rate: `{aggregate['veto_coverage_rate']:.6f}`",
+        f"- coverage_loss: `{aggregate['coverage_loss']:.6f}`",
+        f"- baseline_false_positive_rate: `{aggregate['baseline_false_positive_rate']:.6f}`",
+        f"- veto_false_positive_rate: `{aggregate['veto_false_positive_rate']:.6f}`",
+        f"- baseline_candidate_recall_at_k: `{aggregate['baseline_candidate_recall_at_k']:.6f}`",
+        f"- veto_candidate_recall_at_k: `{aggregate['veto_candidate_recall_at_k']:.6f}`",
+        f"- veto_count: `{aggregate['veto_count']}`",
+        f"- veto_true_positive_count: `{aggregate['veto_true_positive_count']}`",
+        f"- veto_false_positive_count: `{aggregate['veto_false_positive_count']}`",
+        f"- coverage_lost_to_veto: `{aggregate['coverage_lost_to_veto']}`",
+        f"- oracle_false_positives_prevented: `{aggregate['oracle_false_positives_prevented']}`",
+        f"- must_keep_positive_veto_rate: `{aggregate['must_keep_positive_veto_rate']:.6f}`",
+        "",
+        "## Gates",
+        "",
+        "| gate | passed |",
+        "|---|---:|",
+    ]
+    for gate, passed in payload["gates"].items():
+        lines.append(f"| {gate} | {str(passed).lower()} |")
+    lines.extend(
+        [
+            "",
+            "## Suites",
+            "",
+            "| suite | rows | baseline coverage | veto coverage | coverage loss | baseline FPR | veto FPR | baseline recall@40 | veto recall@40 | vetoes | saved FPs | lost TPs | must-keep veto rate |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload["suites"]:
+        base = row["baseline_metrics"]
+        veto = row["veto_metrics"]
+        lines.append(
+            f"| {row['name']} | {row['rows']} | "
+            f"{float(base.get('coverage_rate', 0.0)):.6f} | {float(veto.get('coverage_rate', 0.0)):.6f} | {row['coverage_loss']:.6f} | "
+            f"{float(base.get('false_positive_rate', 0.0)):.6f} | {float(veto.get('false_positive_rate', 0.0)):.6f} | "
+            f"{float(base.get('candidate_recall_at_k', 0.0)):.6f} | {float(veto.get('candidate_recall_at_k', 0.0)):.6f} | "
+            f"{row['veto_count']} | {row['false_positives_prevented']} | {row['coverage_lost_correct']} | {row['must_keep_positive_veto_rate']:.6f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "- `veto_true_positive_count` counts baseline false positives blocked by the veto.",
+            "- `veto_false_positive_count` counts known-correct baseline extractions blocked by the veto.",
+            "- This report evaluates promotion readiness only; it does not export labels or train models.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _ranker_diff_key(row: dict[str, Any]) -> str:
     return "|".join(
         [
@@ -4257,6 +4544,18 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_veto_eval.add_argument("--min-validator-confidence", type=float, default=0.70)
     ranker_veto_eval.add_argument("--max-ranker-penalties", type=int, default=0)
     ranker_veto_eval.set_defaults(func=cmd_ranker_veto_eval)
+
+    ranker_veto_report = ranker_sub.add_parser("veto-report", help="Compare baseline and safety-veto runs for promotion readiness")
+    ranker_veto_report.add_argument("--suite", action="append", required=True, help="Named pair as name=baseline.jsonl=>veto.jsonl")
+    ranker_veto_report.add_argument("--must-keep", default=None, help="Optional must-keep positive JSONL")
+    ranker_veto_report.add_argument("--out", required=True, help="Markdown report path")
+    ranker_veto_report.add_argument("--json-out", default=None, help="Optional JSON report path; defaults beside --out")
+    ranker_veto_report.add_argument("--max-total-coverage-loss", type=float, default=0.03)
+    ranker_veto_report.add_argument("--max-suite-coverage-loss", type=float, default=0.05)
+    ranker_veto_report.add_argument("--max-must-keep-veto-rate", type=float, default=0.02)
+    ranker_veto_report.add_argument("--max-fpr-regression", type=float, default=0.0)
+    ranker_veto_report.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    ranker_veto_report.set_defaults(func=cmd_ranker_veto_report)
 
     ranker_calibrate = ranker_sub.add_parser("calibrate", help="Sweep ranker confidence/margin thresholds")
     ranker_calibrate.add_argument("input")

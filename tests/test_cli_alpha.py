@@ -290,6 +290,53 @@ def test_ranker_veto_eval_blocks_low_confidence_candidate(tmp_path, capsys) -> N
     assert row["false_positive"] is False
 
 
+def test_ranker_veto_report_checks_promotion_gates(tmp_path, capsys) -> None:
+    baseline = tmp_path / "baseline.jsonl"
+    veto = tmp_path / "veto.jsonl"
+    must_keep = tmp_path / "must_keep.jsonl"
+    report = tmp_path / "veto-report.md"
+    _write_rows(
+        baseline,
+        [
+            _metric_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong"),
+            _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(40)],
+        ],
+    )
+    _write_rows(
+        veto,
+        [
+            _metric_row("case_a", "price", correct=False, status="abstained", reason="safety_veto_low_positive_confidence", vetoed=True),
+            _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+            *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(40)],
+        ],
+    )
+    _write_rows(must_keep, [{"key": "case_b||title", "field": "title"}])
+
+    assert (
+        main(
+            [
+                "ranker",
+                "veto-report",
+                "--suite",
+                f"oracle={baseline}=>{veto}",
+                "--must-keep",
+                str(must_keep),
+                "--out",
+                str(report),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["passed"] is True
+    assert payload["decision"] == "promote_recommended_high_precision"
+    report_text = report.read_text(encoding="utf-8")
+    assert "oracle_false_positives_prevented: `1`" in report_text
+    assert "| fpr_not_regressed_everywhere | true |" in report_text
+
+
 def test_alpha_run_collects_untrusted_evidence_without_training_export(tmp_path, capsys) -> None:
     spec = tmp_path / "spec.yml"
     html = tmp_path / "page.html"
@@ -550,6 +597,40 @@ def _eval_row(
         "validator_penalties": [],
         "hard_disqualifiers": [],
     }
+
+
+def _metric_row(
+    case_id: str,
+    field: str,
+    *,
+    correct: bool,
+    false_positive: bool = False,
+    status: str,
+    candidate_id: str | None = None,
+    reason: str | None = None,
+    vetoed: bool = False,
+) -> dict:
+    row = _summary_row(field, abstained=status == "abstained")
+    row.update(
+        {
+            "case_id": case_id,
+            "category": "test",
+            "status": status,
+            "correct": correct,
+            "validated": status == "extracted" and not false_positive,
+            "false_positive": false_positive,
+            "model_choice_correct": correct,
+            "model_candidate_id": candidate_id,
+            "proposed_candidate_id": candidate_id,
+            "failure_reason": reason,
+            "abstention_reason": reason,
+            "ranker_confidence": 0.95 if status == "extracted" else 0.4,
+            "ranker_margin": 0.1,
+            "vetoed": vetoed,
+            "veto_reason": reason if vetoed else None,
+        }
+    )
+    return row
 
 
 def _review_queue_row(

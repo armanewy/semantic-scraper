@@ -2138,3 +2138,89 @@ Report:
 ```text
 docs/m20_safety_veto_report.md
 ```
+
+## M20P: Safety Veto Promotion Readiness
+
+Status: completed, promotion blocked.
+
+Question: Should the oracle-trained safety-veto layer become part of the public default policy, or remain opt-in/internal?
+
+Evaluation:
+
+```text
+baseline policy: ranker-local-safe
+veto policy:    ranker-local-safe-veto
+baseline ranker: candidate-ranker-v3
+veto ranker:     candidate-ranker-vNext
+veto threshold:  positive confidence below 0.60
+```
+
+Suites:
+
+```text
+base holdout
+adversarial holdout
+OOD holdout
+repro minimized regressions
+holdout sources from the harvester registry
+full M17S harvester-scale registry
+M19 oracle eval
+```
+
+Aggregate result:
+
+```text
+suites:                         7
+rows:                           722
+baseline_coverage_rate:         0.639889
+veto_coverage_rate:             0.548476
+coverage_loss:                  0.091413
+baseline_false_positive_rate:   0.004155
+veto_false_positive_rate:       0.001385
+baseline_candidate_recall@40:   0.987498
+veto_candidate_recall@40:       0.987498
+veto_count:                     66
+veto_true_positive_count:       2
+veto_false_positive_count:      64
+coverage_lost_to_veto:          64
+oracle_false_positives_prevented: 2
+must_keep_positive_veto_rate:   0.000000
+```
+
+Gate result:
+
+```text
+fpr_not_regressed_everywhere:           passed
+adversarial_fpr_zero:                   passed
+oracle_fpr_improved_or_equal:           passed
+candidate_recall_not_regressed:         passed
+veto_reason_codes_present:              passed
+must_keep_positive_veto_rate:           passed
+total_coverage_loss_within_limit:       failed
+suite_coverage_loss_within_limit:       failed
+```
+
+Primary blockers:
+
+```text
+holdout_sources coverage loss: 0.152381
+harvester_scale coverage loss: 0.101293
+oracle_eval coverage loss:     0.096774
+```
+
+Decision:
+
+```text
+Do not promote ranker-local-safe-veto to default or recommended public policy yet.
+Keep it as an internal/opt-in evaluation and review-prioritization tool.
+Defaults remain unchanged:
+  candidate-ranker-v3
+  packs/ecommerce-v1
+  ranker-local-safe
+```
+
+Report:
+
+```text
+docs/m20p_veto_promotion_readiness_report.md
+```
