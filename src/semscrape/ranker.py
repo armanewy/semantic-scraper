@@ -420,6 +420,102 @@ def evaluate_ranker_dataset(
     return out
 
 
+def evaluate_ranker_veto_dataset(
+    rows: list[dict[str, Any]],
+    baseline_ranker: CandidateRanker,
+    veto_ranker: CandidateRanker,
+    *,
+    veto_confidence_below: float,
+    min_confidence: float | None = None,
+    min_margin: float | None = None,
+    min_validator_confidence: float = 0.70,
+    max_penalties: int = 0,
+    model_name: str = "ranker-veto",
+) -> list[dict[str, Any]]:
+    evaluated = evaluate_ranker_dataset(
+        rows,
+        baseline_ranker,
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+        max_penalties=max_penalties,
+        model_name=model_name,
+    )
+    grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in rows:
+        grouped[str(row.get("example_id") or f"{row.get('fixture')}|{row.get('field')}")][str(row.get("candidate_id"))] = row
+    for row in evaluated:
+        example_id = str(row.get("fixture")) + "|" + str(row.get("field"))
+        if row.get("spec"):
+            example_id = str(row.get("spec")) + "|" + example_id
+        candidate_id = row.get("model_candidate_id") or row.get("proposed_candidate_id")
+        original_status = row.get("status")
+        row["veto_called"] = False
+        row["vetoed"] = False
+        row["veto_confidence"] = None
+        row["veto_confidence_below"] = veto_confidence_below
+        row["veto_reason"] = None
+        if not candidate_id or row.get("status") == "abstained":
+            continue
+        candidate_row = _candidate_row_for_eval(grouped, row, str(candidate_id), fallback_example_id=example_id)
+        if candidate_row is None:
+            row["veto_called"] = True
+            row["veto_reason"] = "safety_veto_candidate_row_missing"
+            continue
+        veto_confidence = veto_ranker.confidence_row(candidate_row)
+        row["veto_called"] = True
+        row["veto_confidence"] = veto_confidence
+        if veto_confidence < veto_confidence_below:
+            row["vetoed"] = True
+            row["veto_reason"] = "safety_veto_low_positive_confidence"
+            row["status"] = "abstained"
+            row["abstained"] = True
+            row["validated"] = False
+            row["correct"] = False
+            row["model_choice_correct"] = False
+            row["false_positive"] = False
+            row["ranker_false_positive"] = False
+            row["ranker_validated_recovery"] = False
+            row["ranker_recovered"] = False
+            row["abstention_reason"] = row["veto_reason"]
+            row["failure_reason"] = _ranker_failure_reason(
+                expected_present=bool(row.get("expected_present")),
+                candidate_present=bool(row.get("candidate_present")),
+                abstained=True,
+                correct=False,
+                validated=False,
+                reason=row["veto_reason"],
+            )
+            row["decision_confidence"] = veto_confidence
+        row["pre_veto_status"] = original_status
+    return evaluated
+
+
+def _candidate_row_for_eval(
+    grouped: dict[str, dict[str, dict[str, Any]]],
+    eval_row: dict[str, Any],
+    candidate_id: str,
+    *,
+    fallback_example_id: str,
+) -> dict[str, Any] | None:
+    possible_keys = [
+        str(eval_row.get("example_id") or ""),
+        str(eval_row.get("case_id") or "") + "|" + str(eval_row.get("fixture")) + "|" + str(eval_row.get("field")),
+        fallback_example_id,
+        str(eval_row.get("spec") or "") + "|" + str(eval_row.get("fixture")) + "|" + str(eval_row.get("field")),
+        str(eval_row.get("fixture")) + "|" + str(eval_row.get("field")),
+    ]
+    for key in possible_keys:
+        if key in grouped and candidate_id in grouped[key]:
+            return grouped[key][candidate_id]
+    for candidates in grouped.values():
+        if candidate_id in candidates:
+            row = candidates[candidate_id]
+            if row.get("field") == eval_row.get("field") and row.get("case_id") == eval_row.get("case_id"):
+                return row
+    return None
+
+
 def calibrate_ranker_dataset(
     rows: list[dict[str, Any]],
     ranker: CandidateRanker,

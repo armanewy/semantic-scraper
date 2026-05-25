@@ -68,6 +68,7 @@ from .ranker import (
     CandidateRanker,
     calibrate_ranker_dataset,
     evaluate_ranker_dataset,
+    evaluate_ranker_veto_dataset,
     train_ranker_from_jsonl,
 )
 from .render import enrich_candidates_from_rendered_page, fetch_url, render_url
@@ -136,6 +137,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
         min_ranker_margin=args.min_ranker_margin,
         max_ranker_penalties=args.max_ranker_penalties,
         llm_fallback_policy=args.llm_fallback_policy,
+        veto_ranker_path=getattr(args, "veto_ranker", None),
+        veto_confidence_below=getattr(args, "veto_confidence_below", 0.60),
     )
     if args.record_evidence:
         expected_for_file = spec.benchmarks.get(basename_key(args.input), {})
@@ -447,7 +450,7 @@ def _run_policy_eval_rows(
             html,
             input_name=basename_key(input_ref),
             cache=cache,
-            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe"},
+            use_llm=model not in {"heuristic", "ranker"} and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"},
             model=model if model not in {"heuristic", "ranker"} else "qwen3:1.7b",
             ollama_host=args.ollama_host,
             top_k=args.top_k,
@@ -463,6 +466,8 @@ def _run_policy_eval_rows(
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
             llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
+            veto_ranker_path=getattr(args, "veto_ranker", None),
+            veto_confidence_below=getattr(args, "veto_confidence_below", 0.60),
         )
         if getattr(args, "record_evidence", False):
             record_report_evidence(
@@ -506,6 +511,7 @@ def _run_policy_eval_rows(
             ranker_error = any(item.get("stage") == "ranker" and item.get("status") == "error" for item in extraction.trace)
             ranker_recovered = extraction.source == "ranker_recovery" and extraction.ok
             ranker_event = next((item for item in extraction.trace if item.get("stage") == "ranker" and item.get("status") in {"choose", "abstained", "error"}), {})
+            veto_event = next((item for item in extraction.trace if item.get("stage") == "safety_veto"), {})
             cache_attempted = any(item.get("stage") == "cache" and item.get("status") == "attempted" for item in extraction.trace)
             cache_hit = any(item.get("stage") == "cache" and item.get("status") == "hit" for item in extraction.trace)
             cache_rejected = any(
@@ -548,6 +554,10 @@ def _run_policy_eval_rows(
                 "ranker_confidence": ranker_event.get("confidence"),
                 "ranker_margin": ranker_event.get("margin"),
                 "ranker_reason": ranker_event.get("reason"),
+                "veto_called": bool(veto_event),
+                "vetoed": veto_event.get("status") == "vetoed",
+                "veto_confidence": veto_event.get("confidence"),
+                "veto_reason": veto_event.get("reason"),
                 "model_confidence": model_event.get("confidence"),
                 "model_reason": model_event.get("reason"),
                 "llm_fallback_policy": getattr(args, "llm_fallback_policy", "all"),
@@ -690,13 +700,25 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         args.min_ranker_confidence = float(defaults["min_ranker_confidence"])
     if not getattr(args, "_min_ranker_margin_explicit", False) and "min_ranker_margin" in defaults:
         args.min_ranker_margin = float(defaults["min_ranker_margin"])
-    if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"} and not getattr(args, "ranker", None):
+    if not getattr(args, "_veto_confidence_below_explicit", False) and "veto_confidence_below" in defaults:
+        args.veto_confidence_below = float(defaults["veto_confidence_below"])
+    ranker_policies = {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-plus-llm"}
+    if policy in ranker_policies and not getattr(args, "ranker", None):
         try:
             args.ranker = default_ranker_path()
         except FileNotFoundError as exc:
             raise CliError(str(exc), 4) from exc
-    if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"} and getattr(args, "ranker", None) and not Path(args.ranker).exists():
+    if policy in ranker_policies and getattr(args, "ranker", None) and not Path(args.ranker).exists():
         raise CliError(f"Ranker file not found: {args.ranker}", 4)
+    if policy == "ranker-local-safe-veto":
+        if not getattr(args, "veto_ranker", None):
+            candidate = Path("models/candidate-ranker-vNext.json")
+            if candidate.exists():
+                args.veto_ranker = str(candidate)
+        if not getattr(args, "veto_ranker", None):
+            raise CliError("ranker-local-safe-veto requires --veto-ranker", 2)
+        if not Path(args.veto_ranker).exists():
+            raise CliError(f"Veto ranker file not found: {args.veto_ranker}", 4)
 
 
 class ExplicitDefaultsParser(argparse.ArgumentParser):
@@ -714,6 +736,7 @@ class ExplicitDefaultsParser(argparse.ArgumentParser):
         parsed._min_ranker_confidence_explicit = "--min-ranker-confidence" in raw_args
         parsed._min_ranker_margin_explicit = "--min-ranker-margin" in raw_args
         parsed._max_ranker_penalties_explicit = "--max-ranker-penalties" in raw_args
+        parsed._veto_confidence_below_explicit = "--veto-confidence-below" in raw_args
         return parsed
 
 
@@ -1187,7 +1210,7 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         expected_for_file = spec.benchmarks.get("rendered.html") or spec.benchmarks.get(basename_key(input_ref), {})
-        if args.policy in {"ranker-local", "ranker-local-safe"}:
+        if args.policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
             model = args.model or "ranker"
         elif args.policy in {"safe-local", "ranker-plus-llm"}:
             model = args.model or "qwen3:1.7b"
@@ -1213,6 +1236,8 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             min_ranker_margin=getattr(args, "min_ranker_margin", 0.00),
             max_ranker_penalties=getattr(args, "max_ranker_penalties", 0),
             llm_fallback_policy=getattr(args, "llm_fallback_policy", "all"),
+            veto_ranker=getattr(args, "veto_ranker", None),
+            veto_confidence_below=getattr(args, "veto_confidence_below", 0.60),
             learn=args.learn,
             record_evidence=getattr(args, "record_evidence", False),
             evidence_db=getattr(args, "evidence_db", DEFAULT_EVIDENCE_DB),
@@ -1496,6 +1521,8 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
             live=bool(source.get("live", args.live)),
             label_source=_oracle_label_source(source, source_oracle_rows),
             label_trust=_oracle_label_trust(source_oracle_rows),
+            veto_ranker=source.get("veto_ranker") or getattr(args, "veto_ranker", None),
+            veto_confidence_below=float(source.get("veto_confidence_below") or getattr(args, "veto_confidence_below", 0.60)),
         )
         canary_result = _run_canary(canary_args)
         bundle_result = create_evidence_bundle(
@@ -2263,6 +2290,8 @@ def cmd_pilot_run(args: argparse.Namespace) -> int:
         evidence_privacy=args.evidence_privacy,
         top_k=args.top_k,
         live=args.live,
+        veto_ranker=getattr(args, "veto_ranker", None),
+        veto_confidence_below=getattr(args, "veto_confidence_below", 0.60),
     )
     canary_result = _run_canary(canary_args)
     rows = read_jsonl(canary_out) if canary_out.exists() else []
@@ -2787,6 +2816,8 @@ def _canary_namespace(
     live: bool = False,
     label_source: str | None = None,
     label_trust: str | None = None,
+    veto_ranker: str | None = None,
+    veto_confidence_below: float = 0.60,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         specs=specs,
@@ -2794,6 +2825,8 @@ def _canary_namespace(
         pack=pack,
         model=None,
         ranker=None,
+        veto_ranker=veto_ranker,
+        veto_confidence_below=veto_confidence_below,
         render=False,
         live=live,
         wait_for="body",
@@ -2826,6 +2859,7 @@ def _canary_namespace(
         _min_ranker_confidence_explicit=False,
         _min_ranker_margin_explicit=False,
         _max_ranker_penalties_explicit=False,
+        _veto_confidence_below_explicit=False,
     )
 
 
@@ -3596,6 +3630,27 @@ def cmd_ranker_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ranker_veto_eval(args: argparse.Namespace) -> int:
+    rows = read_dataset_jsonl(args.input)
+    baseline = CandidateRanker.load(args.model)
+    veto = CandidateRanker.load(args.veto_ranker)
+    evaluated = evaluate_ranker_veto_dataset(
+        rows,
+        baseline,
+        veto,
+        veto_confidence_below=args.veto_confidence_below,
+        min_confidence=args.min_ranker_confidence,
+        min_margin=args.min_ranker_margin,
+        min_validator_confidence=args.min_validator_confidence,
+        max_penalties=args.max_ranker_penalties,
+        model_name="ranker-veto",
+    )
+    append_jsonl(Path(args.out), evaluated)
+    vetoed = sum(int(bool(row.get("vetoed"))) for row in evaluated)
+    _print_json({"out": args.out, "vetoed": vetoed, "summary": summarize_rows(evaluated)})
+    return 0
+
+
 def cmd_ranker_calibrate(args: argparse.Namespace) -> int:
     rows = read_dataset_jsonl(args.input)
     ranker = CandidateRanker.load(args.model)
@@ -3813,6 +3868,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--no-llm", action="store_true", help="Do not call the local Ollama model")
     extract.add_argument("--model", default=None, help="Ollama model name")
     extract.add_argument("--ranker", default=None, help="Path to a trained semscrape candidate-ranker JSON model")
+    extract.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
     extract.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
     extract.add_argument("--top-k", type=int, default=40, help="Candidate count passed to the model")
     extract.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
@@ -3825,6 +3881,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--min-ranker-confidence", type=float, default=0.70, help="Minimum ranker confidence before choosing")
     extract.add_argument("--min-ranker-margin", type=float, default=0.00, help="Minimum ranker confidence margin over runner-up")
     extract.add_argument("--max-ranker-penalties", type=int, default=0, help="Maximum validator penalties allowed for ranker choices")
+    extract.add_argument("--veto-confidence-below", type=float, default=0.60, help="Veto accepted candidates below this safety ranker confidence")
     extract.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all", help="When ranker-plus-llm should call the LLM after ranker abstention")
     extract.add_argument("--learn", action="store_true", help="Persist repaired selectors to a lock/cache file")
     extract.add_argument("--cache", default=None, help="Selector cache path")
@@ -3854,6 +3911,8 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_run.add_argument("project")
     pilot_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
     pilot_run.add_argument("--pack", default=None, help="Domain pack name or path")
+    pilot_run.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
+    pilot_run.add_argument("--veto-confidence-below", type=float, default=0.60)
     pilot_run.add_argument("--top-k", type=int, default=40)
     pilot_run.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
     pilot_run.add_argument("--record-evidence", action=argparse.BooleanOptionalAction, default=True)
@@ -3885,6 +3944,8 @@ def build_parser() -> argparse.ArgumentParser:
     alpha_run.add_argument("--out", required=True, help="Output run directory")
     alpha_run.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
     alpha_run.add_argument("--pack", default=None, help="Optional domain pack for extraction defaults and gap reporting")
+    alpha_run.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
+    alpha_run.add_argument("--veto-confidence-below", type=float, default=0.60)
     alpha_run.add_argument("--top-k", type=int, default=40)
     alpha_run.add_argument("--live", action="store_true", help="Allow live URL inputs declared by the registry")
     alpha_run.add_argument("--record-evidence", action="store_true", help="Accepted for workflow parity; alpha run always records evidence")
@@ -3965,6 +4026,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--no-llm", action="store_true")
     bench.add_argument("--model", default=None)
     bench.add_argument("--ranker", default=None)
+    bench.add_argument("--veto-ranker", default=None)
     bench.add_argument("--ollama-host", default=None)
     bench.add_argument("--top-k", type=int, default=40)
     bench.add_argument("--strict", action="store_true")
@@ -3977,6 +4039,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--min-ranker-confidence", type=float, default=0.70)
     bench.add_argument("--min-ranker-margin", type=float, default=0.00)
     bench.add_argument("--max-ranker-penalties", type=int, default=0)
+    bench.add_argument("--veto-confidence-below", type=float, default=0.60)
     bench.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     bench.add_argument("--values-only", action="store_true")
     bench.add_argument("--expect-like", default=None, help="Use this benchmark basename as expected values for inputs without exact expectations")
@@ -3999,6 +4062,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default=None)
     eval_model.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     eval_model.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker-local/ranker-plus-llm policies")
+    eval_model.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
     eval_model.add_argument("--top-k", type=int, default=40)
     eval_model.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
     eval_model.add_argument("--min-confidence", type=float, default=0.75)
@@ -4007,6 +4071,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_model.add_argument("--min-ranker-confidence", type=float, default=0.70)
     eval_model.add_argument("--min-ranker-margin", type=float, default=0.00)
     eval_model.add_argument("--max-ranker-penalties", type=int, default=0)
+    eval_model.add_argument("--veto-confidence-below", type=float, default=0.60)
     eval_model.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     eval_model.add_argument("--out", default="runs/model-eval.jsonl", help="JSONL output path")
     eval_model.add_argument("--failures-dir", default="runs/failures", help="Directory for failure artifacts")
@@ -4099,6 +4164,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
     canary.add_argument("--model", default=None)
     canary.add_argument("--ranker", default=None, help="Ranker JSON model path for ranker policies")
+    canary.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
     canary.add_argument("--render", action="store_true", help="Deprecated alias for --live")
     canary.add_argument("--live", action="store_true", help="Render live URLs when no replay HTML is available")
     canary.add_argument("--wait-for", default="body")
@@ -4114,6 +4180,7 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--min-ranker-confidence", type=float, default=0.70)
     canary.add_argument("--min-ranker-margin", type=float, default=0.00)
     canary.add_argument("--max-ranker-penalties", type=int, default=0)
+    canary.add_argument("--veto-confidence-below", type=float, default=0.60)
     canary.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all")
     canary.add_argument("--record-evidence", action="store_true", help="Record field-level canary evidence to SQLite")
     canary.add_argument("--evidence-db", default=DEFAULT_EVIDENCE_DB)
@@ -4178,6 +4245,18 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_eval.add_argument("--min-validator-confidence", type=float, default=0.70)
     ranker_eval.add_argument("--max-ranker-penalties", type=int, default=0)
     ranker_eval.set_defaults(func=cmd_ranker_eval)
+
+    ranker_veto_eval = ranker_sub.add_parser("veto-eval", help="Evaluate a baseline ranker with a blocking-only safety veto ranker")
+    ranker_veto_eval.add_argument("input")
+    ranker_veto_eval.add_argument("--model", required=True, help="Baseline ranker JSON")
+    ranker_veto_eval.add_argument("--veto-ranker", required=True, help="Safety veto ranker JSON")
+    ranker_veto_eval.add_argument("--out", required=True)
+    ranker_veto_eval.add_argument("--veto-confidence-below", type=float, default=0.60, help="Veto accepted baseline candidates scored below this positive-confidence threshold")
+    ranker_veto_eval.add_argument("--min-ranker-confidence", type=float, default=None)
+    ranker_veto_eval.add_argument("--min-ranker-margin", type=float, default=None)
+    ranker_veto_eval.add_argument("--min-validator-confidence", type=float, default=0.70)
+    ranker_veto_eval.add_argument("--max-ranker-penalties", type=int, default=0)
+    ranker_veto_eval.set_defaults(func=cmd_ranker_veto_eval)
 
     ranker_calibrate = ranker_sub.add_parser("calibrate", help="Sweep ranker confidence/margin thresholds")
     ranker_calibrate.add_argument("input")

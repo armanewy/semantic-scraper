@@ -13,7 +13,13 @@ from .dom import element_to_candidate, generate_candidates, parse_html, should_c
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
-from .ranker import RankerError, RankerLocator, safe_policy_gate_reason
+from .ranker import (
+    CandidateRanker,
+    RankerError,
+    RankerLocator,
+    runtime_candidate_row,
+    safe_policy_gate_reason,
+)
 from .validators import extract_value, validate_value
 
 POLICY_DEFAULTS = {
@@ -56,6 +62,19 @@ POLICY_DEFAULTS = {
         "min_ranker_confidence": 0.90,
         "min_ranker_margin": 0.008,
         "max_ranker_penalties": 0,
+    },
+    "ranker-local-safe-veto": {
+        "strict": True,
+        "use_llm": False,
+        "model_on_abstain_only": True,
+        "llm_fallback_policy": "all",
+        "min_confidence": 0.78,
+        "min_margin": 0.18,
+        "min_validator_confidence": 0.75,
+        "min_ranker_confidence": 0.90,
+        "min_ranker_margin": 0.008,
+        "max_ranker_penalties": 0,
+        "veto_confidence_below": 0.60,
     },
     "ranker-plus-llm": {
         "strict": True,
@@ -459,6 +478,54 @@ def _call_ranker(
     return ModelAttempt(chosen, choice, None, int(round((time.perf_counter() - started) * 1000)))
 
 
+def _safety_veto_event(
+    field: FieldSpec,
+    chosen: RankedCandidate,
+    ranked: list[RankedCandidate],
+    *,
+    policy: str,
+    veto_ranker_path: str | None,
+    veto_confidence_below: float,
+) -> dict | None:
+    if policy != "ranker-local-safe-veto":
+        return None
+    if not veto_ranker_path:
+        return {
+            "stage": "safety_veto",
+            "status": "error",
+            "candidate_id": chosen.candidate.id,
+            "reason": "veto_ranker_required",
+        }
+    try:
+        veto_ranker = CandidateRanker.load(veto_ranker_path)
+    except RankerError as exc:
+        return {
+            "stage": "safety_veto",
+            "status": "error",
+            "candidate_id": chosen.candidate.id,
+            "reason": str(exc),
+            "model": veto_ranker_path,
+        }
+    rank = next((index for index, item in enumerate(ranked, start=1) if item.candidate.id == chosen.candidate.id), 1)
+    row = runtime_candidate_row(field, chosen, rank, top_k=max(1, len(ranked)))
+    confidence = veto_ranker.confidence_row(row)
+    status = "vetoed" if confidence < veto_confidence_below else "passed"
+    return {
+        "stage": "safety_veto",
+        "status": status,
+        "candidate_id": chosen.candidate.id,
+        "confidence": confidence,
+        "threshold": veto_confidence_below,
+        "reason": "safety_veto_low_positive_confidence" if status == "vetoed" else "safety_veto_passed",
+        "model": veto_ranker_path,
+    }
+
+
+def _vetoed_extraction(field: FieldSpec, chosen: RankedCandidate, trace: list[dict], event: dict, *, model: str | None) -> FieldExtraction:
+    trace.append(event)
+    return _abstention(field, source="safety_veto", reason=str(event.get("reason") or "safety_veto"), chosen=chosen, model=model, trace=trace)
+
+
 def _ranker_abstention_allows_model(reason: str | None) -> bool:
     return reason in {
         None,
@@ -661,6 +728,8 @@ def extract_field(
     min_ranker_margin: float = 0.00,
     max_ranker_penalties: int = 0,
     llm_fallback_policy: str = "all",
+    veto_ranker_path: str | None = None,
+    veto_confidence_below: float = 0.60,
 ) -> FieldExtraction:
     trace: list[dict] = []
     if cache is not None:
@@ -717,8 +786,20 @@ def extract_field(
             min_validator_confidence=min_validator_confidence,
             enforce_margin=True,
         )
-        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy == "ranker-local-safe" else None
+        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto"} else None
         if decision.ok and safe_gate_reason is None:
+            veto_event = _safety_veto_event(
+                field,
+                heuristic,
+                ranked,
+                policy=policy,
+                veto_ranker_path=veto_ranker_path,
+                veto_confidence_below=veto_confidence_below,
+            )
+            if veto_event and veto_event.get("status") != "passed":
+                return _vetoed_extraction(field, heuristic, trace, veto_event, model=veto_ranker_path)
+            if veto_event:
+                trace.append(veto_event)
             trace.append({"stage": "strict_heuristic", "status": "accepted", "candidate_id": heuristic.candidate.id})
             if cache is not None and learn:
                 cache.remember(field, heuristic, source="heuristic")
@@ -732,7 +813,7 @@ def extract_field(
             }
         )
         ranker_abstention_reason = None
-        if policy in {"ranker-local", "ranker-local-safe", "ranker-plus-llm"}:
+        if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-plus-llm"}:
             ranker_attempt = _call_ranker(
                 field,
                 ranked,
@@ -746,7 +827,7 @@ def extract_field(
             if ranker_attempt.error:
                 trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
                 ranker_abstention_reason = "ranker_error"
-                if policy in {"ranker-local", "ranker-local-safe"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
             elif ranker_attempt.chosen is None:
                 ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
@@ -760,7 +841,7 @@ def extract_field(
                         "latency_ms": ranker_attempt.latency_ms,
                     }
                 )
-                if policy in {"ranker-local", "ranker-local-safe"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
                     return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
                 if not _ranker_abstention_allows_model(ranker_abstention_reason):
                     return _abstention(
@@ -791,13 +872,25 @@ def extract_field(
                     }
                 )
                 safe_ranker_reason = (
-                    safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy == "ranker-local-safe" else None
+                    safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto"} else None
                 )
                 if (
                     ranker_decision.ok
                     and safe_ranker_reason is None
                     and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence)
                 ):
+                    veto_event = _safety_veto_event(
+                        field,
+                        ranker_attempt.chosen,
+                        ranked,
+                        policy=policy,
+                        veto_ranker_path=veto_ranker_path,
+                        veto_confidence_below=veto_confidence_below,
+                    )
+                    if veto_event and veto_event.get("status") != "passed":
+                        return _vetoed_extraction(field, ranker_attempt.chosen, trace, veto_event, model=veto_ranker_path)
+                    if veto_event:
+                        trace.append(veto_event)
                     trace.append({"stage": "ranker_strict_gate", "status": "accepted", "candidate_id": ranker_attempt.chosen.candidate.id})
                     if cache is not None and learn:
                         cache.remember(field, ranker_attempt.chosen, source="ranker_recovery")
@@ -811,7 +904,7 @@ def extract_field(
                     )
                 reason = safe_ranker_reason or ranker_decision.reason or "low_ranker_confidence"
                 trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
-                if policy in {"ranker-local", "ranker-local-safe"}:
+                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto"}:
                     return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
                 return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
 
@@ -921,6 +1014,8 @@ def extract_html(
     min_ranker_margin: float = 0.00,
     max_ranker_penalties: int = 0,
     llm_fallback_policy: str = "all",
+    veto_ranker_path: str | None = None,
+    veto_confidence_below: float = 0.60,
 ):
     from .models import ExtractionReport
 
@@ -953,6 +1048,8 @@ def extract_html(
             min_ranker_margin=min_ranker_margin,
             max_ranker_penalties=max_ranker_penalties,
             llm_fallback_policy=llm_fallback_policy,
+            veto_ranker_path=veto_ranker_path,
+            veto_confidence_below=veto_confidence_below,
         )
 
     if cache is not None and learn:

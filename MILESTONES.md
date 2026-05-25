@@ -2042,3 +2042,99 @@ Report:
 ```text
 docs/m19r_ranker_regression_diagnosis.md
 ```
+
+## M20: Safety Veto + Positive Label Expansion
+
+Status: completed, opt-in veto policy added.
+
+Question: Can we use the oracle-trained safety signal to block known traps while preserving baseline coverage, and can we collect enough positive labels to make a future replacement ranker viable?
+
+Implementation:
+
+```text
+policy: ranker-local-safe-veto
+baseline ranker: candidate-ranker-v3
+veto ranker: candidate-ranker-vNext
+veto threshold: veto positive confidence below 0.60
+behavior: block-only; never recovers candidates rejected by the baseline
+```
+
+Commands:
+
+```text
+semscrape ranker veto-eval
+semscrape canary --policy ranker-local-safe-veto --veto-ranker models/candidate-ranker-vNext.json
+```
+
+Oracle eval:
+
+```text
+v3 coverage_rate:       0.645161
+v3 false_positive_rate: 0.064516
+v3 recall@40:           1.000000
+
+veto coverage_rate:       0.548387
+veto false_positive_rate: 0.000000
+veto recall@40:           1.000000
+vetoed rows:              3
+false_positive_fixed:     2
+coverage_lost_correct:    1
+```
+
+Base/adversarial:
+
+```text
+base_v3_coverage:       0.450000
+base_veto_coverage:     0.450000
+base_veto_fpr:          0.000000
+adversarial_veto_fpr:   0.000000
+coverage_loss_vs_v3:    0.000000
+```
+
+M20 release-check:
+
+```text
+passed: true
+min_coverage: 0.427500
+coverage_not_regressed: true
+fpr_not_regressed: true
+adversarial_false_positive_rate: true
+```
+
+Must-keep positives:
+
+```text
+file: data/regression/must_keep_positives.jsonl
+rows: 6
+usage: regression_only_not_training
+families:
+  - docs install_command
+  - docs page_title
+  - ecommerce availability
+  - ecommerce price
+  - ecommerce rating
+  - recipes servings
+must_keep_positive_veto_rate: 0.000000
+```
+
+Decision:
+
+```text
+ranker-local-safe-veto is available as an internal opt-in evaluation policy.
+No default ranker, pack, or public policy is changed.
+The veto passed the narrow M20 safety/coverage gate, but it needs broader external/regression validation before default promotion.
+```
+
+Defaults remain:
+
+```text
+candidate-ranker-v3
+packs/ecommerce-v1
+ranker-local-safe
+```
+
+Report:
+
+```text
+docs/m20_safety_veto_report.md
+```

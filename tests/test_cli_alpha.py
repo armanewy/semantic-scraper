@@ -229,6 +229,67 @@ def test_ranker_diff_reports_fp_fixes_and_coverage_loss(tmp_path, capsys) -> Non
     assert "false_positive_fixed" in summary.read_text(encoding="utf-8")
 
 
+def test_ranker_veto_eval_blocks_low_confidence_candidate(tmp_path, capsys) -> None:
+    dataset = tmp_path / "dataset.jsonl"
+    baseline = tmp_path / "baseline.json"
+    veto = tmp_path / "veto.json"
+    out = tmp_path / "veto-eval.jsonl"
+    _write_rows(
+        dataset,
+        [
+            {
+                "example_id": "case_a|page.html|price",
+                "case_id": "case_a",
+                "fixture": "page.html",
+                "field": "price",
+                "field_type": "price",
+                "candidate_id": "wrong",
+                "candidate_value": "$4.99",
+                "label": 0,
+                "expected_present": True,
+                "validation_passed": True,
+                "validator_confidence": 0.95,
+                "visible": True,
+                "heuristic_score": 10.0,
+            }
+        ],
+    )
+    baseline.write_text(
+        json.dumps({"schema_version": 1, "type": "semscrape_candidate_ranker", "weights": {}, "bias": 8.0, "threshold": 0.70, "margin": 0.0}),
+        encoding="utf-8",
+    )
+    veto.write_text(
+        json.dumps({"schema_version": 1, "type": "semscrape_candidate_ranker", "weights": {}, "bias": 0.0, "threshold": 0.70, "margin": 0.0}),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "ranker",
+                "veto-eval",
+                str(dataset),
+                "--model",
+                str(baseline),
+                "--veto-ranker",
+                str(veto),
+                "--veto-confidence-below",
+                "0.60",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["vetoed"] == 1
+    row = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assert row["status"] == "abstained"
+    assert row["vetoed"] is True
+    assert row["false_positive"] is False
+
+
 def test_alpha_run_collects_untrusted_evidence_without_training_export(tmp_path, capsys) -> None:
     spec = tmp_path / "spec.yml"
     html = tmp_path / "page.html"

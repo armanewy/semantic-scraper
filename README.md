@@ -71,6 +71,7 @@ M18 review queue triage and trusted label conversion: implemented
 M18B trusted label acquisition / oracle sources: passed
 M19 evidence-driven ranker/pack update: completed, no promotion
 M19R ranker update diagnostics: completed, no promotion
+M20 safety veto + positive label expansion: completed, opt-in veto added
 M16C true outside-user cohort: pending
 ```
 
@@ -200,6 +201,8 @@ M18B adds oracle-backed expected values via `semscrape oracle resolve`, `semscra
 M19 used the M18B oracle labels to build an evidence-derived candidate-ranking dataset with 3,920 rows, 186 positives, and 1,498 hard negatives. A `candidate-ranker-vNext` and `ecommerce-vNext` pack candidate were trained and release-checked. Both kept false positives at zero on the checked suites, but both lost too much coverage, so neither was promoted. The packaged default remains `candidate-ranker-v3`, and the current ecommerce pack remains `packs/ecommerce-v1`. See [M19 Evidence-Driven Ranker/Pack Update Report](docs/m19_evidence_driven_update_report.md).
 
 M19R diagnosed the M19 coverage regression and added `semscrape ranker diff` plus `semscrape dataset balance` for future update attempts. The oracle-trained candidate fixed two oracle-eval false positives but lost correct base/ecommerce rows; a balanced recipe improved base holdout coverage while preserving zero FPR, but still did not clear the release gate. No replacement ranker, pack, or veto policy was promoted. See [M19R Ranker Regression Diagnosis](docs/m19r_ranker_regression_diagnosis.md).
+
+M20 added an internal opt-in `ranker-local-safe-veto` policy and `semscrape ranker veto-eval`. The veto uses `candidate-ranker-v3` for normal extraction and lets `candidate-ranker-vNext` block accepted candidates only when its positive-confidence score is below the veto threshold. On M20 checks it fixed the 2 oracle-eval false positives, preserved base-holdout coverage at `0.450000`, and kept adversarial FPR at `0.000000`. Defaults are unchanged pending broader validation. See [M20 Safety Veto Report](docs/m20_safety_veto_report.md).
 
 The Ollama integration is implemented and has been validated locally with `qwen3:1.7b`. The CLI talks to the running Ollama daemon over its local HTTP API, so the `ollama` executable does not need to be on `PATH` for extraction once the daemon is running.
 
@@ -539,7 +542,7 @@ semscrape report-domain runs/ood-ranker-local.jsonl runs/ood-ranker-plus-llm.jso
   --out runs/domain-envelope.md
 ```
 
-`ranker-local-safe` is the public-alpha high-precision preset: it uses no LLM calls and tightens ranker confidence, margin, validator-confidence, and penalty gates. `ranker-local` remains available for internal comparison when more coverage is useful. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
+`ranker-local-safe` is the public-alpha high-precision preset: it uses no LLM calls and tightens ranker confidence, margin, validator-confidence, and penalty gates. `ranker-local` remains available for internal comparison when more coverage is useful. `ranker-local-safe-veto` is an internal opt-in evaluation policy that keeps the baseline safe ranker decision path, then lets a separate safety ranker block accepted candidates below `--veto-confidence-below`; it does not recover candidates and is not the default. The ranker path is gated separately from the heuristic path: ranker confidence, ranker margin, validator confidence, hard disqualifiers, penalty count, hidden/visibility checks, and field-aware traps for title/summary/author/coupon/date/monthly-price cases must pass before extraction is accepted. `ranker-plus-llm` only calls the LLM after safe ranker abstentions; unsafe ranker choices abstain instead of asking the LLM to approve them. Its default fallback policy is `recoverable-only`, which suppresses qwen calls unless a visible candidate can plausibly pass the strict gate if selected.
 
 ## Evidence Loop
 
@@ -963,6 +966,7 @@ semscrape dataset balance DATASET.jsonl --out BALANCED.jsonl
 semscrape ranker info [--model RANKER.json]
 semscrape ranker train TRAIN.jsonl --out RANKER.json
 semscrape ranker eval TEST.jsonl --model RANKER.json --out RUN.jsonl
+semscrape ranker veto-eval TEST.jsonl --model BASELINE.json --veto-ranker VETO.json --out RUN.jsonl
 semscrape ranker calibrate TEST.jsonl --model RANKER.json --out RUN.jsonl
 semscrape ranker model-card RANKER.json --out MODEL_CARD.md
 semscrape ranker release-check --baseline BASE.jsonl --candidate CANDIDATE.jsonl --adversarial ADV.jsonl --out CHECK.json

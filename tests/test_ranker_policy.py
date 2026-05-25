@@ -4,6 +4,7 @@ from semscrape.dom import generate_candidates
 from semscrape.extract import extract_field
 from semscrape.llm import LLMChoice
 from semscrape.models import FieldSpec
+from semscrape.ranker import CandidateRanker
 
 
 class AbstainingRanker:
@@ -147,3 +148,28 @@ def test_all_fallback_policy_preserves_model_call() -> None:
     assert locator.called
     assert extraction.status == "abstained"
     assert any(item["stage"] == "llm_fallback_gate" and item["status"] == "eligible" for item in extraction.trace)
+
+
+def test_ranker_local_safe_veto_blocks_low_safety_confidence(tmp_path) -> None:
+    veto_ranker = CandidateRanker(weights={}, bias=0.0, threshold=0.70, margin=0.0)
+    veto_path = tmp_path / "veto.json"
+    veto_ranker.save(veto_path)
+
+    extraction = extract_field(
+        _title_field(),
+        _html(),
+        generate_candidates(_html()),
+        use_llm=False,
+        strict=True,
+        policy="ranker-local-safe-veto",
+        min_confidence=0.30,
+        min_margin=0.0,
+        min_validator_confidence=0.50,
+        veto_ranker_path=str(veto_path),
+        veto_confidence_below=0.60,
+    )
+
+    assert extraction.status == "abstained"
+    assert extraction.source == "safety_veto"
+    assert extraction.decision["reason"] == "safety_veto_low_positive_confidence"
+    assert any(item["stage"] == "safety_veto" and item["status"] == "vetoed" for item in extraction.trace)
