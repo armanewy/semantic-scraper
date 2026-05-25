@@ -54,7 +54,7 @@ from .evidence import (
     write_evidence_jsonl,
     write_review_jsonl,
 )
-from .extract import POLICY_DEFAULTS, extract_html
+from .extract import extract_html
 from .heuristics import rank_candidates
 from .mutate import write_mutations
 from .oracle import (
@@ -65,6 +65,7 @@ from .oracle import (
     write_oracle_report,
 )
 from .packs import apply_pack_to_args, load_pack
+from .policies import POLICY_DEFAULTS, RANKER_POLICIES, get_policy_config
 from .ranker import (
     CandidateRanker,
     calibrate_ranker_dataset,
@@ -925,41 +926,38 @@ def _apply_policy_defaults(args: argparse.Namespace) -> None:
         if getattr(args, "model", None) is None:
             args.model = "qwen3:1.7b"
         return
-    defaults = POLICY_DEFAULTS.get(policy)
-    if defaults is None:
-        raise ValueError(f"Unknown policy {policy!r}; expected one of {', '.join(sorted(POLICY_DEFAULTS))}")
+    config = get_policy_config(policy)
     args.policy = policy
     if policy in {"safe-local", "aggressive", "ranker-plus-llm"}:
         args.model = getattr(args, "model", None) or "qwen3:1.7b"
     if not getattr(args, "_strict_explicit", False):
-        args.strict = bool(defaults["strict"])
+        args.strict = config.strict
     if not getattr(args, "_use_llm_explicit", False):
-        args.no_llm = not bool(defaults["use_llm"])
+        args.no_llm = not config.use_llm
     if not getattr(args, "_model_on_abstain_only_explicit", False):
-        args.model_on_abstain_only = bool(defaults["model_on_abstain_only"])
+        args.model_on_abstain_only = config.model_on_abstain_only
     if not getattr(args, "_llm_fallback_policy_explicit", False):
-        args.llm_fallback_policy = str(defaults.get("llm_fallback_policy", "all"))
+        args.llm_fallback_policy = config.llm_fallback_policy
     if not getattr(args, "_min_confidence_explicit", False):
-        args.min_confidence = float(defaults["min_confidence"])
+        args.min_confidence = config.min_confidence
     if not getattr(args, "_min_margin_explicit", False):
-        args.min_margin = float(defaults["min_margin"])
+        args.min_margin = config.min_margin
     if not getattr(args, "_min_validator_confidence_explicit", False):
-        args.min_validator_confidence = float(defaults["min_validator_confidence"])
-    if not getattr(args, "_max_ranker_penalties_explicit", False) and "max_ranker_penalties" in defaults:
-        args.max_ranker_penalties = int(defaults["max_ranker_penalties"])
-    if not getattr(args, "_min_ranker_confidence_explicit", False) and "min_ranker_confidence" in defaults:
-        args.min_ranker_confidence = float(defaults["min_ranker_confidence"])
-    if not getattr(args, "_min_ranker_margin_explicit", False) and "min_ranker_margin" in defaults:
-        args.min_ranker_margin = float(defaults["min_ranker_margin"])
-    if not getattr(args, "_veto_confidence_below_explicit", False) and "veto_confidence_below" in defaults:
-        args.veto_confidence_below = float(defaults["veto_confidence_below"])
-    ranker_policies = {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto", "ranker-plus-llm"}
-    if policy in ranker_policies and not getattr(args, "ranker", None):
+        args.min_validator_confidence = config.min_validator_confidence
+    if not getattr(args, "_max_ranker_penalties_explicit", False):
+        args.max_ranker_penalties = config.max_ranker_penalties
+    if not getattr(args, "_min_ranker_confidence_explicit", False):
+        args.min_ranker_confidence = config.min_ranker_confidence
+    if not getattr(args, "_min_ranker_margin_explicit", False):
+        args.min_ranker_margin = config.min_ranker_margin
+    if not getattr(args, "_veto_confidence_below_explicit", False):
+        args.veto_confidence_below = config.veto_confidence_below
+    if policy in RANKER_POLICIES and not getattr(args, "ranker", None):
         try:
             args.ranker = default_ranker_path()
         except FileNotFoundError as exc:
             raise CliError(str(exc), 4) from exc
-    if policy in ranker_policies and getattr(args, "ranker", None) and not Path(args.ranker).exists():
+    if policy in RANKER_POLICIES and getattr(args, "ranker", None) and not Path(args.ranker).exists():
         raise CliError(f"Ranker file not found: {args.ranker}", 4)
     if policy == "ranker-local-safe-veto":
         if not getattr(args, "veto_ranker", None):

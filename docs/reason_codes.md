@@ -4,6 +4,8 @@ Reason codes explain why semscrape abstained, rejected a cached selector, suppre
 
 This document covers common codes emitted by the current extraction, ranker, cache, fallback, safety-veto, and evidence paths. Field-specific ranker gates are numerous; related codes use consistent prefixes and are grouped below.
 
+Some deterministic gates are also registered with stable rule IDs in [Safety Rule Registry](rules.md). The registry maps rule IDs to the reason codes below without changing their emitted text.
+
 ## Where To Look
 
 - Extraction JSON: each field has `status`, `source`, `decision.reason`, `validation_errors`, `reasons`, and `trace`.

@@ -13,6 +13,14 @@ from .dom import element_to_candidate, generate_candidates, parse_html, should_c
 from .heuristics import rank_candidates
 from .llm import LLMChoice, LLMError, OllamaLocator
 from .models import FieldExtraction, FieldSpec, RankedCandidate, ScrapeSpec
+from .policies import (
+    POLICY_DEFAULTS as POLICY_DEFAULTS,
+)
+from .policies import (
+    RANKER_ONLY_POLICIES,
+    RANKER_POLICIES,
+    SAFE_RANKER_POLICIES,
+)
 from .ranker import (
     CandidateRanker,
     RankerError,
@@ -22,94 +30,6 @@ from .ranker import (
     trap_only_veto_event,
 )
 from .validators import extract_value, validate_value
-
-POLICY_DEFAULTS = {
-    "conservative": {
-        "strict": True,
-        "use_llm": False,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.75,
-        "min_margin": 0.15,
-        "min_validator_confidence": 0.70,
-    },
-    "safe-local": {
-        "strict": True,
-        "use_llm": True,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.75,
-        "min_margin": 0.15,
-        "min_validator_confidence": 0.70,
-    },
-    "ranker-local": {
-        "strict": True,
-        "use_llm": False,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.75,
-        "min_margin": 0.15,
-        "min_validator_confidence": 0.70,
-        "max_ranker_penalties": 1,
-    },
-    "ranker-local-safe": {
-        "strict": True,
-        "use_llm": False,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.78,
-        "min_margin": 0.18,
-        "min_validator_confidence": 0.75,
-        "min_ranker_confidence": 0.90,
-        "min_ranker_margin": 0.008,
-        "max_ranker_penalties": 0,
-    },
-    "ranker-local-safe-veto": {
-        "strict": True,
-        "use_llm": False,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.78,
-        "min_margin": 0.18,
-        "min_validator_confidence": 0.75,
-        "min_ranker_confidence": 0.90,
-        "min_ranker_margin": 0.008,
-        "max_ranker_penalties": 0,
-        "veto_confidence_below": 0.60,
-    },
-    "ranker-local-safe-trap-veto": {
-        "strict": True,
-        "use_llm": False,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.78,
-        "min_margin": 0.18,
-        "min_validator_confidence": 0.75,
-        "min_ranker_confidence": 0.90,
-        "min_ranker_margin": 0.008,
-        "max_ranker_penalties": 0,
-        "veto_confidence_below": 0.34,
-    },
-    "ranker-plus-llm": {
-        "strict": True,
-        "use_llm": True,
-        "model_on_abstain_only": True,
-        "llm_fallback_policy": "recoverable-only",
-        "min_confidence": 0.75,
-        "min_margin": 0.15,
-        "min_validator_confidence": 0.70,
-        "max_ranker_penalties": 1,
-    },
-    "aggressive": {
-        "strict": False,
-        "use_llm": True,
-        "model_on_abstain_only": False,
-        "llm_fallback_policy": "all",
-        "min_confidence": 0.50,
-        "min_margin": 0.00,
-        "min_validator_confidence": 0.50,
-    },
-}
 
 
 class Locator(Protocol):
@@ -158,6 +78,12 @@ class FallbackDecision:
             "best_confidence": round(self.best_confidence, 4),
             "best_validator_confidence": round(self.best_validator_confidence, 4),
         }
+
+
+@dataclass(slots=True)
+class RankerStageResult:
+    extraction: FieldExtraction | None = None
+    abstention_reason: str | None = None
 
 
 def _cached_candidate(field: FieldSpec, html: str, cache: SelectorCache) -> CacheLookup:
@@ -741,6 +667,353 @@ def _candidate_fallback_context(item: RankedCandidate) -> str:
     ).lower()
 
 
+def _try_cache_stage(
+    field: FieldSpec,
+    html: str,
+    cache: SelectorCache | None,
+    trace: list[dict],
+    *,
+    strict: bool,
+    min_margin: float,
+    min_validator_confidence: float,
+) -> FieldExtraction | None:
+    if cache is None:
+        return None
+    lookup = _cached_candidate(field, html, cache)
+    if lookup.attempted:
+        trace.append({"stage": "cache", "status": "attempted", "selector_count": lookup.selector_count})
+    cached = lookup.candidate
+    if cached is None:
+        trace.append(
+            {
+                "stage": "cache",
+                "status": "miss",
+                "reason": lookup.rejection_reason or ("selector_not_validated" if lookup.attempted else "empty"),
+                "selector": lookup.rejection_selector,
+                "strategy": lookup.rejection_strategy,
+            }
+        )
+        return None
+
+    trace.append(
+        {
+            "stage": "cache",
+            "status": "hit",
+            "candidate_id": cached.candidate.id,
+            "selector": lookup.accepted_selector,
+            "strategy": lookup.accepted_strategy,
+        }
+    )
+    if strict:
+        decision = _evaluate_strict(
+            cached,
+            [cached],
+            min_confidence=0.0,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            enforce_margin=False,
+        )
+        if not decision.ok:
+            trace.append(
+                {
+                    "stage": "cache",
+                    "status": "abstained",
+                    "reason": decision.reason,
+                    "selector": lookup.accepted_selector,
+                    "strategy": lookup.accepted_strategy,
+                }
+            )
+            return _abstention(field, source="cache", reason=decision.reason or "cache_rejected", chosen=cached, trace=trace)
+    return _field_extraction(field, cached, source="cache", trace=trace)
+
+
+def _heuristic_stage(
+    field: FieldSpec,
+    candidates,
+    trace: list[dict],
+    *,
+    top_k: int,
+) -> tuple[list[RankedCandidate], RankedCandidate | None, FieldExtraction | None]:
+    ranked = rank_candidates(field, candidates, top=max(1, top_k))
+    heuristic = next((item for item in ranked if item.validation.passed), ranked[0] if ranked else None)
+    if heuristic is None:
+        trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": "no_candidates"})
+        return ranked, None, _abstention(field, source="none", reason="no_candidates", trace=trace)
+    return ranked, heuristic, None
+
+
+def _safety_veto_stage(
+    field: FieldSpec,
+    chosen: RankedCandidate,
+    ranked: list[RankedCandidate],
+    trace: list[dict],
+    *,
+    policy: str,
+    veto_ranker_path: str | None,
+    veto_confidence_below: float,
+    model: str | None,
+) -> FieldExtraction | None:
+    veto_event = _safety_veto_event(
+        field,
+        chosen,
+        ranked,
+        policy=policy,
+        veto_ranker_path=veto_ranker_path,
+        veto_confidence_below=veto_confidence_below,
+    )
+    if veto_event and veto_event.get("status") != "passed":
+        return _vetoed_extraction(field, chosen, trace, veto_event, model=model)
+    if veto_event:
+        trace.append(veto_event)
+    return None
+
+
+def _learn_selector_stage(
+    field: FieldSpec,
+    chosen: RankedCandidate,
+    *,
+    cache: SelectorCache | None,
+    learn: bool,
+    source: str,
+    require_valid: bool = False,
+) -> None:
+    if cache is None or not learn:
+        return
+    if require_valid and not chosen.validation.passed:
+        return
+    cache.remember(field, chosen, source=source)
+
+
+def _ranker_recovery_stage(
+    field: FieldSpec,
+    ranked: list[RankedCandidate],
+    heuristic: RankedCandidate,
+    trace: list[dict],
+    *,
+    policy: str,
+    ranker_path: str | None,
+    ranker_locator: Locator | None,
+    min_ranker_confidence: float,
+    min_ranker_margin: float,
+    min_margin: float,
+    min_validator_confidence: float,
+    max_ranker_penalties: int,
+    cache: SelectorCache | None,
+    learn: bool,
+    veto_ranker_path: str | None,
+    veto_confidence_below: float,
+) -> RankerStageResult:
+    if policy not in RANKER_POLICIES:
+        return RankerStageResult()
+
+    ranker_attempt = _call_ranker(
+        field,
+        ranked,
+        ranker_path=ranker_path,
+        ranker_locator=ranker_locator,
+        min_ranker_confidence=min_ranker_confidence,
+        min_ranker_margin=min_ranker_margin,
+        min_validator_confidence=min_validator_confidence,
+        max_ranker_penalties=max_ranker_penalties,
+    )
+    if ranker_attempt.error:
+        trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
+        if policy in RANKER_ONLY_POLICIES:
+            return RankerStageResult(_abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace))
+        return RankerStageResult(abstention_reason="ranker_error")
+
+    if ranker_attempt.chosen is None:
+        ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
+        trace.append(
+            {
+                "stage": "ranker",
+                "status": "abstained",
+                "reason": ranker_abstention_reason,
+                "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
+                "margin": (ranker_attempt.choice.raw or {}).get("margin") if ranker_attempt.choice else None,
+                "latency_ms": ranker_attempt.latency_ms,
+            }
+        )
+        if policy in RANKER_ONLY_POLICIES:
+            return RankerStageResult(_abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace))
+        if not _ranker_abstention_allows_model(ranker_abstention_reason):
+            return RankerStageResult(
+                _abstention(
+                    field,
+                    source="ranker_recovery",
+                    reason=ranker_abstention_reason,
+                    chosen=heuristic,
+                    model=ranker_path,
+                    trace=trace,
+                )
+            )
+        return RankerStageResult(abstention_reason=ranker_abstention_reason)
+
+    ranker_decision = _evaluate_strict(
+        ranker_attempt.chosen,
+        ranked,
+        min_confidence=0.0,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+        enforce_margin=False,
+    )
+    trace.append(
+        {
+            "stage": "ranker",
+            "status": "choose",
+            "candidate_id": ranker_attempt.chosen.candidate.id,
+            "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
+            "margin": (ranker_attempt.choice.raw or {}).get("margin") if ranker_attempt.choice else None,
+            "latency_ms": ranker_attempt.latency_ms,
+        }
+    )
+    safe_ranker_reason = safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy in SAFE_RANKER_POLICIES else None
+    if ranker_decision.ok and safe_ranker_reason is None and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence):
+        vetoed = _safety_veto_stage(
+            field,
+            ranker_attempt.chosen,
+            ranked,
+            trace,
+            policy=policy,
+            veto_ranker_path=veto_ranker_path,
+            veto_confidence_below=veto_confidence_below,
+            model=veto_ranker_path,
+        )
+        if vetoed is not None:
+            return RankerStageResult(vetoed)
+        trace.append({"stage": "ranker_strict_gate", "status": "accepted", "candidate_id": ranker_attempt.chosen.candidate.id})
+        _learn_selector_stage(field, ranker_attempt.chosen, cache=cache, learn=learn, source="ranker_recovery")
+        return RankerStageResult(
+            _field_extraction(
+                field,
+                ranker_attempt.chosen,
+                source="ranker_recovery",
+                model=ranker_path,
+                trace=trace,
+                decision_reason="ranker_recovered_after_heuristic_abstention",
+            )
+        )
+
+    reason = safe_ranker_reason or ranker_decision.reason or "low_ranker_confidence"
+    trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
+    return RankerStageResult(_abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace))
+
+
+def _llm_fallback_stage(
+    field: FieldSpec,
+    ranked: list[RankedCandidate],
+    heuristic: RankedCandidate,
+    trace: list[dict],
+    *,
+    use_llm: bool,
+    model_on_abstain_only: bool,
+    policy: str,
+    llm_fallback_policy: str,
+    ranker_abstention_reason: str | None,
+    min_confidence: float,
+    min_margin: float,
+    min_validator_confidence: float,
+    min_llm_confidence: float,
+    model: str,
+    ollama_host: str | None,
+    locator: Locator | None,
+    cache: SelectorCache | None,
+    learn: bool,
+) -> FieldExtraction | None:
+    should_call_model = use_llm and (model_on_abstain_only or policy in {"safe-local", "ranker-plus-llm"})
+    if not should_call_model:
+        return None
+    if policy == "ranker-plus-llm":
+        fallback_decision = _llm_fallback_decision(
+            field,
+            ranked,
+            policy=llm_fallback_policy,
+            ranker_reason=ranker_abstention_reason,
+            min_confidence=min_confidence,
+            min_validator_confidence=min_validator_confidence,
+        )
+        trace.append(fallback_decision.trace_event())
+        if not fallback_decision.eligible:
+            return _abstention(field, source="model_recovery", reason=fallback_decision.reason, chosen=heuristic, model=model, trace=trace)
+
+    attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
+    if attempt.error:
+        trace.append({"stage": "local_model", "status": "error", "reason": attempt.error, "latency_ms": attempt.latency_ms})
+        return _abstention(field, source="model_recovery", reason="model_error", chosen=heuristic, model=model, trace=trace)
+    if attempt.chosen is None:
+        trace.append(
+            {
+                "stage": "local_model",
+                "status": "abstained",
+                "reason": attempt.choice.reason if attempt.choice else "no_choice",
+                "latency_ms": attempt.latency_ms,
+            }
+        )
+        return _abstention(field, source="model_recovery", reason="model_abstained", chosen=heuristic, model=model, trace=trace)
+
+    model_decision = _evaluate_strict(
+        attempt.chosen,
+        ranked,
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+        enforce_margin=False,
+    )
+    trace.append(
+        {
+            "stage": "local_model",
+            "status": "choose",
+            "candidate_id": attempt.chosen.candidate.id,
+            "confidence": attempt.choice.confidence if attempt.choice else None,
+            "latency_ms": attempt.latency_ms,
+        }
+    )
+    if model_decision.ok and (attempt.choice is None or attempt.choice.confidence >= min_llm_confidence):
+        trace.append({"stage": "model_strict_gate", "status": "accepted", "candidate_id": attempt.chosen.candidate.id})
+        _learn_selector_stage(field, attempt.chosen, cache=cache, learn=learn, source="model_recovery")
+        return _field_extraction(
+            field,
+            attempt.chosen,
+            source="model_recovery",
+            model=model,
+            trace=trace,
+            decision_reason="model_recovered_after_heuristic_abstention",
+        )
+    reason = model_decision.reason or "low_model_confidence"
+    if attempt.choice and attempt.choice.confidence < min_llm_confidence:
+        reason = "low_model_confidence"
+    trace.append({"stage": "model_strict_gate", "status": "abstained", "reason": reason})
+    return _abstention(field, source="model_recovery", reason=reason, chosen=attempt.chosen, model=model, trace=trace)
+
+
+def _direct_llm_stage(
+    field: FieldSpec,
+    ranked: list[RankedCandidate],
+    heuristic: RankedCandidate,
+    trace: list[dict],
+    *,
+    use_llm: bool,
+    model_on_abstain_only: bool,
+    min_llm_confidence: float,
+    model: str,
+    ollama_host: str | None,
+    locator: Locator | None,
+    cache: SelectorCache | None,
+    learn: bool,
+) -> FieldExtraction | None:
+    if not (use_llm and not model_on_abstain_only):
+        return None
+    attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
+    if attempt.chosen is not None and (attempt.choice is None or attempt.choice.confidence >= min_llm_confidence):
+        _learn_selector_stage(field, attempt.chosen, cache=cache, learn=learn, source="llm", require_valid=True)
+        trace.append({"stage": "local_model", "status": "accepted", "candidate_id": attempt.chosen.candidate.id, "latency_ms": attempt.latency_ms})
+        return _field_extraction(field, attempt.chosen, source="llm", model=model, trace=trace)
+    if attempt.error:
+        heuristic.reasons.append("llm fallback: " + attempt.error)
+        trace.append({"stage": "local_model", "status": "error", "reason": attempt.error, "latency_ms": attempt.latency_ms})
+    return None
+
+
 def extract_field(
     field: FieldSpec,
     html: str,
@@ -770,50 +1043,22 @@ def extract_field(
     veto_confidence_below: float = 0.60,
 ) -> FieldExtraction:
     trace: list[dict] = []
-    if cache is not None:
-        lookup = _cached_candidate(field, html, cache)
-        if lookup.attempted:
-            trace.append({"stage": "cache", "status": "attempted", "selector_count": lookup.selector_count})
-        cached = lookup.candidate
-        if cached is not None:
-            trace.append(
-                {
-                    "stage": "cache",
-                    "status": "hit",
-                    "candidate_id": cached.candidate.id,
-                    "selector": lookup.accepted_selector,
-                    "strategy": lookup.accepted_strategy,
-                }
-            )
-            if strict:
-                decision = _evaluate_strict(
-                    cached,
-                    [cached],
-                    min_confidence=0.0,
-                    min_margin=min_margin,
-                    min_validator_confidence=min_validator_confidence,
-                    enforce_margin=False,
-                )
-                if not decision.ok:
-                    trace.append({"stage": "cache", "status": "abstained", "reason": decision.reason, "selector": lookup.accepted_selector, "strategy": lookup.accepted_strategy})
-                    return _abstention(field, source="cache", reason=decision.reason or "cache_rejected", chosen=cached, trace=trace)
-            return _field_extraction(field, cached, source="cache", trace=trace)
-        trace.append(
-            {
-                "stage": "cache",
-                "status": "miss",
-                "reason": lookup.rejection_reason or ("selector_not_validated" if lookup.attempted else "empty"),
-                "selector": lookup.rejection_selector,
-                "strategy": lookup.rejection_strategy,
-            }
-        )
+    cache_result = _try_cache_stage(
+        field,
+        html,
+        cache,
+        trace,
+        strict=strict,
+        min_margin=min_margin,
+        min_validator_confidence=min_validator_confidence,
+    )
+    if cache_result is not None:
+        return cache_result
 
-    ranked = rank_candidates(field, candidates, top=max(1, top_k))
-    heuristic = next((item for item in ranked if item.validation.passed), ranked[0] if ranked else None)
-
-    if heuristic is None:
-        trace.append({"stage": "strict_heuristic", "status": "abstained", "reason": "no_candidates"})
-        return _abstention(field, source="none", reason="no_candidates", trace=trace)
+    ranked, heuristic, heuristic_result = _heuristic_stage(field, candidates, trace, top_k=top_k)
+    if heuristic_result is not None:
+        return heuristic_result
+    assert heuristic is not None
 
     if strict:
         decision = _evaluate_strict(
@@ -824,23 +1069,22 @@ def extract_field(
             min_validator_confidence=min_validator_confidence,
             enforce_margin=True,
         )
-        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"} else None
+        safe_gate_reason = safe_policy_gate_reason(field, heuristic, ranked) if policy in SAFE_RANKER_POLICIES else None
         if decision.ok and safe_gate_reason is None:
-            veto_event = _safety_veto_event(
+            veto_result = _safety_veto_stage(
                 field,
                 heuristic,
                 ranked,
+                trace,
                 policy=policy,
                 veto_ranker_path=veto_ranker_path,
                 veto_confidence_below=veto_confidence_below,
+                model=veto_ranker_path,
             )
-            if veto_event and veto_event.get("status") != "passed":
-                return _vetoed_extraction(field, heuristic, trace, veto_event, model=veto_ranker_path)
-            if veto_event:
-                trace.append(veto_event)
+            if veto_result is not None:
+                return veto_result
             trace.append({"stage": "strict_heuristic", "status": "accepted", "candidate_id": heuristic.candidate.id})
-            if cache is not None and learn:
-                cache.remember(field, heuristic, source="heuristic")
+            _learn_selector_stage(field, heuristic, cache=cache, learn=learn, source="heuristic")
             return _field_extraction(field, heuristic, source="heuristic", trace=trace)
         trace.append(
             {
@@ -850,178 +1094,70 @@ def extract_field(
                 "candidate_id": heuristic.candidate.id,
             }
         )
-        ranker_abstention_reason = None
-        if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto", "ranker-plus-llm"}:
-            ranker_attempt = _call_ranker(
-                field,
-                ranked,
-                ranker_path=ranker_path,
-                ranker_locator=ranker_locator,
-                min_ranker_confidence=min_ranker_confidence,
-                min_ranker_margin=min_ranker_margin,
-                min_validator_confidence=min_validator_confidence,
-                max_ranker_penalties=max_ranker_penalties,
-            )
-            if ranker_attempt.error:
-                trace.append({"stage": "ranker", "status": "error", "reason": ranker_attempt.error, "latency_ms": ranker_attempt.latency_ms})
-                ranker_abstention_reason = "ranker_error"
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
-                    return _abstention(field, source="ranker_recovery", reason="ranker_error", chosen=heuristic, model=ranker_path, trace=trace)
-            elif ranker_attempt.chosen is None:
-                ranker_abstention_reason = ranker_attempt.choice.reason if ranker_attempt.choice else "no_choice"
-                trace.append(
-                    {
-                        "stage": "ranker",
-                        "status": "abstained",
-                        "reason": ranker_abstention_reason,
-                        "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
-                        "margin": (ranker_attempt.choice.raw or {}).get("margin") if ranker_attempt.choice else None,
-                        "latency_ms": ranker_attempt.latency_ms,
-                    }
-                )
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
-                    return _abstention(field, source="ranker_recovery", reason="ranker_abstained", chosen=heuristic, model=ranker_path, trace=trace)
-                if not _ranker_abstention_allows_model(ranker_abstention_reason):
-                    return _abstention(
-                        field,
-                        source="ranker_recovery",
-                        reason=ranker_abstention_reason,
-                        chosen=heuristic,
-                        model=ranker_path,
-                        trace=trace,
-                    )
-            else:
-                ranker_decision = _evaluate_strict(
-                    ranker_attempt.chosen,
-                    ranked,
-                    min_confidence=0.0,
-                    min_margin=min_margin,
-                    min_validator_confidence=min_validator_confidence,
-                    enforce_margin=False,
-                )
-                trace.append(
-                    {
-                        "stage": "ranker",
-                        "status": "choose",
-                        "candidate_id": ranker_attempt.chosen.candidate.id,
-                        "confidence": ranker_attempt.choice.confidence if ranker_attempt.choice else None,
-                        "margin": (ranker_attempt.choice.raw or {}).get("margin") if ranker_attempt.choice else None,
-                        "latency_ms": ranker_attempt.latency_ms,
-                    }
-                )
-                safe_ranker_reason = safe_policy_gate_reason(field, ranker_attempt.chosen, ranked) if policy in {"ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"} else None
-                if (
-                    ranker_decision.ok
-                    and safe_ranker_reason is None
-                    and (ranker_attempt.choice is None or ranker_attempt.choice.confidence >= min_ranker_confidence)
-                ):
-                    veto_event = _safety_veto_event(
-                        field,
-                        ranker_attempt.chosen,
-                        ranked,
-                        policy=policy,
-                        veto_ranker_path=veto_ranker_path,
-                        veto_confidence_below=veto_confidence_below,
-                    )
-                    if veto_event and veto_event.get("status") != "passed":
-                        return _vetoed_extraction(field, ranker_attempt.chosen, trace, veto_event, model=veto_ranker_path)
-                    if veto_event:
-                        trace.append(veto_event)
-                    trace.append({"stage": "ranker_strict_gate", "status": "accepted", "candidate_id": ranker_attempt.chosen.candidate.id})
-                    if cache is not None and learn:
-                        cache.remember(field, ranker_attempt.chosen, source="ranker_recovery")
-                    return _field_extraction(
-                        field,
-                        ranker_attempt.chosen,
-                        source="ranker_recovery",
-                        model=ranker_path,
-                        trace=trace,
-                        decision_reason="ranker_recovered_after_heuristic_abstention",
-                    )
-                reason = safe_ranker_reason or ranker_decision.reason or "low_ranker_confidence"
-                trace.append({"stage": "ranker_strict_gate", "status": "abstained", "reason": reason})
-                if policy in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"}:
-                    return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
-                return _abstention(field, source="ranker_recovery", reason=reason, chosen=ranker_attempt.chosen, model=ranker_path, trace=trace)
+        ranker_result = _ranker_recovery_stage(
+            field,
+            ranked,
+            heuristic,
+            trace,
+            policy=policy,
+            ranker_path=ranker_path,
+            ranker_locator=ranker_locator,
+            min_ranker_confidence=min_ranker_confidence,
+            min_ranker_margin=min_ranker_margin,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            max_ranker_penalties=max_ranker_penalties,
+            cache=cache,
+            learn=learn,
+            veto_ranker_path=veto_ranker_path,
+            veto_confidence_below=veto_confidence_below,
+        )
+        if ranker_result.extraction is not None:
+            return ranker_result.extraction
 
-        should_call_model = use_llm and (model_on_abstain_only or policy in {"safe-local", "ranker-plus-llm"})
-        if should_call_model:
-            if policy == "ranker-plus-llm":
-                fallback_decision = _llm_fallback_decision(
-                    field,
-                    ranked,
-                    policy=llm_fallback_policy,
-                    ranker_reason=ranker_abstention_reason,
-                    min_confidence=min_confidence,
-                    min_validator_confidence=min_validator_confidence,
-                )
-                trace.append(fallback_decision.trace_event())
-                if not fallback_decision.eligible:
-                    return _abstention(field, source="model_recovery", reason=fallback_decision.reason, chosen=heuristic, model=model, trace=trace)
-            attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
-            if attempt.error:
-                trace.append({"stage": "local_model", "status": "error", "reason": attempt.error, "latency_ms": attempt.latency_ms})
-                return _abstention(field, source="model_recovery", reason="model_error", chosen=heuristic, model=model, trace=trace)
-            if attempt.chosen is None:
-                trace.append(
-                    {
-                        "stage": "local_model",
-                        "status": "abstained",
-                        "reason": attempt.choice.reason if attempt.choice else "no_choice",
-                        "latency_ms": attempt.latency_ms,
-                    }
-                )
-                return _abstention(field, source="model_recovery", reason="model_abstained", chosen=heuristic, model=model, trace=trace)
-            model_decision = _evaluate_strict(
-                attempt.chosen,
-                ranked,
-                min_confidence=min_confidence,
-                min_margin=min_margin,
-                min_validator_confidence=min_validator_confidence,
-                enforce_margin=False,
-            )
-            trace.append(
-                {
-                    "stage": "local_model",
-                    "status": "choose",
-                    "candidate_id": attempt.chosen.candidate.id,
-                    "confidence": attempt.choice.confidence if attempt.choice else None,
-                    "latency_ms": attempt.latency_ms,
-                }
-            )
-            if model_decision.ok and (attempt.choice is None or attempt.choice.confidence >= min_llm_confidence):
-                trace.append({"stage": "model_strict_gate", "status": "accepted", "candidate_id": attempt.chosen.candidate.id})
-                if cache is not None and learn:
-                    cache.remember(field, attempt.chosen, source="model_recovery")
-                return _field_extraction(
-                    field,
-                    attempt.chosen,
-                    source="model_recovery",
-                    model=model,
-                    trace=trace,
-                    decision_reason="model_recovered_after_heuristic_abstention",
-                )
-            reason = model_decision.reason or "low_model_confidence"
-            if attempt.choice and attempt.choice.confidence < min_llm_confidence:
-                reason = "low_model_confidence"
-            trace.append({"stage": "model_strict_gate", "status": "abstained", "reason": reason})
-            return _abstention(field, source="model_recovery", reason=reason, chosen=attempt.chosen, model=model, trace=trace)
+        llm_result = _llm_fallback_stage(
+            field,
+            ranked,
+            heuristic,
+            trace,
+            use_llm=use_llm,
+            model_on_abstain_only=model_on_abstain_only,
+            policy=policy,
+            llm_fallback_policy=llm_fallback_policy,
+            ranker_abstention_reason=ranker_result.abstention_reason,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            min_validator_confidence=min_validator_confidence,
+            min_llm_confidence=min_llm_confidence,
+            model=model,
+            ollama_host=ollama_host,
+            locator=locator,
+            cache=cache,
+            learn=learn,
+        )
+        if llm_result is not None:
+            return llm_result
         return _abstention(field, source="heuristic", reason=decision.reason or "strict_gate_failed", chosen=heuristic, trace=trace)
 
-    if use_llm and not model_on_abstain_only:
-        attempt = _call_locator(field, ranked, model=model, ollama_host=ollama_host, locator=locator)
-        if attempt.chosen is not None and (attempt.choice is None or attempt.choice.confidence >= min_llm_confidence):
-            if cache is not None and learn and attempt.chosen.validation.passed:
-                cache.remember(field, attempt.chosen, source="llm")
-            trace.append({"stage": "local_model", "status": "accepted", "candidate_id": attempt.chosen.candidate.id, "latency_ms": attempt.latency_ms})
-            return _field_extraction(field, attempt.chosen, source="llm", model=model, trace=trace)
-        if attempt.error:
-            heuristic.reasons.append("llm fallback: " + attempt.error)
-            trace.append({"stage": "local_model", "status": "error", "reason": attempt.error, "latency_ms": attempt.latency_ms})
+    direct_llm_result = _direct_llm_stage(
+        field,
+        ranked,
+        heuristic,
+        trace,
+        use_llm=use_llm,
+        model_on_abstain_only=model_on_abstain_only,
+        min_llm_confidence=min_llm_confidence,
+        model=model,
+        ollama_host=ollama_host,
+        locator=locator,
+        cache=cache,
+        learn=learn,
+    )
+    if direct_llm_result is not None:
+        return direct_llm_result
 
     trace.append({"stage": "heuristic", "status": "accepted", "candidate_id": heuristic.candidate.id})
-    if cache is not None and learn and heuristic.validation.passed:
-        cache.remember(field, heuristic, source="heuristic")
+    _learn_selector_stage(field, heuristic, cache=cache, learn=learn, source="heuristic", require_valid=True)
 
     return _field_extraction(field, heuristic, source="heuristic", trace=trace)
 

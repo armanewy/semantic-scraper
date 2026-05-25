@@ -4,6 +4,7 @@ import re
 from collections.abc import Iterable
 
 from .models import Candidate, FieldSpec, RankedCandidate
+from .rules import reason_for
 from .util import normalize_ws, tokens
 from .validators import PRICE_RE, extract_value, validate_value
 
@@ -55,6 +56,14 @@ TITLE_NEGATIVE_TERMS = {
     "categories",
 }
 RATING_NEGATIVE_TERMS = {"comments", "votes", "questions", "rank"}
+
+RULE_PRICE_SHIPPING_TAX_INSTALLMENT = reason_for("price.shipping_tax_installment")
+RULE_PRICE_OLD_LIST = reason_for("price.old_list_price")
+RULE_TITLE_PRICE_SHAPED = reason_for("title.price_shaped_candidate")
+RULE_LISTING_NON_FIRST_ITEM = reason_for("listing.non_first_listing_item")
+RULE_LISTING_NON_FIRST_ITEM_PRICE = reason_for("listing.non_first_listing_item_price")
+RULE_DOCS_CHROME_ACTION_LABEL = reason_for("docs.chrome_action_label")
+RULE_DOCS_SECTION_NON_CONTENT = reason_for("docs.section_non_content_region")
 
 
 def field_tokens(field: FieldSpec) -> set[str]:
@@ -153,10 +162,10 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
                 reasons.append("disqualified wrong listing ordinal price")
             elif _looks_like_later_repeated_result(candidate.selector.lower()):
                 score -= 2.4
-                validation.hard_disqualifiers.append("non-first listing item price")
-                validation.errors.append("non-first listing item price")
+                validation.hard_disqualifiers.append(RULE_LISTING_NON_FIRST_ITEM_PRICE)
+                validation.errors.append(RULE_LISTING_NON_FIRST_ITEM_PRICE)
                 validation.passed = False
-                reasons.append("disqualified non-first listing item price")
+                reasons.append(f"disqualified {RULE_LISTING_NON_FIRST_ITEM_PRICE}")
             elif _candidate_in_listing_region(candidate.selector.lower(), ctx):
                 score += 0.55
                 reasons.append("first/listing price region cue")
@@ -174,8 +183,8 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             # If the user explicitly asks for old/list price, do not penalize.
             if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in OLD_PRICE_TERMS):
                 score -= 1.4
-                validation.penalties.append("old/list price cue")
-                reasons.append("penalized old/list price cue")
+                validation.penalties.append(RULE_PRICE_OLD_LIST)
+                reasons.append(f"penalized {RULE_PRICE_OLD_LIST}")
         if any(term in attr_ctx or term in own for term in PRICE_SOFT_NEGATIVE_TERMS):
             if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in PRICE_SOFT_NEGATIVE_TERMS):
                 score -= 0.55
@@ -184,10 +193,10 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
         if any(term in attr_ctx or term in own for term in PRICE_HARD_NEGATIVE_TERMS):
             if not any(term in field.description.lower() or term in " ".join(field.hints).lower() for term in PRICE_HARD_NEGATIVE_TERMS):
                 score -= 2.0
-                validation.hard_disqualifiers.append("shipping/tax/installment price cue")
-                validation.errors.append("shipping/tax/installment price cue")
+                validation.hard_disqualifiers.append(RULE_PRICE_SHIPPING_TAX_INSTALLMENT)
+                validation.errors.append(RULE_PRICE_SHIPPING_TAX_INSTALLMENT)
                 validation.passed = False
-                reasons.append("disqualified shipping/tax/installment price cue")
+                reasons.append(f"disqualified {RULE_PRICE_SHIPPING_TAX_INSTALLMENT}")
         if len(candidate.text) > 120:
             score -= 0.5
             validation.penalties.append("broad price container")
@@ -224,10 +233,10 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             reasons.append("heading tag")
         if _looks_like_price_value(value.lower()):
             score -= 2.4
-            validation.hard_disqualifiers.append("price-shaped title candidate")
-            validation.errors.append("price-shaped title candidate")
+            validation.hard_disqualifiers.append(RULE_TITLE_PRICE_SHAPED)
+            validation.errors.append(RULE_TITLE_PRICE_SHAPED)
             validation.passed = False
-            reasons.append("disqualified price-shaped title candidate")
+            reasons.append(f"disqualified {RULE_TITLE_PRICE_SHAPED}")
         if _is_listing_item_prompt(field.prompt_text):
             ordinal = _requested_ordinal(field.prompt_text)
             position = _listing_position(candidate.selector.lower(), ctx)
@@ -242,10 +251,10 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
                 reasons.append("disqualified wrong listing ordinal item")
             elif _looks_like_later_repeated_result(candidate.selector.lower()):
                 score -= 2.0
-                validation.hard_disqualifiers.append("non-first listing item")
-                validation.errors.append("non-first listing item")
+                validation.hard_disqualifiers.append(RULE_LISTING_NON_FIRST_ITEM)
+                validation.errors.append(RULE_LISTING_NON_FIRST_ITEM)
                 validation.passed = False
-                reasons.append("disqualified non-first listing item")
+                reasons.append(f"disqualified {RULE_LISTING_NON_FIRST_ITEM}")
             if candidate.tag in {"h1", "title"} or not _candidate_in_listing_region(candidate.selector.lower(), ctx):
                 score -= 2.0
                 validation.hard_disqualifiers.append("listing item outside card/result region")
@@ -332,17 +341,17 @@ def score_candidate(field: FieldSpec, candidate: Candidate) -> RankedCandidate:
             reasons.append("documentation title label")
         if any(term in value.lower() for term in {"this page", "show source", "report a bug", "improve this page"}):
             score -= 2.0
-            validation.hard_disqualifiers.append("docs chrome action label")
-            validation.errors.append("docs chrome action label")
+            validation.hard_disqualifiers.append(RULE_DOCS_CHROME_ACTION_LABEL)
+            validation.errors.append(RULE_DOCS_CHROME_ACTION_LABEL)
             validation.passed = False
-            reasons.append("disqualified docs chrome action label")
+            reasons.append(f"disqualified {RULE_DOCS_CHROME_ACTION_LABEL}")
 
     if _is_section_prompt(field, name) and _is_non_content_section_region(candidate.selector, ctx, value.lower()):
         score -= 2.0
-        validation.hard_disqualifiers.append("section heading outside main content")
-        validation.errors.append("section heading outside main content")
+        validation.hard_disqualifiers.append(RULE_DOCS_SECTION_NON_CONTENT)
+        validation.errors.append(RULE_DOCS_SECTION_NON_CONTENT)
         validation.passed = False
-        reasons.append("disqualified section heading outside main content")
+        reasons.append(f"disqualified {RULE_DOCS_SECTION_NON_CONTENT}")
     if _is_section_prompt(field, name) and candidate.tag in {"h1", "title"}:
         score -= 2.0
         validation.hard_disqualifiers.append("section prompt matched page title")
