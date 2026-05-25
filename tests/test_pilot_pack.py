@@ -36,6 +36,9 @@ def test_pilot_run_writes_bundle_and_reports(tmp_path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["bundle_audit_passed"] is True
     assert payload["fields_attempted"] == 3
+    assert payload["coverage_rate_denominator"] == 3
+    assert payload["false_positive_rate_denominator"] == 3
+    assert payload["corpus_type"] == "pilot"
     assert (project / "evidence-bundle.zip").exists()
     assert (project / "runs" / "summary.json").exists()
     assert (project / "runs" / "report.md").exists()
@@ -123,13 +126,20 @@ def test_pilot_report_summarize_and_pack_gaps(tmp_path, capsys) -> None:
     report_text = report.read_text(encoding="utf-8")
     assert "Scorecard" in report_text
     assert "Bundle Privacy Audit" in report_text
+    assert "coverage_rate: `" in report_text
+    assert "/3)" in report_text
 
     summary = tmp_path / "summary.md"
     assert main(["pilot", "summarize", str(project), "--out", str(summary)]) == 0
     summary_payload = json.loads(capsys.readouterr().out)
     assert summary_payload["pilots"] == 1
+    assert summary_payload["aggregate"]["pilot_count"] == 1
+    assert summary_payload["aggregate"]["fields_attempted"] == 3
     assert summary_payload["aggregate"]["false_positive_rate"] == 0.0
-    assert "alpha pilot summary" in summary.read_text(encoding="utf-8")
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "alpha pilot summary" in summary_text
+    assert "aggregate_false_positive_rate: `" in summary_text
+    assert "/3)" in summary_text
 
     intake = tmp_path / "intake.jsonl"
     assert main(["evidence", "intake", str(project / "evidence-bundle.zip"), "--out", str(intake)]) == 0

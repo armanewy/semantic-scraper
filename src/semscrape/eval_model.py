@@ -13,6 +13,8 @@ from .heuristics import rank_candidates
 from .llm import LLMError, OllamaLocator
 from .models import FieldSpec, RankedCandidate, ScrapeSpec
 
+KNOWN_CORPUS_TYPES = {"train", "dev", "regression", "holdout", "external", "pilot"}
+
 
 def normalize_expected(value: Any) -> str:
     normalized = (
@@ -315,42 +317,66 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         cache_false_positives = [row for row in model_rows if row.get("cache_false_positive")]
         hidden_candidate_rejections = [row for row in model_rows if row.get("hidden_candidate_rejected")]
         visible_candidate_accepts = [row for row in model_rows if row.get("visible_candidate_accepted")]
-        summary[model] = {
+        fields_attempted = len(model_rows)
+        expected_present_count = len(expected_rows)
+        candidate_present_count = sum(int(bool(row["candidate_present"])) for row in expected_rows)
+        candidate_missing_count = expected_present_count - candidate_present_count
+        extracted_count = len(extracted_rows)
+        abstention_count = sum(int(bool(row["abstained"])) for row in model_rows)
+        false_positive_count = sum(int(bool(row["false_positive"])) for row in model_rows)
+        correct_count = sum(int(bool(row["correct"])) for row in model_rows)
+        validated_correct_count = sum(int(bool(row["validated"] and row["correct"])) for row in expected_rows)
+        miss_count = sum(int(bool(row["expected_present"] and not row["correct"])) for row in model_rows)
+        model_call_count = len(model_called)
+        ranker_call_count = len(ranker_called)
+        cache_attempt_count = len(cache_attempts)
+        cache_hit_count = len(cache_hits)
+        model_summary = {
+            **_summary_context(model_rows),
             "rows": len(model_rows),
             "expected_present_rows": len(expected_rows),
             "expected_absent_rows": len(absent_rows),
-            "candidate_recall_at_k": _rate(sum(row["candidate_present"] for row in expected_rows), len(expected_rows)),
-            "coverage_rate": _rate(len(extracted_rows), len(model_rows)),
+            "fields_attempted": fields_attempted,
+            "extracted_count": extracted_count,
+            "abstention_count": abstention_count,
+            "false_positive_count": false_positive_count,
+            "correct_count": correct_count,
+            "expected_present_count": expected_present_count,
+            "candidate_present_count": candidate_present_count,
+            "candidate_missing_count": candidate_missing_count,
+            "candidate_recall_denominator": expected_present_count,
+            "candidate_recall_at_k": _rate(candidate_present_count, expected_present_count),
+            "coverage_rate": _rate(extracted_count, fields_attempted),
             "model_choice_accuracy_when_candidate_present": _rate(sum(row["model_choice_correct"] for row in candidate_rows), len(candidate_rows)),
-            "validated_accuracy": _rate(sum(row["validated"] and row["correct"] for row in expected_rows), len(expected_rows)),
-            "abstention_rate": _rate(sum(row["abstained"] for row in model_rows), len(model_rows)),
+            "validated_accuracy": _rate(validated_correct_count, expected_present_count),
+            "abstention_rate": _rate(abstention_count, fields_attempted),
             "ambiguous_abstention_rate": _rate(len(ambiguous_abstentions), len(model_rows)),
-            "miss_rate": _rate(sum(row["expected_present"] and not row["correct"] for row in model_rows), len(expected_rows)),
-            "false_positive_rate": _rate(sum(row["false_positive"] for row in model_rows), len(model_rows)),
+            "miss_rate": _rate(miss_count, expected_present_count),
+            "false_positive_rate": _rate(false_positive_count, fields_attempted),
             "model_error_rate": _rate(len(model_error_rows), len(model_rows)),
             "heuristic_accept_rate": _rate(len(heuristic_accepted), len(model_rows)),
             "heuristic_abstention_rate": _rate(len(heuristic_abstained), len(model_rows)),
-            "model_call_rate": _rate(len(model_called), len(model_rows)),
+            "model_call_rate": _rate(model_call_count, fields_attempted),
             "model_recovery_rate": _rate(len(model_validated_recovery), len(heuristic_abstained)),
-            "model_validated_recovery_rate": _rate(len(model_validated_recovery), len(model_called)),
-            "model_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "model_validated_recovery_rate": _rate(len(model_validated_recovery), model_call_count),
+            "model_false_positive_rate": _rate(len(model_false_positive), model_call_count),
             "llm_fallback_eligible_rate": _rate(len(llm_fallback_eligible), len(model_rows)),
             "llm_fallback_suppressed_rate": _rate(len(llm_fallback_suppressed), len(model_rows)),
-            "llm_fallback_call_rate": _rate(len(model_called), len(model_rows)),
-            "llm_fallback_yield": _rate(len(model_validated_recovery), len(model_called)),
-            "llm_fallback_false_positive_rate": _rate(len(model_false_positive), len(model_called)),
+            "llm_fallback_call_rate": _rate(model_call_count, fields_attempted),
+            "llm_fallback_yield": _rate(len(model_validated_recovery), model_call_count),
+            "llm_fallback_false_positive_rate": _rate(len(model_false_positive), model_call_count),
             "llm_calls_avoided_by_recoverability_gate": sum(int(bool(row.get("llm_calls_avoided_by_recoverability_gate"))) for row in model_rows),
             "coverage_lost_by_fallback_gate": _rate(len(llm_fallback_lost), len(model_rows)),
-            "ranker_call_rate": _rate(len(ranker_called), len(model_rows)),
-            "ranker_recovery_rate": _rate(len(ranker_validated_recovery), len(ranker_called)),
-            "ranker_false_positive_rate": _rate(len(ranker_false_positive), len(ranker_called)),
+            "ranker_call_rate": _rate(ranker_call_count, fields_attempted),
+            "ranker_recovery_rate": _rate(len(ranker_validated_recovery), ranker_call_count),
+            "ranker_false_positive_rate": _rate(len(ranker_false_positive), ranker_call_count),
             "ranker_error_rate": _rate(len(ranker_error_rows), len(model_rows)),
             "qwen_calls_avoided_by_ranker": sum(int(bool(row.get("ranker_validated_recovery"))) for row in model_rows),
-            "cache_attempts": len(cache_attempts),
-            "cache_hit_rate": _rate(len(cache_hits), len(cache_attempts)),
+            "cache_attempts": cache_attempt_count,
+            "cache_hit_rate": _rate(cache_hit_count, cache_attempt_count),
             "cache_validated_hit_rate": _rate(len(cache_validated_hits), len(model_rows)),
-            "cache_rejected_rate": _rate(len(cache_rejections), len(cache_attempts)),
-            "cache_false_positive_rate": _rate(len(cache_false_positives), len(cache_hits)),
+            "cache_rejected_rate": _rate(len(cache_rejections), cache_attempt_count),
+            "cache_false_positive_rate": _rate(len(cache_false_positives), cache_hit_count),
             "selector_reuse_rate": _rate(len(cache_validated_hits), len(model_rows)),
             "selector_strategy_breakdown": _selector_strategy_breakdown(model_rows),
             "learned_selector_count": sum(int(bool(row.get("learned_selector"))) for row in model_rows),
@@ -368,6 +394,50 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in model_rows), len(model_rows)),
             "failure_reasons": dict(_counts(row["failure_reason"] for row in model_rows if row["failure_reason"])),
         }
+        _add_rate_parts(model_summary, "candidate_recall_at_k", candidate_present_count, expected_present_count)
+        _add_rate_parts(model_summary, "coverage_rate", extracted_count, fields_attempted)
+        _add_rate_parts(
+            model_summary,
+            "model_choice_accuracy_when_candidate_present",
+            sum(int(bool(row["model_choice_correct"])) for row in candidate_rows),
+            len(candidate_rows),
+        )
+        _add_rate_parts(model_summary, "validated_accuracy", validated_correct_count, expected_present_count)
+        _add_rate_parts(model_summary, "abstention_rate", abstention_count, fields_attempted)
+        _add_rate_parts(model_summary, "ambiguous_abstention_rate", len(ambiguous_abstentions), fields_attempted)
+        _add_rate_parts(model_summary, "miss_rate", miss_count, expected_present_count)
+        _add_rate_parts(model_summary, "false_positive_rate", false_positive_count, fields_attempted)
+        _add_rate_parts(model_summary, "model_error_rate", len(model_error_rows), fields_attempted)
+        _add_rate_parts(model_summary, "heuristic_accept_rate", len(heuristic_accepted), fields_attempted)
+        _add_rate_parts(model_summary, "heuristic_abstention_rate", len(heuristic_abstained), fields_attempted)
+        _add_rate_parts(model_summary, "model_call_rate", model_call_count, fields_attempted)
+        _add_rate_parts(model_summary, "model_recovery_rate", len(model_validated_recovery), len(heuristic_abstained))
+        _add_rate_parts(model_summary, "model_validated_recovery_rate", len(model_validated_recovery), model_call_count)
+        _add_rate_parts(model_summary, "model_false_positive_rate", len(model_false_positive), model_call_count)
+        _add_rate_parts(model_summary, "llm_fallback_eligible_rate", len(llm_fallback_eligible), fields_attempted)
+        _add_rate_parts(model_summary, "llm_fallback_suppressed_rate", len(llm_fallback_suppressed), fields_attempted)
+        _add_rate_parts(model_summary, "llm_fallback_call_rate", model_call_count, fields_attempted)
+        _add_rate_parts(model_summary, "llm_fallback_yield", len(model_validated_recovery), model_call_count)
+        _add_rate_parts(model_summary, "llm_fallback_false_positive_rate", len(model_false_positive), model_call_count)
+        _add_rate_parts(model_summary, "coverage_lost_by_fallback_gate", len(llm_fallback_lost), fields_attempted)
+        _add_rate_parts(model_summary, "ranker_call_rate", ranker_call_count, fields_attempted)
+        _add_rate_parts(model_summary, "ranker_recovery_rate", len(ranker_validated_recovery), ranker_call_count)
+        _add_rate_parts(model_summary, "ranker_false_positive_rate", len(ranker_false_positive), ranker_call_count)
+        _add_rate_parts(model_summary, "ranker_error_rate", len(ranker_error_rows), fields_attempted)
+        _add_rate_parts(model_summary, "cache_hit_rate", cache_hit_count, cache_attempt_count)
+        _add_rate_parts(model_summary, "cache_validated_hit_rate", len(cache_validated_hits), fields_attempted)
+        _add_rate_parts(model_summary, "cache_rejected_rate", len(cache_rejections), cache_attempt_count)
+        _add_rate_parts(model_summary, "cache_false_positive_rate", len(cache_false_positives), cache_hit_count)
+        _add_rate_parts(model_summary, "selector_reuse_rate", len(cache_validated_hits), fields_attempted)
+        _add_rate_parts(model_summary, "hidden_candidate_rejection_rate", len(hidden_candidate_rejections), fields_attempted)
+        _add_rate_parts(model_summary, "visible_candidate_accept_rate", len(visible_candidate_accepts), extracted_count)
+        _add_rate_parts(
+            model_summary,
+            "model_agreement_vs_heuristic",
+            sum(int(bool(row["model_agreement_vs_heuristic"])) for row in model_rows),
+            fields_attempted,
+        )
+        summary[model] = model_summary
     return summary
 
 
@@ -380,24 +450,65 @@ def summarize_flat_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     model_error_rows = [row for row in rows if row["failure_reason"] == "model_error"]
     latencies = [row["latency_ms"] for row in rows]
     prompt_chars = [row["prompt_chars"] for row in rows]
-    return {
+    fields_attempted = len(rows)
+    expected_present_count = len(expected_rows)
+    candidate_present_count = sum(int(bool(row["candidate_present"])) for row in expected_rows)
+    candidate_missing_count = expected_present_count - candidate_present_count
+    extracted_count = len(extracted_rows)
+    abstention_count = sum(int(bool(row["abstained"])) for row in rows)
+    false_positive_count = sum(int(bool(row["false_positive"])) for row in rows)
+    correct_count = sum(int(bool(row["correct"])) for row in rows)
+    validated_correct_count = sum(int(bool(row["validated"] and row["correct"])) for row in expected_rows)
+    miss_count = sum(int(bool(row["expected_present"] and not row["correct"])) for row in rows)
+    flat_summary = {
+        **_summary_context(rows),
         "rows": len(rows),
         "expected_present_rows": len(expected_rows),
         "expected_absent_rows": len(absent_rows),
-        "candidate_recall_at_k": _rate(sum(row["candidate_present"] for row in expected_rows), len(expected_rows)),
-        "coverage_rate": _rate(len(extracted_rows), len(rows)),
+        "fields_attempted": fields_attempted,
+        "extracted_count": extracted_count,
+        "abstention_count": abstention_count,
+        "false_positive_count": false_positive_count,
+        "correct_count": correct_count,
+        "expected_present_count": expected_present_count,
+        "candidate_present_count": candidate_present_count,
+        "candidate_missing_count": candidate_missing_count,
+        "candidate_recall_denominator": expected_present_count,
+        "candidate_recall_at_k": _rate(candidate_present_count, expected_present_count),
+        "coverage_rate": _rate(extracted_count, fields_attempted),
         "model_choice_accuracy_when_candidate_present": _rate(sum(row["model_choice_correct"] for row in candidate_rows), len(candidate_rows)),
-        "validated_accuracy": _rate(sum(row["validated"] and row["correct"] for row in expected_rows), len(expected_rows)),
-        "abstention_rate": _rate(sum(row["abstained"] for row in rows), len(rows)),
+        "validated_accuracy": _rate(validated_correct_count, expected_present_count),
+        "abstention_rate": _rate(abstention_count, fields_attempted),
         "ambiguous_abstention_rate": _rate(len(ambiguous_abstentions), len(rows)),
-        "miss_rate": _rate(sum(row["expected_present"] and not row["correct"] for row in rows), len(expected_rows)),
-        "false_positive_rate": _rate(sum(row["false_positive"] for row in rows), len(rows)),
+        "miss_rate": _rate(miss_count, expected_present_count),
+        "false_positive_rate": _rate(false_positive_count, fields_attempted),
         "model_error_rate": _rate(len(model_error_rows), len(rows)),
         "latency_ms_per_field": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "prompt_chars_per_field": round(sum(prompt_chars) / len(prompt_chars), 2) if prompt_chars else 0.0,
         "model_agreement_vs_heuristic": _rate(sum(row["model_agreement_vs_heuristic"] for row in rows), len(rows)),
         "failure_reasons": dict(_counts(row["failure_reason"] for row in rows if row["failure_reason"])),
     }
+    _add_rate_parts(flat_summary, "candidate_recall_at_k", candidate_present_count, expected_present_count)
+    _add_rate_parts(flat_summary, "coverage_rate", extracted_count, fields_attempted)
+    _add_rate_parts(
+        flat_summary,
+        "model_choice_accuracy_when_candidate_present",
+        sum(int(bool(row["model_choice_correct"])) for row in candidate_rows),
+        len(candidate_rows),
+    )
+    _add_rate_parts(flat_summary, "validated_accuracy", validated_correct_count, expected_present_count)
+    _add_rate_parts(flat_summary, "abstention_rate", abstention_count, fields_attempted)
+    _add_rate_parts(flat_summary, "ambiguous_abstention_rate", len(ambiguous_abstentions), fields_attempted)
+    _add_rate_parts(flat_summary, "miss_rate", miss_count, expected_present_count)
+    _add_rate_parts(flat_summary, "false_positive_rate", false_positive_count, fields_attempted)
+    _add_rate_parts(flat_summary, "model_error_rate", len(model_error_rows), fields_attempted)
+    _add_rate_parts(
+        flat_summary,
+        "model_agreement_vs_heuristic",
+        sum(int(bool(row["model_agreement_vs_heuristic"])) for row in rows),
+        fields_attempted,
+    )
+    return flat_summary
 
 
 def apply_thresholds(
@@ -493,6 +604,39 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 def _rate(num: int, den: int) -> float:
     return round(num / den, 6) if den else 0.0
+
+
+def _single_value(rows: list[dict[str, Any]], key: str) -> Any:
+    values = sorted({str(row[key]) for row in rows if row.get(key) not in {None, ""}})
+    return values[0] if len(values) == 1 else None
+
+
+def _summary_context(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    corpus_name = _single_value(rows, "corpus_name")
+    if corpus_name is not None:
+        context["corpus_name"] = corpus_name
+    corpus_type = _single_value(rows, "corpus_type")
+    split = _single_value(rows, "split")
+    if corpus_type in KNOWN_CORPUS_TYPES:
+        context["corpus_type"] = corpus_type
+    elif split in KNOWN_CORPUS_TYPES:
+        context["corpus_type"] = split
+    policy = _single_value(rows, "policy")
+    if policy is not None:
+        context["policy"] = policy
+    ranker_artifact = _single_value(rows, "ranker_artifact")
+    if ranker_artifact is not None:
+        context["ranker_artifact"] = ranker_artifact
+    fallback_values = {bool(row["llm_fallback_enabled"]) for row in rows if row.get("llm_fallback_enabled") is not None}
+    if len(fallback_values) == 1:
+        context["llm_fallback_enabled"] = next(iter(fallback_values))
+    return context
+
+
+def _add_rate_parts(summary: dict[str, Any], name: str, numerator: int, denominator: int) -> None:
+    summary[f"{name}_numerator"] = numerator
+    summary[f"{name}_denominator"] = denominator
 
 
 def _counts(values) -> dict[str, int]:

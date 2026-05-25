@@ -1,9 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Literal
 
 FieldKind = Literal["text", "price", "number", "date", "url", "email", "bool"]
+
+
+@dataclass(slots=True)
+class ParsedValue:
+    """Structured parse metadata for a raw extracted value."""
+
+    kind: str
+    raw: str
+    normalized: str = ""
+    amount: Decimal | None = None
+    currency: str | None = None
+    unit_or_period: str | None = None
+    qualifier: str | None = None
+    url_scheme: str | None = None
+    confidence: float = 0.0
+    flags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -87,6 +104,7 @@ class ValidationResult:
     reasons: list[str] = field(default_factory=list)
     penalties: list[str] = field(default_factory=list)
     hard_disqualifiers: list[str] = field(default_factory=list)
+    parsed: ParsedValue | None = None
 
 
 @dataclass(slots=True)

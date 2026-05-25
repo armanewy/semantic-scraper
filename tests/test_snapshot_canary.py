@@ -137,3 +137,5 @@ def test_report_domain_groups_by_bucket(tmp_path):
     report = Path(Args.out).read_text(encoding="utf-8")
     assert "near_domain" in report
     assert "adversarial" in report
+    assert "1.000 (1/1)" in report
+    assert "0.000 (0/1)" in report

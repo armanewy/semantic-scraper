@@ -6,6 +6,7 @@ Use this checklist for alpha releases.
 
 ```bash
 python -m pip install -e ".[dev]"
+python scripts/check_release_consistency.py
 python -m ruff check .
 python -m pytest -q
 semscrape doctor
@@ -16,7 +17,7 @@ semscrape canary corpus/ood_holdout/manifest.yml --policy ranker-local --out run
 
 ## Artifact Checks
 
-- Packaged ranker exists at `src/semscrape/assets/candidate-ranker-v2.json`.
+- Packaged ranker exists at `src/semscrape/assets/candidate-ranker-v3.json`.
 - `semscrape ranker info` reports the expected schema and metrics.
 - The default offline extraction path does not require Ollama.
 - Optional `ranker-plus-llm` documentation still names `qwen3:1.7b` as optional.

@@ -4,7 +4,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from semscrape.cli import _alpha_bundle_metrics, _pack_gaps_summary, main
+from semscrape.cli import _alpha_bundle_metrics, _alpha_summary_report, _pack_gaps_summary, main
 from semscrape.evidence import EvidenceStore, dataset_rows_from_evidence_export
 
 
@@ -332,13 +332,28 @@ def test_alpha_metrics_use_final_result_for_false_positives() -> None:
     metrics = _alpha_bundle_metrics([{"audit_ok": True}], rows)
 
     assert metrics["fields_attempted"] == 5
+    assert metrics["extracted_count"] == 4
+    assert metrics["abstention_count"] == 1
+    assert metrics["false_positive_count"] == 3
+    assert metrics["expected_present_count"] == 4
+    assert metrics["candidate_present_count"] == 3
+    assert metrics["candidate_missing_count"] == 1
     assert metrics["coverage_rate"] == 0.8
+    assert metrics["coverage_rate_numerator"] == 4
+    assert metrics["coverage_rate_denominator"] == 5
     assert metrics["abstention_rate"] == 0.2
     assert metrics["false_positives"] == 3
     assert metrics["false_positive_rate"] == 0.6
+    assert metrics["false_positive_rate_numerator"] == 3
+    assert metrics["false_positive_rate_denominator"] == 5
     assert metrics["false_positive_among_extracted"] == 3 / 4
     assert metrics["candidate_recall_denominator"] == 4
     assert metrics["candidate_recall_at_40"] == 0.75
+
+    report = _alpha_summary_report([{"path": "bundle.zip", "audit_ok": True, "records": 5}], metrics)
+    assert "coverage_rate: `0.800000` (4/5)" in report
+    assert "false_positive_rate: `0.600000` (3/5)" in report
+    assert "candidate_recall_at_40: `0.750000` (3/4)" in report
 
 
 def test_pack_gaps_use_final_result_for_false_positives() -> None:

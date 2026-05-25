@@ -25,6 +25,7 @@ from .dataset import (
     split_dataset_rows,
     write_dataset_jsonl,
 )
+from .decision import candidate_confidence
 from .dom import generate_candidates
 from .drift import DRIFT_PROFILES, write_drift
 from .eval_model import (
@@ -74,7 +75,7 @@ from .ranker import (
 from .render import enrich_candidates_from_rendered_page, fetch_url, render_url
 from .snapshot import create_snapshot
 from .spec import load_spec
-from .util import basename_key
+from .util import basename_key, normalize_ws
 
 
 def _is_url(value: str) -> bool:
@@ -219,6 +220,236 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         ]
     )
     return 0
+
+
+DIAGNOSE_REASON_EXPLANATIONS: dict[str, str] = {
+    "accepted": "The chosen candidate passed validation and the active policy gates.",
+    "no_candidate": "No candidate was available for the strict decision gate.",
+    "no_candidates": "Candidate generation produced no usable DOM candidates.",
+    "validator_disqualified": "A hard validator disqualifier fired for the selected candidate.",
+    "validator_rejected": "The selected candidate failed field validation.",
+    "low_validator_confidence": "Validation passed, but the validator score was below the policy threshold.",
+    "low_confidence": "The candidate score was below the policy confidence threshold.",
+    "ambiguous_candidates": "The best candidate did not beat competing candidates by enough margin.",
+    "ranker_abstained": "The local ranker did not find a safe candidate to accept.",
+    "low_ranker_confidence": "The local ranker score was below the policy threshold.",
+    "low_ranker_margin": "The local ranker saw multiple close candidates.",
+    "ranker_validator_disqualified": "The ranker candidate had validator hard disqualifiers.",
+    "ranker_validator_rejected": "The ranker candidate failed validation.",
+    "ranker_penalty_limit": "The ranker candidate had more validator penalties than policy allows.",
+    "model_abstained": "The local model returned abstain instead of choosing a candidate.",
+    "model_error": "The local model fallback failed.",
+    "low_model_confidence": "The local model chose a candidate below the model confidence threshold.",
+    "safety_veto_low_positive_confidence": "The safety veto ranker scored the candidate below its positive threshold.",
+    "trap_shipping_or_addon_price": "A price candidate matched shipping, tax, delivery, add-on, or similar context.",
+    "shipping/tax/installment price cue": "The value looked like shipping, tax, installment, or monthly-price context rather than the requested product price.",
+    "old/list price cue": "The value looked like a previous, list, MSRP, or comparison price.",
+    "near discount/savings cue": "The value was near discount, savings, coupon, or starting-at context.",
+}
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    spec = load_spec(args.spec)
+    html = _load_input(args.input, render=args.render, wait_for=args.wait_for)
+    _apply_pack_defaults(args)
+    _apply_policy_defaults(args)
+    field = next((item for item in spec.fields if item.name == args.field), None)
+    if field is None:
+        print(f"Unknown field {args.field!r}. Known fields: {', '.join(item.name for item in spec.fields)}", file=sys.stderr)
+        return 2
+
+    cache = SelectorCache(args.cache) if args.cache else None
+    report = extract_html(
+        spec,
+        html,
+        input_name=basename_key(args.input),
+        cache=cache,
+        use_llm=not args.no_llm,
+        model=args.model,
+        ollama_host=args.ollama_host,
+        top_k=args.top_k,
+        strict=args.strict,
+        min_confidence=args.min_confidence,
+        min_margin=args.min_margin,
+        min_validator_confidence=args.min_validator_confidence,
+        policy=args.policy,
+        model_on_abstain_only=args.model_on_abstain_only,
+        learn=False,
+        ranker_path=args.ranker,
+        min_ranker_confidence=args.min_ranker_confidence,
+        min_ranker_margin=args.min_ranker_margin,
+        max_ranker_penalties=args.max_ranker_penalties,
+        llm_fallback_policy=args.llm_fallback_policy,
+        veto_ranker_path=getattr(args, "veto_ranker", None),
+        veto_confidence_below=getattr(args, "veto_confidence_below", 0.60),
+    )
+
+    candidates = generate_candidates(html)
+    if args.render and _is_url(args.input):
+        candidates = enrich_candidates_from_rendered_page(args.input, candidates, wait_for=args.wait_for)
+    ranked = rank_candidates(field, candidates, top=max(3, args.top_k))
+    extraction = report.fields[field.name]
+    payload = _diagnosis_payload(args, field, extraction, ranked)
+    if args.json:
+        _print_json(payload)
+    else:
+        print(_diagnosis_text(payload))
+    return 0
+
+
+def _diagnosis_payload(args: argparse.Namespace, field, extraction, ranked) -> dict[str, Any]:
+    chosen = _diagnosis_chosen_candidate(extraction, ranked)
+    reason_items = _diagnosis_reason_items(extraction)
+    primary_reason = reason_items[0]["code"] if reason_items else ("accepted" if extraction.ok else "unknown")
+    return {
+        "field": field.name,
+        "field_kind": field.kind,
+        "status": extraction.status,
+        "ok": extraction.ok,
+        "policy": args.policy,
+        "source": extraction.source,
+        "value": extraction.value,
+        "selector": extraction.selector,
+        "candidate_id": extraction.candidate_id,
+        "confidence": round(float(extraction.confidence), 4),
+        "validator_confidence": round(float(extraction.validator_confidence), 4),
+        "primary_reason": primary_reason,
+        "reasons": reason_items,
+        "validation_errors": extraction.validation_errors,
+        "validator_reasons": extraction.decision.get("validator_reasons", []),
+        "validator_penalties": extraction.decision.get("validator_penalties", []),
+        "hard_disqualifiers": extraction.decision.get("hard_disqualifiers", []),
+        "trace": extraction.trace,
+        "chosen_candidate": _diagnosis_candidate_summary(chosen, None) if chosen else None,
+        "top_candidates": [_diagnosis_candidate_summary(item, index) for index, item in enumerate(ranked[:3], start=1)],
+        "suggestions": _diagnosis_suggestions(primary_reason, field, args),
+    }
+
+
+def _diagnosis_reason_items(extraction) -> list[dict[str, str]]:
+    if extraction.ok:
+        return [{"code": "accepted", "explanation": DIAGNOSE_REASON_EXPLANATIONS["accepted"]}]
+    raw_reasons: list[str] = []
+    decision = extraction.decision or {}
+    if decision.get("reason"):
+        raw_reasons.append(str(decision["reason"]))
+    raw_reasons.extend(str(item) for item in decision.get("hard_disqualifiers", []) or [])
+    raw_reasons.extend(str(item) for item in extraction.validation_errors or [])
+    raw_reasons.extend(str(item) for item in decision.get("validator_penalties", []) or [])
+    for event in reversed(extraction.trace or []):
+        reason = event.get("reason")
+        if reason:
+            raw_reasons.append(str(reason))
+
+    items = []
+    seen: set[str] = set()
+    for reason in raw_reasons:
+        if not reason or reason in seen:
+            continue
+        seen.add(reason)
+        items.append({"code": reason, "explanation": _diagnosis_explanation(reason)})
+    return items or [{"code": "abstained", "explanation": "The field abstained without a more specific reason."}]
+
+
+def _diagnosis_explanation(reason: str) -> str:
+    if reason in DIAGNOSE_REASON_EXPLANATIONS:
+        return DIAGNOSE_REASON_EXPLANATIONS[reason]
+    if reason.startswith("ranker_price_"):
+        return "A price-specific ranker safety gate rejected this candidate."
+    if reason.startswith("ranker_title_"):
+        return "A title-specific ranker safety gate rejected this candidate."
+    if reason.startswith("ranker_listing_"):
+        return "A listing-specific ranker safety gate rejected this candidate."
+    if reason.startswith("ranker_table_"):
+        return "A table-specific ranker safety gate rejected this candidate."
+    if reason.startswith("trap_"):
+        return "A high-precision safety veto rejected this candidate."
+    return "No detailed explanation is registered for this reason yet; inspect the trace and top candidates."
+
+
+def _diagnosis_suggestions(reason: str, field, args: argparse.Namespace) -> list[str]:
+    suggestions = [f"Inspect candidates with semscrape inspect {args.spec} {args.input} {field.name} --top-k {min(args.top_k, 10)}"]
+    if field.kind == "price" and ("shipping" in reason or "tax" in reason or "installment" in reason):
+        suggestions.append("Add product/current price hints, or use a separate shipping/tax field if that value is intended.")
+    elif reason in {"validator_rejected", "validator_disqualified", "low_validator_confidence"}:
+        suggestions.append("Check the field type and validators against the value shape.")
+    elif reason in {"ambiguous_candidates", "low_confidence", "low_ranker_margin"}:
+        suggestions.append("Add field hints or examples that distinguish the intended value from nearby candidates.")
+    elif reason in {"ranker_abstained", "low_ranker_confidence", "no_safe_ranker_candidate"}:
+        suggestions.append("Review evidence for this case before loosening ranker thresholds in high-precision workflows.")
+    elif reason in {"model_error"}:
+        suggestions.append("Check Ollama host/model settings, or run with a local-only ranker policy.")
+    else:
+        suggestions.append("Review the top candidates and trace before changing policy thresholds.")
+    return suggestions
+
+
+def _diagnosis_chosen_candidate(extraction, ranked):
+    if extraction.candidate_id:
+        match = next((item for item in ranked if item.candidate.id == extraction.candidate_id), None)
+        if match is not None:
+            return match
+    return ranked[0] if ranked else None
+
+
+def _diagnosis_candidate_summary(item, rank: int | None) -> dict[str, Any]:
+    validation = item.validation
+    return {
+        "rank": rank,
+        "candidate_id": item.candidate.id,
+        "value": item.value,
+        "selector": item.candidate.selector,
+        "tag": item.candidate.tag,
+        "score": round(float(item.score), 4),
+        "confidence": round(float(candidate_confidence(item)), 4),
+        "text": _truncate(item.candidate.text, 180),
+        "validation": {
+            "passed": validation.passed,
+            "score": round(float(validation.score), 4),
+            "errors": validation.errors,
+            "reasons": validation.reasons,
+            "penalties": validation.penalties,
+            "hard_disqualifiers": validation.hard_disqualifiers,
+        },
+        "reasons": item.reasons[:6],
+    }
+
+
+def _diagnosis_text(payload: dict[str, Any]) -> str:
+    lines = [
+        f"Field: {payload['field']}",
+        f"Status: {payload['status']}",
+        f"Policy: {payload['policy']}",
+        f"Source: {payload['source']}",
+    ]
+    if payload.get("value") is not None:
+        lines.append(f"Value: {payload['value']}")
+    chosen = payload.get("chosen_candidate")
+    if chosen:
+        lines.append(f"Best candidate: {_truncate(chosen['value'], 120)} ({chosen['candidate_id']}, {chosen['selector']})")
+    lines.append("")
+    lines.append("Accepted because:" if payload.get("ok") else "Rejected because:")
+    for item in payload.get("reasons", [])[:6]:
+        lines.append(f"- {item['code']}: {item['explanation']}")
+    lines.append("")
+    lines.append("Try:")
+    for suggestion in payload.get("suggestions", []):
+        lines.append(f"- {suggestion}")
+    if payload.get("top_candidates"):
+        lines.extend(["", "Top candidates:"])
+        for candidate in payload["top_candidates"]:
+            status = "valid" if candidate["validation"]["passed"] else "rejected"
+            reasons = candidate["validation"]["hard_disqualifiers"] or candidate["validation"]["errors"] or candidate["reasons"][:1]
+            reason_text = f" ({'; '.join(str(item) for item in reasons[:2])})" if reasons else ""
+            lines.append(f"{candidate['rank']}. {candidate['candidate_id']} {status}: {_truncate(candidate['value'], 100)}{reason_text}")
+    return "\n".join(lines)
+
+
+def _truncate(value: Any, limit: int) -> str:
+    text = normalize_ws(str(value or ""))
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "..."
 
 
 def _compare_expected(expected: Any, actual: Any) -> bool:
@@ -452,13 +683,19 @@ def _run_policy_eval_rows(
         cache_path = getattr(args, "cache_path", None)
         cache = SelectorCache(cache_path) if cache_path else None
         report_started = time.perf_counter()
+        policy = getattr(args, "policy", "safe-local")
+        llm_fallback_enabled = model not in {"heuristic", "ranker"} and policy not in {
+            "ranker-local",
+            "ranker-local-safe",
+            "ranker-local-safe-veto",
+            "ranker-local-safe-trap-veto",
+        }
         report = extract_html(
             spec,
             html,
             input_name=basename_key(input_ref),
             cache=cache,
-            use_llm=model not in {"heuristic", "ranker"}
-            and getattr(args, "policy", "safe-local") not in {"ranker-local", "ranker-local-safe", "ranker-local-safe-veto", "ranker-local-safe-trap-veto"},
+            use_llm=llm_fallback_enabled,
             model=model if model not in {"heuristic", "ranker"} else "qwen3:1.7b",
             ollama_host=args.ollama_host,
             top_k=args.top_k,
@@ -466,7 +703,7 @@ def _run_policy_eval_rows(
             min_confidence=args.min_confidence,
             min_margin=args.min_margin,
             min_validator_confidence=args.min_validator_confidence,
-            policy=getattr(args, "policy", "safe-local"),
+            policy=policy,
             model_on_abstain_only=True,
             learn=bool(getattr(args, "learn", False)),
             ranker_path=getattr(args, "ranker", None),
@@ -541,7 +778,10 @@ def _run_policy_eval_rows(
                 "field": field.name,
                 "field_type": field.kind,
                 "model": model,
-                "policy": getattr(args, "policy", "safe-local"),
+                "policy": policy,
+                "corpus_name": getattr(args, "group", None),
+                "corpus_type": getattr(args, "corpus_type", None),
+                "ranker_artifact": getattr(args, "ranker", None),
                 "top_k": args.top_k,
                 "expected": expected,
                 "expected_present": expected_present,
@@ -571,6 +811,7 @@ def _run_policy_eval_rows(
                 "model_confidence": model_event.get("confidence"),
                 "model_reason": model_event.get("reason"),
                 "llm_fallback_policy": getattr(args, "llm_fallback_policy", "all"),
+                "llm_fallback_enabled": llm_fallback_enabled,
                 "llm_fallback_eligible": fallback_gate_event.get("status") == "eligible",
                 "llm_fallback_suppressed": fallback_gate_event.get("status") == "suppressed",
                 "llm_fallback_suppression_reason": fallback_gate_event.get("reason") if fallback_gate_event.get("status") == "suppressed" else None,
@@ -860,7 +1101,7 @@ def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_labe
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for label, metrics in rows:
         lines.append(
-            f"| {label} | {metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
+            f"| {label} | {_fmt_rate(metrics, 'coverage_rate', precision=3)} | {_fmt_rate(metrics, 'false_positive_rate', precision=3)} | "
             f"{metrics.get('selector_reuse_rate', 0.0):.3f} | {metrics.get('model_call_rate', 0.0):.3f} | "
             f"{metrics.get('cache_rejected_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
             f"{metrics.get('end_to_end_latency_p95', 0.0):.1f} |"
@@ -872,9 +1113,9 @@ def _compare_report(left_label: str, left_rows: list[dict[str, Any]], right_labe
                 "",
                 "## Cross-Version Metrics",
                 "",
-                f"- cross_version_candidate_recall_at_40: {metrics.get('candidate_recall_at_k', 0.0):.6f}",
-                f"- cross_version_coverage: {metrics.get('coverage_rate', 0.0):.6f}",
-                f"- cross_version_false_positive_rate: {metrics.get('false_positive_rate', 0.0):.6f}",
+                f"- cross_version_candidate_recall_at_40: {_fmt_rate(metrics, 'candidate_recall_at_k')}",
+                f"- cross_version_coverage: {_fmt_rate(metrics, 'coverage_rate')}",
+                f"- cross_version_false_positive_rate: {_fmt_rate(metrics, 'false_positive_rate')}",
                 f"- cross_version_selector_reuse_rate: {metrics.get('selector_reuse_rate', 0.0):.6f}",
                 f"- cross_version_model_call_rate: {metrics.get('model_call_rate', 0.0):.6f}",
                 f"- cache_false_positive_rate: {metrics.get('cache_false_positive_rate', 0.0):.6f}",
@@ -959,8 +1200,8 @@ def _domain_report(rows: list[dict[str, Any]]) -> str:
                 continue
             metrics = next(iter(summarize_rows(subset).values()))
             lines.append(
-                f"| {bucket} | {model} | {metrics['rows']} | {metrics['coverage_rate']:.3f} | "
-                f"{metrics['false_positive_rate']:.3f} | {metrics['candidate_recall_at_k']:.3f} | "
+                f"| {bucket} | {model} | {metrics['rows']} | {_fmt_rate(metrics, 'coverage_rate', precision=3)} | "
+                f"{_fmt_rate(metrics, 'false_positive_rate', precision=3)} | {_fmt_rate(metrics, 'candidate_recall_at_k', precision=3)} | "
                 f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('ranker_call_rate', 0.0):.3f} | "
                 f"{metrics.get('llm_fallback_yield', 0.0):.3f} |"
             )
@@ -977,8 +1218,9 @@ def _domain_report(rows: list[dict[str, Any]]) -> str:
                 continue
             metrics = next(iter(summarize_rows(subset).values()))
             lines.append(
-                f"| {field_type} | {model} | {metrics['rows']} | {metrics['coverage_rate']:.3f} | "
-                f"{metrics['false_positive_rate']:.3f} | {metrics['abstention_rate']:.3f} | {metrics['candidate_recall_at_k']:.3f} |"
+                f"| {field_type} | {model} | {metrics['rows']} | {_fmt_rate(metrics, 'coverage_rate', precision=3)} | "
+                f"{_fmt_rate(metrics, 'false_positive_rate', precision=3)} | {_fmt_rate(metrics, 'abstention_rate', precision=3)} | "
+                f"{_fmt_rate(metrics, 'candidate_recall_at_k', precision=3)} |"
             )
 
     lines.extend(["", "## Failure Reasons", ""])
@@ -1028,6 +1270,68 @@ def _fmt_float(value: Any) -> str:
         return ""
 
 
+def _fmt_count(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def _rate_denominator_parts(metrics: dict[str, Any], rate_key: str) -> tuple[Any, Any] | None:
+    numerator = metrics.get(f"{rate_key}_numerator")
+    denominator = metrics.get(f"{rate_key}_denominator")
+    if numerator is not None and denominator is not None:
+        return numerator, denominator
+    aliases = {"candidate_recall_at_40": "candidate_recall_at_k", "required_field_success_rate": "coverage_rate"}
+    normalized = aliases.get(rate_key, rate_key)
+    numerator = metrics.get(f"{normalized}_numerator")
+    denominator = metrics.get(f"{normalized}_denominator")
+    if numerator is not None and denominator is not None:
+        return numerator, denominator
+    count_keys = {
+        "coverage_rate": ("extracted_count", "fields_attempted"),
+        "ranker_local_coverage": ("extracted_count", "fields_attempted"),
+        "false_positive_rate": ("false_positive_count", "fields_attempted"),
+        "abstention_rate": ("abstention_count", "fields_attempted"),
+        "candidate_recall_at_k": ("candidate_present_count", "expected_present_count"),
+        "false_positive_among_extracted": ("false_positive_count", "extracted_count"),
+        "bundle_audit_pass_rate": ("accepted_bundles", "bundle_count"),
+        "must_keep_positive_veto_rate": ("must_keep_vetoed", "must_keep_seen"),
+        "must_veto_block_rate": ("must_veto_blocked", "must_veto_seen"),
+    }
+    if normalized not in count_keys:
+        return None
+    numerator_key, denominator_key = count_keys[normalized]
+    numerator = metrics.get(numerator_key)
+    denominator = metrics.get(denominator_key)
+    if numerator is None or denominator is None:
+        return None
+    return numerator, denominator
+
+
+def _fmt_rate(metrics: dict[str, Any], rate_key: str, *, precision: int = 6) -> str:
+    value = float(metrics.get(rate_key, 0.0) or 0.0)
+    formatted = f"{value:.{precision}f}"
+    parts = _rate_denominator_parts(metrics, rate_key)
+    if parts is None:
+        return formatted
+    numerator, denominator = parts
+    return f"{formatted} ({_fmt_count(numerator)}/{_fmt_count(denominator)})"
+
+
+def _fmt_rate_markdown(metrics: dict[str, Any], rate_key: str, *, precision: int = 6) -> str:
+    value = float(metrics.get(rate_key, 0.0) or 0.0)
+    formatted = f"{value:.{precision}f}"
+    parts = _rate_denominator_parts(metrics, rate_key)
+    if parts is None:
+        return f"`{formatted}`"
+    numerator, denominator = parts
+    return f"`{formatted}` ({_fmt_count(numerator)}/{_fmt_count(denominator)})"
+
+
 def _eval_report(rows: list[dict[str, Any]]) -> str:
     summary = summarize_rows(rows)
     lines = ["# semscrape model evaluation", ""]
@@ -1037,8 +1341,8 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for model, metrics in summary.items():
         lines.append(
-            f"| {model} | {metrics['coverage_rate']:.3f} | {metrics['false_positive_rate']:.3f} | "
-            f"{metrics['validated_accuracy']:.3f} | {metrics['abstention_rate']:.3f} | "
+            f"| {model} | {_fmt_rate(metrics, 'coverage_rate', precision=3)} | {_fmt_rate(metrics, 'false_positive_rate', precision=3)} | "
+            f"{_fmt_rate(metrics, 'validated_accuracy', precision=3)} | {_fmt_rate(metrics, 'abstention_rate', precision=3)} | "
             f"{metrics.get('model_call_rate', 0.0):.3f} | {metrics.get('ranker_call_rate', 0.0):.3f} | "
             f"{metrics.get('model_recovery_rate', 0.0):.3f} | {metrics.get('ranker_recovery_rate', 0.0):.3f} | "
             f"{metrics.get('selector_reuse_rate', 0.0):.3f} | {metrics.get('cache_false_positive_rate', 0.0):.3f} | "
@@ -1063,10 +1367,10 @@ def _eval_report(rows: list[dict[str, Any]]) -> str:
     lines.append("|---|---:|---:|---:|---:|---:|---:|")
     for model, metrics in summary.items():
         lines.append(
-            f"| {model} | {metrics.get('llm_fallback_eligible_rate', 0.0):.3f} | "
-            f"{metrics.get('llm_fallback_suppressed_rate', 0.0):.3f} | {metrics.get('llm_fallback_call_rate', 0.0):.3f} | "
-            f"{metrics.get('llm_fallback_yield', 0.0):.3f} | {metrics.get('llm_calls_avoided_by_recoverability_gate', 0)} | "
-            f"{metrics.get('coverage_lost_by_fallback_gate', 0.0):.3f} |"
+            f"| {model} | {_fmt_rate(metrics, 'llm_fallback_eligible_rate', precision=3)} | "
+            f"{_fmt_rate(metrics, 'llm_fallback_suppressed_rate', precision=3)} | {_fmt_rate(metrics, 'llm_fallback_call_rate', precision=3)} | "
+            f"{_fmt_rate(metrics, 'llm_fallback_yield', precision=3)} | {metrics.get('llm_calls_avoided_by_recoverability_gate', 0)} | "
+            f"{_fmt_rate(metrics, 'coverage_lost_by_fallback_gate', precision=3)} |"
         )
     lines.extend(["", "## Failure reasons", ""])
     for model, metrics in summary.items():
@@ -1116,15 +1420,15 @@ def _calibration_report(rows: list[dict[str, Any]]) -> str:
         best = viable[0]
         if is_ranker:
             lines.append(
-                f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
-                f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
+                f"| {model} | {_fmt_rate(best, 'coverage_rate', precision=3)} | {_fmt_rate(best, 'false_positive_rate', precision=3)} | "
+                f"{_fmt_rate(best, 'validated_accuracy', precision=3)} | {_fmt_rate(best, 'abstention_rate', precision=3)} | "
                 f"{best['min_ranker_confidence']:.2f} | {best['min_ranker_margin']:.2f} | "
                 f"{best['min_validator_confidence']:.2f} | {best['max_ranker_penalties']} |"
             )
         else:
             lines.append(
-                f"| {model} | {best['coverage_rate']:.3f} | {best['false_positive_rate']:.3f} | "
-                f"{best['validated_accuracy']:.3f} | {best['abstention_rate']:.3f} | "
+                f"| {model} | {_fmt_rate(best, 'coverage_rate', precision=3)} | {_fmt_rate(best, 'false_positive_rate', precision=3)} | "
+                f"{_fmt_rate(best, 'validated_accuracy', precision=3)} | {_fmt_rate(best, 'abstention_rate', precision=3)} | "
                 f"{best['min_confidence']:.2f} | {best['min_margin']:.2f} | {best['min_validator_confidence']:.2f} |"
             )
     lines.extend(["", "## Top configurations", ""])
@@ -1132,13 +1436,13 @@ def _calibration_report(rows: list[dict[str, Any]]) -> str:
     for row in top:
         if is_ranker:
             lines.append(
-                f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
+                f"- `{row['model']}` coverage={_fmt_rate(row, 'coverage_rate', precision=3)}, fpr={_fmt_rate(row, 'false_positive_rate', precision=3)}, "
                 f"ranker_conf={row['min_ranker_confidence']:.2f}, ranker_margin={row['min_ranker_margin']:.2f}, "
                 f"validator={row['min_validator_confidence']:.2f}, max_penalties={row['max_ranker_penalties']}"
             )
         else:
             lines.append(
-                f"- `{row['model']}` coverage={row['coverage_rate']:.3f}, fpr={row['false_positive_rate']:.3f}, "
+                f"- `{row['model']}` coverage={_fmt_rate(row, 'coverage_rate', precision=3)}, fpr={_fmt_rate(row, 'false_positive_rate', precision=3)}, "
                 f"conf={row['min_confidence']:.2f}, margin={row['min_margin']:.2f}, validator={row['min_validator_confidence']:.2f}"
             )
     return "\n".join(lines) + "\n"
@@ -1232,6 +1536,7 @@ def _run_canary(args: argparse.Namespace) -> dict[str, Any]:
             policy=args.policy,
             case_id=case["id"],
             group=case.get("group") or case["id"],
+            corpus_type=case.get("corpus_type") or case.get("split"),
             version=case.get("version"),
             bucket=case.get("bucket"),
             category=case.get("category"),
@@ -1556,6 +1861,11 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
                 "id": source["id"],
                 "domain": source["domain"],
                 "split": source["split"],
+                "corpus_name": source["id"],
+                "corpus_type": source["split"] if source["split"] in {"dev", "holdout"} else None,
+                "policy": source.get("policy") or args.policy,
+                "ranker_artifact": metrics.get("ranker_artifact"),
+                "llm_fallback_enabled": metrics.get("llm_fallback_enabled", False),
                 "expected_mode": source["expected_mode"],
                 "label_policy": source["label_policy"],
                 "bundle": str(bundle_out),
@@ -1565,6 +1875,14 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
                 "cases": int(canary_result.get("cases", 0)),
                 "timeout_rate": float(canary_result.get("timeout_rate", 0.0)),
                 "fields": int(metrics.get("rows", 0)),
+                "fields_attempted": int(metrics.get("fields_attempted", metrics.get("rows", 0))),
+                "extracted_count": int(metrics.get("extracted_count", 0)),
+                "abstention_count": int(metrics.get("abstention_count", 0)),
+                "false_positive_count": int(metrics.get("false_positive_count", 0)),
+                "correct_count": int(metrics.get("correct_count", 0)),
+                "expected_present_count": int(metrics.get("expected_present_count", 0)),
+                "candidate_present_count": int(metrics.get("candidate_present_count", 0)),
+                "candidate_missing_count": int(metrics.get("candidate_missing_count", 0)),
                 "coverage_rate": float(metrics.get("coverage_rate", 0.0)),
                 "false_positive_rate": float(metrics.get("false_positive_rate", 0.0)),
                 "candidate_recall_at_40": float(metrics.get("candidate_recall_at_k", 0.0)),
@@ -1580,6 +1898,15 @@ def cmd_alpha_run(args: argparse.Namespace) -> int:
 
     summary_rows = _bundle_rows_from_paths(bundle_paths, allow_values=args.allow_values)
     metrics = _alpha_bundle_metrics(summary_rows, evidence_rows)
+    ranker_artifacts = sorted({str(row["ranker_artifact"]) for row in source_results if row.get("ranker_artifact")})
+    metrics.update(
+        {
+            "corpus_name": registry_path.stem,
+            "policy": args.policy,
+            "ranker_artifact": ranker_artifacts[0] if len(ranker_artifacts) == 1 else None,
+            "llm_fallback_enabled": any(bool(row.get("llm_fallback_enabled")) for row in source_results),
+        }
+    )
     summary_report = _alpha_summary_report(summary_rows, metrics)
     (out_dir / "summary.md").write_text(summary_report, encoding="utf-8", newline="\n")
     intake_result = intake_evidence_bundles(bundle_paths, out_dir / "intake.jsonl", allow_values=args.allow_values)
@@ -2323,14 +2650,34 @@ def cmd_pilot_run(args: argparse.Namespace) -> int:
     summary = {
         "project": str(project),
         "manifest": str(manifest),
+        "corpus_name": project.name,
+        "corpus_type": "pilot",
         "policy": args.policy,
         "pack": args.pack,
+        "ranker_artifact": metrics.get("ranker_artifact") or getattr(args, "ranker", None),
+        "llm_fallback_enabled": metrics.get("llm_fallback_enabled", args.policy == "ranker-plus-llm"),
         "pilot_cases": canary_result["cases"],
         "fields_attempted": int(metrics.get("rows", 0)),
+        "extracted_count": int(metrics.get("extracted_count", 0)),
+        "abstention_count": int(metrics.get("abstention_count", 0)),
+        "false_positive_count": int(metrics.get("false_positive_count", 0)),
+        "correct_count": int(metrics.get("correct_count", 0)),
+        "expected_present_count": int(metrics.get("expected_present_count", 0)),
+        "candidate_present_count": int(metrics.get("candidate_present_count", 0)),
+        "candidate_missing_count": int(metrics.get("candidate_missing_count", 0)),
         "ranker_local_coverage": metrics.get("coverage_rate", 0.0),
+        "coverage_rate_numerator": metrics.get("coverage_rate_numerator", metrics.get("extracted_count", 0)),
+        "coverage_rate_denominator": metrics.get("coverage_rate_denominator", metrics.get("rows", 0)),
         "false_positive_rate": metrics.get("false_positive_rate", 0.0),
+        "false_positive_rate_numerator": metrics.get("false_positive_rate_numerator", metrics.get("false_positive_count", 0)),
+        "false_positive_rate_denominator": metrics.get("false_positive_rate_denominator", metrics.get("rows", 0)),
         "abstention_rate": metrics.get("abstention_rate", 0.0),
+        "abstention_rate_numerator": metrics.get("abstention_rate_numerator", metrics.get("abstention_count", 0)),
+        "abstention_rate_denominator": metrics.get("abstention_rate_denominator", metrics.get("rows", 0)),
         "candidate_recall_at_40": metrics.get("candidate_recall_at_k", 0.0),
+        "candidate_recall_at_40_numerator": metrics.get("candidate_recall_at_k_numerator", metrics.get("candidate_present_count", 0)),
+        "candidate_recall_at_40_denominator": metrics.get("candidate_recall_at_k_denominator", metrics.get("expected_present_count", 0)),
+        "candidate_recall_denominator": metrics.get("candidate_recall_denominator", metrics.get("expected_present_count", 0)),
         "required_field_success_rate": metrics.get("coverage_rate", 0.0),
         "evidence_records_created": evidence_stats.get("records", 0),
         "labeled_records_created": evidence_stats.get("labeled", 0),
@@ -2371,10 +2718,35 @@ def cmd_pilot_summarize(args: argparse.Namespace) -> int:
                 "domain": _pilot_domain(project, summary, canary_rows),
                 "pages": int(summary.get("pilot_cases") or _pilot_case_count(canary_rows)),
                 "fields": int(metrics.get("rows", summary.get("fields_attempted", 0))),
+                "fields_attempted": int(metrics.get("fields_attempted", summary.get("fields_attempted", 0))),
+                "extracted_count": int(metrics.get("extracted_count", summary.get("extracted_count", 0))),
+                "abstention_count": int(metrics.get("abstention_count", summary.get("abstention_count", 0))),
+                "false_positive_count": int(metrics.get("false_positive_count", summary.get("false_positive_count", 0))),
+                "correct_count": int(metrics.get("correct_count", summary.get("correct_count", 0))),
+                "expected_present_count": int(metrics.get("expected_present_count", summary.get("expected_present_count", 0))),
+                "candidate_present_count": int(metrics.get("candidate_present_count", summary.get("candidate_present_count", 0))),
+                "candidate_missing_count": int(metrics.get("candidate_missing_count", summary.get("candidate_missing_count", 0))),
                 "coverage": float(metrics.get("coverage_rate", summary.get("ranker_local_coverage", 0.0))),
+                "coverage_rate": float(metrics.get("coverage_rate", summary.get("ranker_local_coverage", 0.0))),
+                "coverage_rate_numerator": int(metrics.get("coverage_rate_numerator", summary.get("coverage_rate_numerator", summary.get("extracted_count", 0)))),
+                "coverage_rate_denominator": int(metrics.get("coverage_rate_denominator", summary.get("coverage_rate_denominator", summary.get("fields_attempted", 0)))),
                 "false_positive_rate": float(metrics.get("false_positive_rate", summary.get("false_positive_rate", 0.0))),
+                "false_positive_rate_numerator": int(
+                    metrics.get("false_positive_rate_numerator", summary.get("false_positive_rate_numerator", summary.get("false_positive_count", 0)))
+                ),
+                "false_positive_rate_denominator": int(
+                    metrics.get("false_positive_rate_denominator", summary.get("false_positive_rate_denominator", summary.get("fields_attempted", 0)))
+                ),
                 "abstention_rate": float(metrics.get("abstention_rate", summary.get("abstention_rate", 0.0))),
+                "abstention_rate_numerator": int(metrics.get("abstention_rate_numerator", summary.get("abstention_rate_numerator", summary.get("abstention_count", 0)))),
+                "abstention_rate_denominator": int(metrics.get("abstention_rate_denominator", summary.get("abstention_rate_denominator", summary.get("fields_attempted", 0)))),
                 "candidate_recall_at_40": float(metrics.get("candidate_recall_at_k", summary.get("candidate_recall_at_40", 0.0))),
+                "candidate_recall_at_40_numerator": int(
+                    metrics.get("candidate_recall_at_k_numerator", summary.get("candidate_recall_at_40_numerator", summary.get("candidate_present_count", 0)))
+                ),
+                "candidate_recall_at_40_denominator": int(
+                    metrics.get("candidate_recall_at_k_denominator", summary.get("candidate_recall_at_40_denominator", summary.get("expected_present_count", 0)))
+                ),
                 "corrections": int(summary.get("user_corrections_count", 0)),
                 "bundle_ok": bool(summary.get("bundle_audit_passed") or (audit_result and audit_result.get("ok"))),
                 "pack": summary.get("pack") or "",
@@ -2516,8 +2888,8 @@ def cmd_pack_compare(args: argparse.Namespace) -> int:
     ]
     for label, metrics in (("baseline", result["baseline"]), ("candidate", result["candidate"]), ("adversarial", result["adversarial"])):
         lines.append(
-            f"| {label} | {metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
-            f"{metrics.get('candidate_recall_at_k', 0.0):.3f} | {metrics.get('model_call_rate', 0.0):.3f} |"
+            f"| {label} | {_fmt_rate(metrics, 'coverage_rate', precision=3)} | {_fmt_rate(metrics, 'false_positive_rate', precision=3)} | "
+            f"{_fmt_rate(metrics, 'candidate_recall_at_k', precision=3)} | {metrics.get('model_call_rate', 0.0):.3f} |"
         )
     lines.extend(["", "## Gates", ""])
     for name, passed in result["gates"].items():
@@ -2584,8 +2956,8 @@ def cmd_ranker_model_card(args: argparse.Namespace) -> int:
         for item in metric_runs:
             metrics = item["metrics"]
             lines.append(
-                f"| {item['label']} | {metrics.get('rows', 0)} | {metrics.get('candidate_recall_at_k', 0.0):.3f} | "
-                f"{metrics.get('coverage_rate', 0.0):.3f} | {metrics.get('false_positive_rate', 0.0):.3f} | "
+                f"| {item['label']} | {metrics.get('rows', 0)} | {_fmt_rate(metrics, 'candidate_recall_at_k', precision=3)} | "
+                f"{_fmt_rate(metrics, 'coverage_rate', precision=3)} | {_fmt_rate(metrics, 'false_positive_rate', precision=3)} | "
                 f"{metrics.get('model_call_rate', 0.0):.3f} |"
             )
     if args.privacy or args.excluded_data:
@@ -2966,6 +3338,8 @@ def _ranker_veto_threshold_aggregate(
             "must_veto_seen": must_veto_seen,
             "must_veto_blocked": must_veto_blocked,
             "must_veto_block_rate": must_veto_blocked / must_veto_seen if must_veto_seen else 0.0,
+            "must_veto_block_rate_numerator": must_veto_blocked,
+            "must_veto_block_rate_denominator": must_veto_seen,
         }
     )
     return base
@@ -3027,10 +3401,10 @@ def _ranker_veto_calibration_markdown(rows: list[dict[str, Any]], best: dict[str
         aggregate = row["aggregate"]
         lines.append(
             f"| {float(row['threshold']):.3f} | {str(bool(row['passed'])).lower()} | "
-            f"{float(aggregate.get('veto_coverage_rate', 0.0)):.6f} | {float(aggregate.get('veto_false_positive_rate', 0.0)):.6f} | "
+            f"{_fmt_rate(aggregate, 'veto_coverage_rate')} | {_fmt_rate(aggregate, 'veto_false_positive_rate')} | "
             f"{float(aggregate.get('coverage_loss', 0.0)):.6f} | {int(aggregate.get('veto_count', 0))} | "
             f"{int(aggregate.get('false_positives_prevented', 0))} | {int(aggregate.get('veto_false_positive_count', 0))} | "
-            f"{float(aggregate.get('must_keep_positive_veto_rate', 0.0)):.6f} | {float(aggregate.get('must_veto_block_rate', 0.0)):.6f} |"
+            f"{_fmt_rate(aggregate, 'must_keep_positive_veto_rate')} | {_fmt_rate(aggregate, 'must_veto_block_rate')} |"
         )
     lines.append("")
     if best:
@@ -3155,24 +3529,78 @@ def _ranker_veto_reason(row: dict[str, Any]) -> str | None:
 
 def _ranker_veto_aggregate(suites: list[dict[str, Any]], must_keep_keys: set[str]) -> dict[str, Any]:
     total_rows = sum(int(row["rows"]) for row in suites)
-    baseline_extracted = sum(float(row["baseline_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]) for row in suites)
-    veto_extracted = sum(float(row["veto_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]) for row in suites)
-    baseline_fps = sum(float(row["baseline_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]) for row in suites)
-    veto_fps = sum(float(row["veto_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]) for row in suites)
-    baseline_recall_rows = sum(float(row["baseline_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"]) for row in suites)
-    veto_recall_rows = sum(float(row["veto_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"]) for row in suites)
+    baseline_fields = sum(int(row["baseline_metrics"].get("fields_attempted", row["rows"])) for row in suites)
+    veto_fields = sum(int(row["veto_metrics"].get("fields_attempted", row["rows"])) for row in suites)
+    baseline_extracted = sum(
+        int(row["baseline_metrics"].get("extracted_count", round(float(row["baseline_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]))))
+        for row in suites
+    )
+    veto_extracted = sum(
+        int(row["veto_metrics"].get("extracted_count", round(float(row["veto_metrics"].get("coverage_rate", 0.0)) * int(row["rows"]))))
+        for row in suites
+    )
+    baseline_fps = sum(
+        int(row["baseline_metrics"].get("false_positive_count", round(float(row["baseline_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]))))
+        for row in suites
+    )
+    veto_fps = sum(
+        int(row["veto_metrics"].get("false_positive_count", round(float(row["veto_metrics"].get("false_positive_rate", 0.0)) * int(row["rows"]))))
+        for row in suites
+    )
+    baseline_expected_present = sum(int(row["baseline_metrics"].get("expected_present_count", row["rows"])) for row in suites)
+    veto_expected_present = sum(int(row["veto_metrics"].get("expected_present_count", row["rows"])) for row in suites)
+    baseline_candidate_present = sum(
+        int(
+            row["baseline_metrics"].get(
+                "candidate_present_count",
+                round(float(row["baseline_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"])),
+            )
+        )
+        for row in suites
+    )
+    veto_candidate_present = sum(
+        int(
+            row["veto_metrics"].get(
+                "candidate_present_count",
+                round(float(row["veto_metrics"].get("candidate_recall_at_k", 0.0)) * int(row["rows"])),
+            )
+        )
+        for row in suites
+    )
     must_keep_seen = sum(int(row["must_keep_seen"]) for row in suites)
     must_keep_vetoed = sum(int(row["must_keep_vetoed"]) for row in suites)
     return {
         "suites": len(suites),
         "rows": total_rows,
-        "baseline_coverage_rate": baseline_extracted / total_rows if total_rows else 0.0,
-        "veto_coverage_rate": veto_extracted / total_rows if total_rows else 0.0,
-        "coverage_loss": max(0.0, (baseline_extracted - veto_extracted) / total_rows) if total_rows else 0.0,
-        "baseline_false_positive_rate": baseline_fps / total_rows if total_rows else 0.0,
-        "veto_false_positive_rate": veto_fps / total_rows if total_rows else 0.0,
-        "baseline_candidate_recall_at_k": baseline_recall_rows / total_rows if total_rows else 0.0,
-        "veto_candidate_recall_at_k": veto_recall_rows / total_rows if total_rows else 0.0,
+        "baseline_fields_attempted": baseline_fields,
+        "veto_fields_attempted": veto_fields,
+        "baseline_extracted_count": baseline_extracted,
+        "veto_extracted_count": veto_extracted,
+        "baseline_false_positive_count": baseline_fps,
+        "veto_run_false_positive_count": veto_fps,
+        "baseline_expected_present_count": baseline_expected_present,
+        "veto_expected_present_count": veto_expected_present,
+        "baseline_candidate_present_count": baseline_candidate_present,
+        "veto_candidate_present_count": veto_candidate_present,
+        "baseline_coverage_rate": baseline_extracted / baseline_fields if baseline_fields else 0.0,
+        "baseline_coverage_rate_numerator": baseline_extracted,
+        "baseline_coverage_rate_denominator": baseline_fields,
+        "veto_coverage_rate": veto_extracted / veto_fields if veto_fields else 0.0,
+        "veto_coverage_rate_numerator": veto_extracted,
+        "veto_coverage_rate_denominator": veto_fields,
+        "coverage_loss": max(0.0, (baseline_extracted / baseline_fields if baseline_fields else 0.0) - (veto_extracted / veto_fields if veto_fields else 0.0)),
+        "baseline_false_positive_rate": baseline_fps / baseline_fields if baseline_fields else 0.0,
+        "baseline_false_positive_rate_numerator": baseline_fps,
+        "baseline_false_positive_rate_denominator": baseline_fields,
+        "veto_false_positive_rate": veto_fps / veto_fields if veto_fields else 0.0,
+        "veto_false_positive_rate_numerator": veto_fps,
+        "veto_false_positive_rate_denominator": veto_fields,
+        "baseline_candidate_recall_at_k": baseline_candidate_present / baseline_expected_present if baseline_expected_present else 0.0,
+        "baseline_candidate_recall_at_k_numerator": baseline_candidate_present,
+        "baseline_candidate_recall_at_k_denominator": baseline_expected_present,
+        "veto_candidate_recall_at_k": veto_candidate_present / veto_expected_present if veto_expected_present else 0.0,
+        "veto_candidate_recall_at_k_numerator": veto_candidate_present,
+        "veto_candidate_recall_at_k_denominator": veto_expected_present,
         "veto_count": sum(int(row["veto_count"]) for row in suites),
         "veto_true_positive_count": sum(int(row["veto_true_positive_count"]) for row in suites),
         "veto_false_positive_count": sum(int(row["veto_false_positive_count"]) for row in suites),
@@ -3185,6 +3613,8 @@ def _ranker_veto_aggregate(suites: list[dict[str, Any]], must_keep_keys: set[str
         "must_keep_seen": must_keep_seen,
         "must_keep_vetoed": must_keep_vetoed,
         "must_keep_positive_veto_rate": must_keep_vetoed / must_keep_seen if must_keep_seen else 0.0,
+        "must_keep_positive_veto_rate_numerator": must_keep_vetoed,
+        "must_keep_positive_veto_rate_denominator": must_keep_seen,
     }
 
 
@@ -3303,19 +3733,29 @@ def _ranker_veto_report_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- suites: `{aggregate['suites']}`",
         f"- rows: `{aggregate['rows']}`",
-        f"- baseline_coverage_rate: `{aggregate['baseline_coverage_rate']:.6f}`",
-        f"- veto_coverage_rate: `{aggregate['veto_coverage_rate']:.6f}`",
+        f"- baseline_fields_attempted: `{aggregate.get('baseline_fields_attempted', aggregate['rows'])}`",
+        f"- veto_fields_attempted: `{aggregate.get('veto_fields_attempted', aggregate['rows'])}`",
+        f"- baseline_extracted_count: `{aggregate.get('baseline_extracted_count', 0)}`",
+        f"- veto_extracted_count: `{aggregate.get('veto_extracted_count', 0)}`",
+        f"- baseline_false_positive_count: `{aggregate.get('baseline_false_positive_count', 0)}`",
+        f"- veto_run_false_positive_count: `{aggregate.get('veto_run_false_positive_count', 0)}`",
+        f"- baseline_expected_present_count: `{aggregate.get('baseline_expected_present_count', 0)}`",
+        f"- veto_expected_present_count: `{aggregate.get('veto_expected_present_count', 0)}`",
+        f"- baseline_candidate_present_count: `{aggregate.get('baseline_candidate_present_count', 0)}`",
+        f"- veto_candidate_present_count: `{aggregate.get('veto_candidate_present_count', 0)}`",
+        f"- baseline_coverage_rate: {_fmt_rate_markdown(aggregate, 'baseline_coverage_rate')}",
+        f"- veto_coverage_rate: {_fmt_rate_markdown(aggregate, 'veto_coverage_rate')}",
         f"- coverage_loss: `{aggregate['coverage_loss']:.6f}`",
-        f"- baseline_false_positive_rate: `{aggregate['baseline_false_positive_rate']:.6f}`",
-        f"- veto_false_positive_rate: `{aggregate['veto_false_positive_rate']:.6f}`",
-        f"- baseline_candidate_recall_at_k: `{aggregate['baseline_candidate_recall_at_k']:.6f}`",
-        f"- veto_candidate_recall_at_k: `{aggregate['veto_candidate_recall_at_k']:.6f}`",
+        f"- baseline_false_positive_rate: {_fmt_rate_markdown(aggregate, 'baseline_false_positive_rate')}",
+        f"- veto_false_positive_rate: {_fmt_rate_markdown(aggregate, 'veto_false_positive_rate')}",
+        f"- baseline_candidate_recall_at_k: {_fmt_rate_markdown(aggregate, 'baseline_candidate_recall_at_k')}",
+        f"- veto_candidate_recall_at_k: {_fmt_rate_markdown(aggregate, 'veto_candidate_recall_at_k')}",
         f"- veto_count: `{aggregate['veto_count']}`",
         f"- veto_true_positive_count: `{aggregate['veto_true_positive_count']}`",
         f"- veto_false_positive_count: `{aggregate['veto_false_positive_count']}`",
         f"- coverage_lost_to_veto: `{aggregate['coverage_lost_to_veto']}`",
         f"- oracle_false_positives_prevented: `{aggregate['oracle_false_positives_prevented']}`",
-        f"- must_keep_positive_veto_rate: `{aggregate['must_keep_positive_veto_rate']:.6f}`",
+        f"- must_keep_positive_veto_rate: {_fmt_rate_markdown(aggregate, 'must_keep_positive_veto_rate')}",
         "",
         "## Gates",
         "",
@@ -3338,10 +3778,10 @@ def _ranker_veto_report_markdown(payload: dict[str, Any]) -> str:
         veto = row["veto_metrics"]
         lines.append(
             f"| {row['name']} | {row['rows']} | "
-            f"{float(base.get('coverage_rate', 0.0)):.6f} | {float(veto.get('coverage_rate', 0.0)):.6f} | {row['coverage_loss']:.6f} | "
-            f"{float(base.get('false_positive_rate', 0.0)):.6f} | {float(veto.get('false_positive_rate', 0.0)):.6f} | "
-            f"{float(base.get('candidate_recall_at_k', 0.0)):.6f} | {float(veto.get('candidate_recall_at_k', 0.0)):.6f} | "
-            f"{row['veto_count']} | {row['false_positives_prevented']} | {row['coverage_lost_correct']} | {row['must_keep_positive_veto_rate']:.6f} |"
+            f"{_fmt_rate(base, 'coverage_rate')} | {_fmt_rate(veto, 'coverage_rate')} | {row['coverage_loss']:.6f} | "
+            f"{_fmt_rate(base, 'false_positive_rate')} | {_fmt_rate(veto, 'false_positive_rate')} | "
+            f"{_fmt_rate(base, 'candidate_recall_at_k')} | {_fmt_rate(veto, 'candidate_recall_at_k')} | "
+            f"{row['veto_count']} | {row['false_positives_prevented']} | {row['coverage_lost_correct']} | {_fmt_rate(row, 'must_keep_positive_veto_rate')} |"
         )
     lines.extend(
         [
@@ -3369,19 +3809,29 @@ def _ranker_trap_veto_report_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- suites: `{aggregate['suites']}`",
         f"- rows: `{aggregate['rows']}`",
-        f"- baseline_coverage_rate: `{aggregate['baseline_coverage_rate']:.6f}`",
-        f"- trap_veto_coverage_rate: `{aggregate['veto_coverage_rate']:.6f}`",
+        f"- baseline_fields_attempted: `{aggregate.get('baseline_fields_attempted', aggregate['rows'])}`",
+        f"- veto_fields_attempted: `{aggregate.get('veto_fields_attempted', aggregate['rows'])}`",
+        f"- baseline_extracted_count: `{aggregate.get('baseline_extracted_count', 0)}`",
+        f"- veto_extracted_count: `{aggregate.get('veto_extracted_count', 0)}`",
+        f"- baseline_false_positive_count: `{aggregate.get('baseline_false_positive_count', 0)}`",
+        f"- veto_run_false_positive_count: `{aggregate.get('veto_run_false_positive_count', 0)}`",
+        f"- baseline_expected_present_count: `{aggregate.get('baseline_expected_present_count', 0)}`",
+        f"- veto_expected_present_count: `{aggregate.get('veto_expected_present_count', 0)}`",
+        f"- baseline_candidate_present_count: `{aggregate.get('baseline_candidate_present_count', 0)}`",
+        f"- veto_candidate_present_count: `{aggregate.get('veto_candidate_present_count', 0)}`",
+        f"- baseline_coverage_rate: {_fmt_rate_markdown(aggregate, 'baseline_coverage_rate')}",
+        f"- trap_veto_coverage_rate: {_fmt_rate_markdown(aggregate, 'veto_coverage_rate')}",
         f"- coverage_loss: `{aggregate['coverage_loss']:.6f}`",
-        f"- baseline_false_positive_rate: `{aggregate['baseline_false_positive_rate']:.6f}`",
-        f"- trap_veto_false_positive_rate: `{aggregate['veto_false_positive_rate']:.6f}`",
-        f"- baseline_candidate_recall_at_k: `{aggregate['baseline_candidate_recall_at_k']:.6f}`",
-        f"- trap_veto_candidate_recall_at_k: `{aggregate['veto_candidate_recall_at_k']:.6f}`",
+        f"- baseline_false_positive_rate: {_fmt_rate_markdown(aggregate, 'baseline_false_positive_rate')}",
+        f"- trap_veto_false_positive_rate: {_fmt_rate_markdown(aggregate, 'veto_false_positive_rate')}",
+        f"- baseline_candidate_recall_at_k: {_fmt_rate_markdown(aggregate, 'baseline_candidate_recall_at_k')}",
+        f"- trap_veto_candidate_recall_at_k: {_fmt_rate_markdown(aggregate, 'veto_candidate_recall_at_k')}",
         f"- veto_count: `{aggregate['veto_count']}`",
         f"- true_veto_positive_count: `{aggregate['veto_true_positive_count']}`",
         f"- known_correct_vetoes: `{aggregate['coverage_lost_to_veto']}`",
         f"- false_positives_prevented: `{aggregate['false_positives_prevented']}`",
-        f"- must_keep_positive_veto_rate: `{aggregate['must_keep_positive_veto_rate']:.6f}`",
-        f"- must_veto_block_rate: `{aggregate['must_veto_block_rate']:.6f}`",
+        f"- must_keep_positive_veto_rate: {_fmt_rate_markdown(aggregate, 'must_keep_positive_veto_rate')}",
+        f"- must_veto_block_rate: {_fmt_rate_markdown(aggregate, 'must_veto_block_rate')}",
         "",
         "## Gates",
         "",
@@ -3404,11 +3854,11 @@ def _ranker_trap_veto_report_markdown(payload: dict[str, Any]) -> str:
         veto = row["veto_metrics"]
         lines.append(
             f"| {row['name']} | {row['rows']} | "
-            f"{float(base.get('coverage_rate', 0.0)):.6f} | {float(veto.get('coverage_rate', 0.0)):.6f} | {row['coverage_loss']:.6f} | "
-            f"{float(base.get('false_positive_rate', 0.0)):.6f} | {float(veto.get('false_positive_rate', 0.0)):.6f} | "
-            f"{float(base.get('candidate_recall_at_k', 0.0)):.6f} | {float(veto.get('candidate_recall_at_k', 0.0)):.6f} | "
+            f"{_fmt_rate(base, 'coverage_rate')} | {_fmt_rate(veto, 'coverage_rate')} | {row['coverage_loss']:.6f} | "
+            f"{_fmt_rate(base, 'false_positive_rate')} | {_fmt_rate(veto, 'false_positive_rate')} | "
+            f"{_fmt_rate(base, 'candidate_recall_at_k')} | {_fmt_rate(veto, 'candidate_recall_at_k')} | "
             f"{row['veto_count']} | {row['false_positives_prevented']} | {row['coverage_lost_to_veto']} | "
-            f"{row['must_keep_positive_veto_rate']:.6f} | {row['must_veto_block_rate']:.6f} |"
+            f"{_fmt_rate(row, 'must_keep_positive_veto_rate')} | {_fmt_rate(row, 'must_veto_block_rate')} |"
         )
     lines.extend(["", "## Veto Reasons", ""])
     for row in payload["suites"]:
@@ -3652,14 +4102,25 @@ def _pilot_report(summary: dict[str, Any], evidence_stats: dict[str, Any], audit
         "## Summary",
         "",
         f"- project: `{summary['project']}`",
+        f"- corpus_name: `{summary.get('corpus_name') or Path(str(summary['project'])).name}`",
+        f"- corpus_type: `{summary.get('corpus_type') or 'pilot'}`",
         f"- policy: `{summary['policy']}`",
+        f"- ranker_artifact: `{summary.get('ranker_artifact') or 'none'}`",
+        f"- llm_fallback_enabled: `{bool(summary.get('llm_fallback_enabled'))}`",
         f"- pack: `{summary.get('pack') or 'none'}`",
         f"- pilot_cases: `{summary['pilot_cases']}`",
         f"- fields_attempted: `{summary['fields_attempted']}`",
-        f"- coverage: `{summary['ranker_local_coverage']:.6f}`",
-        f"- false_positive_rate: `{summary['false_positive_rate']:.6f}`",
-        f"- candidate_recall_at_40: `{summary['candidate_recall_at_40']:.6f}`",
-        f"- abstention_rate: `{summary['abstention_rate']:.6f}`",
+        f"- extracted_count: `{summary.get('extracted_count', 0)}`",
+        f"- abstention_count: `{summary.get('abstention_count', 0)}`",
+        f"- false_positive_count: `{summary.get('false_positive_count', 0)}`",
+        f"- correct_count: `{summary.get('correct_count', 0)}`",
+        f"- expected_present_count: `{summary.get('expected_present_count', 0)}`",
+        f"- candidate_present_count: `{summary.get('candidate_present_count', 0)}`",
+        f"- candidate_missing_count: `{summary.get('candidate_missing_count', 0)}`",
+        f"- coverage: {_fmt_rate_markdown(summary, 'ranker_local_coverage')}",
+        f"- false_positive_rate: {_fmt_rate_markdown(summary, 'false_positive_rate')}",
+        f"- candidate_recall_at_40: {_fmt_rate_markdown(summary, 'candidate_recall_at_40')}",
+        f"- abstention_rate: {_fmt_rate_markdown(summary, 'abstention_rate')}",
         "",
         "## Evidence",
         "",
@@ -3697,6 +4158,9 @@ def _pilot_field_report(
 ) -> str:
     field_rows = [row for row in rows if row.get("field") is not None]
     metrics = _first_metrics(field_rows)
+    scorecard_metrics = {**summary, **metrics}
+    scorecard_metrics.setdefault("coverage_rate", summary.get("ranker_local_coverage", 0.0))
+    scorecard_metrics.setdefault("candidate_recall_at_40", summary.get("candidate_recall_at_40", 0.0))
     failure_reasons = Counter(str(row.get("failure_reason") or "none") for row in field_rows if row.get("failure_reason"))
     false_positives = [row for row in field_rows if row.get("false_positive")]
     candidate_misses = [row for row in field_rows if row.get("expected_present") and not row.get("candidate_present")]
@@ -3707,14 +4171,26 @@ def _pilot_field_report(
         "## Scorecard",
         "",
         f"- pilot: `{project.name}`",
+        f"- corpus_name: `{summary.get('corpus_name') or project.name}`",
+        f"- corpus_type: `{summary.get('corpus_type') or 'pilot'}`",
         f"- domain: `{_pilot_domain(project, summary, field_rows)}`",
+        f"- policy: `{summary.get('policy') or scorecard_metrics.get('policy') or 'unknown'}`",
+        f"- ranker_artifact: `{summary.get('ranker_artifact') or scorecard_metrics.get('ranker_artifact') or 'none'}`",
+        f"- llm_fallback_enabled: `{bool(summary.get('llm_fallback_enabled', scorecard_metrics.get('llm_fallback_enabled', False)))}`",
         f"- time_to_first_extract: `{summary.get('time_to_first_successful_extract', 'not_recorded')}`",
         f"- fields_attempted: `{int(metrics.get('rows', summary.get('fields_attempted', 0)))}`",
-        f"- required_field_success_rate: `{float(metrics.get('coverage_rate', summary.get('required_field_success_rate', 0.0))):.6f}`",
-        f"- coverage_rate: `{float(metrics.get('coverage_rate', summary.get('ranker_local_coverage', 0.0))):.6f}`",
-        f"- false_positive_rate: `{float(metrics.get('false_positive_rate', summary.get('false_positive_rate', 0.0))):.6f}`",
-        f"- abstention_rate: `{float(metrics.get('abstention_rate', summary.get('abstention_rate', 0.0))):.6f}`",
-        f"- candidate_recall_at_40: `{float(metrics.get('candidate_recall_at_k', summary.get('candidate_recall_at_40', 0.0))):.6f}`",
+        f"- extracted_count: `{scorecard_metrics.get('extracted_count', 0)}`",
+        f"- abstention_count: `{scorecard_metrics.get('abstention_count', 0)}`",
+        f"- false_positive_count: `{scorecard_metrics.get('false_positive_count', 0)}`",
+        f"- correct_count: `{scorecard_metrics.get('correct_count', 0)}`",
+        f"- expected_present_count: `{scorecard_metrics.get('expected_present_count', 0)}`",
+        f"- candidate_present_count: `{scorecard_metrics.get('candidate_present_count', 0)}`",
+        f"- candidate_missing_count: `{scorecard_metrics.get('candidate_missing_count', 0)}`",
+        f"- required_field_success_rate: {_fmt_rate_markdown(scorecard_metrics, 'required_field_success_rate')}",
+        f"- coverage_rate: {_fmt_rate_markdown(scorecard_metrics, 'coverage_rate')}",
+        f"- false_positive_rate: {_fmt_rate_markdown(scorecard_metrics, 'false_positive_rate')}",
+        f"- abstention_rate: {_fmt_rate_markdown(scorecard_metrics, 'abstention_rate')}",
+        f"- candidate_recall_at_40: {_fmt_rate_markdown(scorecard_metrics, 'candidate_recall_at_40')}",
         f"- evidence_records_created: `{evidence_stats.get('records', summary.get('evidence_records_created', 0))}`",
         f"- labeled_records_created: `{evidence_stats.get('labeled', summary.get('labeled_records_created', 0))}`",
         f"- user_corrections_count: `{summary.get('user_corrections_count', 0)}`",
@@ -3756,10 +4232,19 @@ def _pilot_summary_report(rows: list[dict[str, Any]]) -> str:
         f"- pilots: `{aggregate['pilots']}`",
         f"- domains: `{aggregate['domains']}`",
         f"- fields: `{aggregate['fields']}`",
-        f"- aggregate_coverage_rate: `{aggregate['coverage_rate']:.6f}`",
-        f"- aggregate_false_positive_rate: `{aggregate['false_positive_rate']:.6f}`",
-        f"- aggregate_abstention_rate: `{aggregate['abstention_rate']:.6f}`",
-        f"- bundle_audit_pass_rate: `{aggregate['bundle_audit_pass_rate']:.6f}`",
+        f"- fields_attempted: `{aggregate['fields_attempted']}`",
+        f"- extracted_count: `{aggregate['extracted_count']}`",
+        f"- abstention_count: `{aggregate['abstention_count']}`",
+        f"- false_positive_count: `{aggregate['false_positive_count']}`",
+        f"- correct_count: `{aggregate['correct_count']}`",
+        f"- expected_present_count: `{aggregate['expected_present_count']}`",
+        f"- candidate_present_count: `{aggregate['candidate_present_count']}`",
+        f"- candidate_missing_count: `{aggregate['candidate_missing_count']}`",
+        f"- aggregate_coverage_rate: {_fmt_rate_markdown(aggregate, 'coverage_rate')}",
+        f"- aggregate_false_positive_rate: {_fmt_rate_markdown(aggregate, 'false_positive_rate')}",
+        f"- aggregate_abstention_rate: {_fmt_rate_markdown(aggregate, 'abstention_rate')}",
+        f"- aggregate_candidate_recall_at_40: {_fmt_rate_markdown(aggregate, 'candidate_recall_at_40')}",
+        f"- bundle_audit_pass_rate: {_fmt_rate_markdown(aggregate, 'bundle_audit_pass_rate')}",
         "",
         "## Pilots",
         "",
@@ -3768,8 +4253,8 @@ def _pilot_summary_report(rows: list[dict[str, Any]]) -> str:
     ]
     for row in rows:
         lines.append(
-            f"| {row['pilot']} | {row['domain']} | {row['pages']} | {row['fields']} | {row['coverage']:.3f} | "
-            f"{row['false_positive_rate']:.3f} | {row['abstention_rate']:.3f} | {row['corrections']} | "
+            f"| {row['pilot']} | {row['domain']} | {row['pages']} | {row['fields']} | {_fmt_rate(row, 'coverage_rate', precision=3)} | "
+            f"{_fmt_rate(row, 'false_positive_rate', precision=3)} | {_fmt_rate(row, 'abstention_rate', precision=3)} | {row['corrections']} | "
             f"{str(row['bundle_ok']).lower()} | {row['pack']} |"
         )
     return "\n".join(lines) + "\n"
@@ -3777,18 +4262,49 @@ def _pilot_summary_report(rows: list[dict[str, Any]]) -> str:
 
 def _pilot_summary_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     fields = sum(int(row["fields"]) for row in rows)
+    fields_attempted = sum(int(row.get("fields_attempted", row["fields"])) for row in rows)
+    extracted_count = sum(int(row.get("extracted_count", 0)) for row in rows)
+    abstention_count = sum(int(row.get("abstention_count", 0)) for row in rows)
+    false_positive_count = sum(int(row.get("false_positive_count", 0)) for row in rows)
+    correct_count = sum(int(row.get("correct_count", 0)) for row in rows)
+    expected_present_count = sum(int(row.get("expected_present_count", 0)) for row in rows)
+    candidate_present_count = sum(int(row.get("candidate_present_count", 0)) for row in rows)
+    candidate_missing_count = sum(int(row.get("candidate_missing_count", 0)) for row in rows)
     bundle_ok = sum(int(bool(row["bundle_ok"])) for row in rows)
     domains = sorted({str(row["domain"]) for row in rows if row.get("domain")})
     return {
         "pilots": len(rows),
+        "pilot_count": len(rows),
+        "project_count": len(rows),
+        "bundle_count": len(rows),
+        "accepted_bundles": bundle_ok,
         "domains": len(domains),
+        "domain_count": len(domains),
         "domain_names": domains,
         "fields": fields,
+        "fields_attempted": fields_attempted,
+        "extracted_count": extracted_count,
+        "abstention_count": abstention_count,
+        "false_positive_count": false_positive_count,
+        "correct_count": correct_count,
+        "expected_present_count": expected_present_count,
+        "candidate_present_count": candidate_present_count,
+        "candidate_missing_count": candidate_missing_count,
         "coverage_rate": _weighted_average(rows, "coverage", "fields"),
+        "coverage_rate_numerator": extracted_count,
+        "coverage_rate_denominator": fields_attempted,
         "false_positive_rate": _weighted_average(rows, "false_positive_rate", "fields"),
+        "false_positive_rate_numerator": false_positive_count,
+        "false_positive_rate_denominator": fields_attempted,
         "abstention_rate": _weighted_average(rows, "abstention_rate", "fields"),
+        "abstention_rate_numerator": abstention_count,
+        "abstention_rate_denominator": fields_attempted,
         "candidate_recall_at_40": _weighted_average(rows, "candidate_recall_at_40", "fields"),
+        "candidate_recall_at_40_numerator": candidate_present_count,
+        "candidate_recall_at_40_denominator": expected_present_count,
         "bundle_audit_pass_rate": bundle_ok / len(rows) if rows else 0.0,
+        "bundle_audit_pass_rate_numerator": bundle_ok,
+        "bundle_audit_pass_rate_denominator": len(rows),
     }
 
 
@@ -3832,6 +4348,7 @@ def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list
     false_positives = 0
     extracted = 0
     abstentions = 0
+    correct = 0
     recalled = 0
     recall_denominator = 0
     hard_negatives = 0
@@ -3854,24 +4371,50 @@ def _alpha_bundle_metrics(bundle_rows: list[dict[str, Any]], evidence_rows: list
         positives = {candidate.get("candidate_id") for candidate in row.get("candidates") or [] if candidate.get("label")}
         hard_negatives += sum(int(bool(candidate.get("hard_negative"))) for candidate in row.get("candidates") or [])
         positive_candidates += len(positives)
-        if _evidence_row_false_positive(row):
+        is_false_positive = _evidence_row_false_positive(row)
+        if is_false_positive:
             false_positives += 1
+        elif status == "extracted":
+            correct += 1
     bundle_count = len(bundle_rows)
     accepted_bundles = sum(int(bool(row.get("audit_ok"))) for row in bundle_rows)
     fields_attempted = len(evidence_rows)
+    domain_count = len([domain for domain, count in domains.items() if domain != "unknown" and count > 0])
+    candidate_missing = recall_denominator - recalled
     return {
         "bundles": bundle_count,
+        "bundle_count": bundle_count,
         "accepted_bundles": accepted_bundles,
         "bundle_audit_pass_rate": accepted_bundles / bundle_count if bundle_count else 0.0,
+        "bundle_audit_pass_rate_numerator": accepted_bundles,
+        "bundle_audit_pass_rate_denominator": bundle_count,
         "fields_attempted": fields_attempted,
-        "domains": len([domain for domain, count in domains.items() if domain != "unknown" and count > 0]),
+        "extracted_count": extracted,
+        "abstention_count": abstentions,
+        "false_positive_count": false_positives,
+        "correct_count": correct,
+        "expected_present_count": recall_denominator,
+        "candidate_present_count": recalled,
+        "candidate_missing_count": candidate_missing,
+        "domains": domain_count,
+        "domain_count": domain_count,
         "domain_names": sorted(domain for domain in domains if domain != "unknown"),
         "coverage_rate": extracted / fields_attempted if fields_attempted else 0.0,
+        "coverage_rate_numerator": extracted,
+        "coverage_rate_denominator": fields_attempted,
         "false_positive_rate": false_positives / fields_attempted if fields_attempted else 0.0,
+        "false_positive_rate_numerator": false_positives,
+        "false_positive_rate_denominator": fields_attempted,
         "false_positive_among_extracted": false_positives / extracted if extracted else 0.0,
+        "false_positive_among_extracted_numerator": false_positives,
+        "false_positive_among_extracted_denominator": extracted,
         "candidate_recall_at_40": recalled / recall_denominator if recall_denominator else 0.0,
+        "candidate_recall_at_40_numerator": recalled,
+        "candidate_recall_at_40_denominator": recall_denominator,
         "candidate_recall_denominator": recall_denominator,
         "abstention_rate": abstentions / fields_attempted if fields_attempted else 0.0,
+        "abstention_rate_numerator": abstentions,
+        "abstention_rate_denominator": fields_attempted,
         "false_positives": false_positives,
         "gold_labels_created": trust_levels.get("gold", 0),
         "hard_negatives_created": hard_negatives,
@@ -3889,17 +4432,29 @@ def _alpha_summary_report(bundle_rows: list[dict[str, Any]], metrics: dict[str, 
         "",
         "## Aggregate",
         "",
+        f"- corpus_name: `{metrics.get('corpus_name', 'unknown')}`",
+        f"- corpus_type: `{metrics.get('corpus_type', 'unknown')}`",
+        f"- policy: `{metrics.get('policy', 'unknown')}`",
+        f"- ranker_artifact: `{metrics.get('ranker_artifact') or 'none'}`",
+        f"- llm_fallback_enabled: `{metrics.get('llm_fallback_enabled', 'unknown')}`",
         f"- bundles: `{metrics['bundles']}`",
         f"- accepted_bundles: `{metrics['accepted_bundles']}`",
         f"- domains: `{metrics['domains']}`",
         f"- fields_attempted: `{metrics['fields_attempted']}`",
-        f"- coverage_rate: `{metrics['coverage_rate']:.6f}`",
-        f"- false_positive_rate: `{metrics['false_positive_rate']:.6f}`",
-        f"- false_positive_among_extracted: `{metrics['false_positive_among_extracted']:.6f}`",
-        f"- candidate_recall_at_40: `{metrics['candidate_recall_at_40']:.6f}`",
+        f"- extracted_count: `{metrics.get('extracted_count', 0)}`",
+        f"- abstention_count: `{metrics.get('abstention_count', 0)}`",
+        f"- false_positive_count: `{metrics.get('false_positive_count', metrics.get('false_positives', 0))}`",
+        f"- correct_count: `{metrics.get('correct_count', 0)}`",
+        f"- expected_present_count: `{metrics.get('expected_present_count', 0)}`",
+        f"- candidate_present_count: `{metrics.get('candidate_present_count', 0)}`",
+        f"- candidate_missing_count: `{metrics.get('candidate_missing_count', 0)}`",
+        f"- coverage_rate: {_fmt_rate_markdown(metrics, 'coverage_rate')}",
+        f"- false_positive_rate: {_fmt_rate_markdown(metrics, 'false_positive_rate')}",
+        f"- false_positive_among_extracted: {_fmt_rate_markdown(metrics, 'false_positive_among_extracted')}",
+        f"- candidate_recall_at_40: {_fmt_rate_markdown(metrics, 'candidate_recall_at_40')}",
         f"- candidate_recall_denominator: `{metrics['candidate_recall_denominator']}`",
-        f"- abstention_rate: `{metrics['abstention_rate']:.6f}`",
-        f"- bundle_audit_pass_rate: `{metrics['bundle_audit_pass_rate']:.6f}`",
+        f"- abstention_rate: {_fmt_rate_markdown(metrics, 'abstention_rate')}",
+        f"- bundle_audit_pass_rate: {_fmt_rate_markdown(metrics, 'bundle_audit_pass_rate')}",
         f"- gold_labels_created: `{metrics['gold_labels_created']}`",
         f"- hard_negatives_created: `{metrics['hard_negatives_created']}`",
         "",
@@ -4401,6 +4956,9 @@ def cmd_ranker_eval(args: argparse.Namespace) -> int:
         max_penalties=args.max_ranker_penalties,
         model_name="ranker",
     )
+    for row in evaluated:
+        row["ranker_artifact"] = args.model
+        row["llm_fallback_enabled"] = False
     append_jsonl(Path(args.out), evaluated)
     _print_json({"out": args.out, "summary": summarize_rows(evaluated)})
     return 0
@@ -4421,6 +4979,10 @@ def cmd_ranker_veto_eval(args: argparse.Namespace) -> int:
         max_penalties=args.max_ranker_penalties,
         model_name="ranker-veto",
     )
+    for row in evaluated:
+        row["ranker_artifact"] = args.model
+        row["veto_ranker_artifact"] = args.veto_ranker
+        row["llm_fallback_enabled"] = False
     append_jsonl(Path(args.out), evaluated)
     vetoed = sum(int(bool(row.get("vetoed"))) for row in evaluated)
     _print_json({"out": args.out, "vetoed": vetoed, "summary": summarize_rows(evaluated)})
@@ -4439,6 +5001,9 @@ def cmd_ranker_calibrate(args: argparse.Namespace) -> int:
         max_penalty_values=args.max_ranker_penalties,
         max_false_positive_rate=args.max_false_positive_rate,
     )
+    for row in calibration:
+        row["ranker_artifact"] = args.model
+        row["llm_fallback_enabled"] = False
     append_calibration_jsonl(Path(args.out), calibration)
     _print_json(
         {
@@ -4795,6 +5360,34 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--render", action="store_true")
     inspect.add_argument("--wait-for", default=None)
     inspect.set_defaults(func=cmd_inspect)
+
+    diagnose = sub.add_parser("diagnose", help="Explain an extracted or abstained field decision")
+    diagnose.add_argument("spec")
+    diagnose.add_argument("input")
+    diagnose.add_argument("--field", required=True, help="Field name to diagnose")
+    diagnose.add_argument("--no-llm", action="store_true", help="Do not call the local Ollama model")
+    diagnose.add_argument("--model", default=None, help="Ollama model name")
+    diagnose.add_argument("--ranker", default=None, help="Path to a trained semscrape candidate-ranker JSON model")
+    diagnose.add_argument("--veto-ranker", default=None, help="Optional safety-veto ranker JSON for ranker-local-safe-veto")
+    diagnose.add_argument("--ollama-host", default=None, help="Ollama host, default $OLLAMA_HOST or http://localhost:11434")
+    diagnose.add_argument("--top-k", type=int, default=40, help="Candidate count to inspect")
+    diagnose.add_argument("--strict", action="store_true", help="Abstain unless confidence, margin, and validator gates pass")
+    diagnose.add_argument("--policy", choices=sorted(POLICY_DEFAULTS), default="ranker-local-safe")
+    diagnose.add_argument("--pack", default=None, help="Domain pack name, such as ecommerce")
+    diagnose.add_argument("--model-on-abstain-only", action="store_true", help="Call the local model only after strict heuristic abstention")
+    diagnose.add_argument("--min-confidence", type=float, default=0.75, help="Strict-mode minimum candidate confidence")
+    diagnose.add_argument("--min-margin", type=float, default=0.15, help="Strict-mode minimum margin over runner-up")
+    diagnose.add_argument("--min-validator-confidence", type=float, default=0.70, help="Strict-mode minimum validator confidence")
+    diagnose.add_argument("--min-ranker-confidence", type=float, default=0.70, help="Minimum ranker confidence before choosing")
+    diagnose.add_argument("--min-ranker-margin", type=float, default=0.00, help="Minimum ranker confidence margin over runner-up")
+    diagnose.add_argument("--max-ranker-penalties", type=int, default=0, help="Maximum validator penalties allowed for ranker choices")
+    diagnose.add_argument("--veto-confidence-below", type=float, default=0.60, help="Veto accepted candidates below this safety ranker confidence")
+    diagnose.add_argument("--llm-fallback-policy", choices=["all", "recoverable-only", "budgeted"], default="all", help="When ranker-plus-llm should call the LLM after ranker abstention")
+    diagnose.add_argument("--cache", default=None, help="Selector cache path to consider")
+    diagnose.add_argument("--json", action="store_true", help="Print structured diagnosis JSON")
+    diagnose.add_argument("--render", action="store_true", help="Render URL with Playwright before extraction")
+    diagnose.add_argument("--wait-for", default=None, help="CSS selector to wait for when --render is used")
+    diagnose.set_defaults(func=cmd_diagnose)
 
     bench = sub.add_parser("benchmark", help="Run extraction across files/URLs and compare spec benchmarks")
     bench.add_argument("spec")

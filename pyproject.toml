@@ -21,6 +21,7 @@ dependencies = [
 dev = [
   "pytest>=8.2.0",
   "ruff>=0.5.0",
+  "tomli>=2.0.0; python_version < '3.11'",
 ]
 render = [
   "playwright>=1.44.0",

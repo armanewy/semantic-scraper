@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from semscrape.cli import _eval_report
 from semscrape.eval_model import (
     apply_thresholds,
     evaluate_field,
@@ -38,6 +39,9 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
     rows = [
         {
             "model": "heuristic",
+            "fixture": "fixture.html",
+            "field": "title",
+            "expected": "expected",
             "expected_present": True,
             "candidate_present": True,
             "model_choice_correct": True,
@@ -53,6 +57,9 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
         },
         {
             "model": "heuristic",
+            "fixture": "fixture.html",
+            "field": "price",
+            "expected": None,
             "expected_present": False,
             "candidate_present": False,
             "model_choice_correct": False,
@@ -70,10 +77,23 @@ def test_eval_summary_tracks_false_positive_and_recall_rates():
 
     summary = summarize_rows(rows)["heuristic"]
     assert summary["candidate_recall_at_k"] == 1.0
+    assert summary["candidate_recall_at_k_numerator"] == 1
+    assert summary["candidate_recall_at_k_denominator"] == 1
     assert summary["validated_accuracy"] == 1.0
     assert summary["false_positive_rate"] == 0.5
+    assert summary["false_positive_count"] == 1
+    assert summary["false_positive_rate_denominator"] == 2
     assert summary["coverage_rate"] == 1.0
+    assert summary["fields_attempted"] == 2
+    assert summary["extracted_count"] == 2
+    assert summary["expected_present_count"] == 1
+    assert summary["candidate_present_count"] == 1
+    assert summary["candidate_missing_count"] == 0
     assert summary["failure_reasons"] == {"false_positive_missing_field": 1}
+
+    report = _eval_report(rows)
+    assert "1.000 (2/2)" in report
+    assert "0.500 (1/2)" in report
 
 
 def test_strict_eval_abstains_on_missing_optional_field(tmp_path):
@@ -127,4 +147,6 @@ def test_threshold_sweep_can_recover_metrics_from_loose_rows(tmp_path):
 
     assert len(calibrated) == 1
     assert summary["coverage_rate"] == 1.0
+    assert summary["coverage_rate_numerator"] == 1
+    assert summary["coverage_rate_denominator"] == 1
     assert summary["false_positive_rate"] == 0.0

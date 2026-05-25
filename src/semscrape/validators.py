@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
-from .models import Candidate, FieldSpec, ValidationResult
+from .models import Candidate, FieldSpec, ParsedValue, ValidationResult
 from .util import normalize_ws
 
 PRICE_RE = re.compile(r"(?<![\w])(?:[$€£¥]\s*)?\d{1,3}(?:[, ]\d{3})*(?:\.\d{2})?(?:\s*(?:USD|EUR|GBP|CAD|AUD|JPY))?(?![\w])", re.I)
@@ -15,6 +17,206 @@ DATE_RE = re.compile(
     re.I,
 )
 URLISH_RE = re.compile(r"^(?:https?://|mailto:|/|#)")
+
+CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+CURRENCY_CODES = {"USD", "EUR", "GBP", "CAD", "AUD", "JPY"}
+
+
+def parse_price_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    normalized = _normalize_currency_text(raw)
+    lower = normalized.lower()
+    flags: list[str] = []
+    qualifier = None
+    unit_or_period = None
+
+    match = PRICE_RE.search(normalized)
+    amount = _decimal_from_text(match.group(0)) if match else None
+    currency = _currency_from_text(match.group(0) if match else normalized)
+
+    if re.search(r"\b(?:save|savings|discount|coupon)\b", lower):
+        flags.append("savings")
+        qualifier = "savings"
+    if re.search(r"\b(?:shipping|delivery)\b", lower):
+        flags.append("shipping")
+        qualifier = qualifier or "shipping"
+    if re.search(r"\btax\b", lower):
+        flags.append("tax")
+        qualifier = qualifier or "tax"
+    if re.search(r"\b(?:installment|financing|finance)\b", lower):
+        flags.append("installment")
+        qualifier = qualifier or "installment"
+    if re.search(r"(?:/\s*mo\b|\bper month\b|\bmonthly\b|\bmonth\b)", lower):
+        flags.append("monthly")
+        unit_or_period = "month"
+    if re.search(r"(?:/\s*yr\b|/\s*year\b|\bper year\b|\byearly\b|\bannual\b|\bannually\b)", lower):
+        flags.append("annual")
+        unit_or_period = unit_or_period or "year"
+    if re.search(r"\b(?:from|starting at)\b", lower):
+        flags.append("from_price")
+        qualifier = qualifier or "from"
+    if re.search(r"\d\s*[-–]\s*(?:[$€£¥]?\s*)?\d", normalized):
+        flags.append("range")
+
+    confidence = 0.0
+    if amount is not None:
+        confidence = 0.75
+        if currency:
+            confidence += 0.1
+        if unit_or_period:
+            confidence += 0.05
+
+    return ParsedValue(
+        kind="price",
+        raw=raw,
+        normalized=normalized,
+        amount=amount,
+        currency=currency,
+        unit_or_period=unit_or_period,
+        qualifier=qualifier,
+        confidence=min(1.0, confidence),
+        flags=_dedupe(flags),
+    )
+
+
+def parse_number_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    match = NUMBER_RE.search(raw)
+    amount = _decimal_from_text(match.group(0)) if match else None
+    return ParsedValue(
+        kind="number",
+        raw=raw,
+        normalized=match.group(0) if match else raw,
+        amount=amount,
+        confidence=0.75 if amount is not None else 0.0,
+    )
+
+
+def parse_date_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    match = DATE_RE.search(raw)
+    normalized = match.group(0) if match else raw
+    flags: list[str] = []
+    confidence = 0.0
+    if match:
+        normalized = _normalize_date_match(match.group(0))
+        confidence = 0.75
+    elif re.search(r"\b(?:today|yesterday|tomorrow|last|next)\b", raw, re.I):
+        flags.append("relative_date_like")
+        confidence = 0.2
+    return ParsedValue(kind="date", raw=raw, normalized=normalized, confidence=confidence, flags=flags)
+
+
+def parse_url_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    parsed = urlparse(raw)
+    flags: list[str] = []
+    scheme = parsed.scheme or None
+    confidence = 0.0
+    if scheme in {"http", "https", "mailto"}:
+        confidence = 0.8
+    elif raw.startswith(("/", "#")):
+        scheme = "relative" if raw.startswith("/") else "fragment"
+        flags.append(scheme)
+        confidence = 0.55
+    elif URLISH_RE.search(raw):
+        confidence = 0.4
+    return ParsedValue(kind="url", raw=raw, normalized=raw, url_scheme=scheme, confidence=confidence, flags=flags)
+
+
+def parse_bool_or_availability_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    normalized = raw.lower()
+    flags: list[str] = []
+    qualifier = None
+    truthy = {"true", "yes", "in stock", "available"}
+    falsy = {"false", "no", "out of stock", "unavailable", "sold out"}
+    if normalized in truthy:
+        flags.append("available")
+        qualifier = "available"
+    elif normalized in falsy:
+        flags.append("unavailable")
+        qualifier = "unavailable"
+    return ParsedValue(
+        kind="bool",
+        raw=raw,
+        normalized=normalized,
+        qualifier=qualifier,
+        confidence=0.75 if qualifier else 0.0,
+        flags=flags,
+    )
+
+
+def parse_text_value(value: str | None) -> ParsedValue:
+    raw = normalize_ws(value or "")
+    normalized = _clean_text_value(raw)
+    confidence = 0.0 if not normalized else min(0.8, 0.35 + min(len(normalized), 80) / 200)
+    return ParsedValue(kind="text", raw=raw, normalized=normalized, confidence=confidence)
+
+
+def parse_value_for_field(field: FieldSpec, value: str | None) -> ParsedValue:
+    if field.kind == "price":
+        return parse_price_value(value)
+    if field.kind == "number":
+        return parse_number_value(value)
+    if field.kind == "date":
+        return parse_date_value(value)
+    if field.kind == "url":
+        return parse_url_value(value)
+    if field.kind == "bool":
+        return parse_bool_or_availability_value(value)
+    return parse_text_value(value)
+
+
+def _currency_from_text(value: str) -> str | None:
+    for symbol, code in CURRENCY_SYMBOLS.items():
+        if symbol in value:
+            return code
+    match = re.search(r"\b(?:USD|EUR|GBP|CAD|AUD|JPY)\b", value, re.I)
+    if not match:
+        return None
+    code = match.group(0).upper()
+    return code if code in CURRENCY_CODES else None
+
+
+def _decimal_from_text(value: str) -> Decimal | None:
+    cleaned = re.sub(r"[$€£¥]", "", value)
+    cleaned = re.sub(r"\b(?:USD|EUR|GBP|CAD|AUD|JPY)\b", "", cleaned, flags=re.I)
+    cleaned = normalize_ws(cleaned).replace(" ", "")
+    cleaned = re.sub(r"[^0-9,.\-+]", "", cleaned)
+    if not cleaned or cleaned in {"-", "+", ".", ","}:
+        return None
+    if "," in cleaned and "." not in cleaned:
+        if re.fullmatch(r"[-+]?\d{1,3}(?:,\d{3})+", cleaned):
+            cleaned = cleaned.replace(",", "")
+        else:
+            cleaned = cleaned.replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", "")
+    try:
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return None
+
+
+def _normalize_date_match(value: str) -> str:
+    cleaned = normalize_ws(value).replace(",", "")
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%b %d %Y", "%B %d %Y"):
+        try:
+            return datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return normalize_ws(value)
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def extract_value(field: FieldSpec, candidate: Candidate) -> str:
@@ -88,6 +290,7 @@ def _regex_list(value: str | list[str] | None) -> list[str]:
 
 def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
     normalized = _clean_text_value(normalize_ws(value or "")) if field.kind == "text" else _normalize_currency_text(normalize_ws(value or ""))
+    parsed = parse_value_for_field(field, normalized)
     errors: list[str] = []
     reasons: list[str] = []
     penalties: list[str] = []
@@ -96,8 +299,8 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
 
     if not normalized:
         if field.required:
-            return ValidationResult(False, 0.0, ["empty required value"], "", [], [], [])
-        return ValidationResult(True, 0.2, [], "", ["optional empty value"], [], [])
+            return ValidationResult(False, 0.0, ["empty required value"], "", [], [], [], parsed)
+        return ValidationResult(True, 0.2, [], "", ["optional empty value"], [], [], parsed)
 
     v = field.validators or {}
     min_length = int(v.get("min_length", 1 if field.kind == "text" else 0))
@@ -221,7 +424,7 @@ def validate_value(field: FieldSpec, value: str | None) -> ValidationResult:
     if passed:
         score += 0.2
 
-    return ValidationResult(passed, min(1.0, score), errors, normalized, reasons, penalties, hard_disqualifiers)
+    return ValidationResult(passed, min(1.0, score), errors, normalized, reasons, penalties, hard_disqualifiers, parsed)
 
 
 def _clean_text_value(value: str) -> str:
