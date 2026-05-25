@@ -2224,3 +2224,94 @@ Report:
 ```text
 docs/m20p_veto_promotion_readiness_report.md
 ```
+
+## M21: Veto Distillation and Must-Keep Calibration
+
+Status: completed as a calibration/distillation milestone.
+
+Question: Can we preserve the veto's false-positive reduction while reducing unnecessary vetoes on known-good rows?
+
+Input signal:
+
+```text
+M20P broad veto aggregate vetoes:       66
+M20P true veto positives:               2
+M20P aggregate known-correct vetoes:    64
+M20P unique new known-correct vetoes:   48
+```
+
+Regression data:
+
+```text
+data/regression/must_keep_positives.jsonl:
+  previous rows: 6
+  new rows:      48
+  total rows:    54
+
+data/regression/must_veto_negatives.jsonl:
+  rows:          2
+```
+
+Broad veto calibration:
+
+```text
+threshold-only result: no threshold passed
+
+0.050 threshold:
+  coverage_loss:             0.023545
+  saved_fps:                 0
+  known_correct_vetoes:      17
+  must_veto_block_rate:      0.000000
+
+0.340 threshold:
+  coverage_loss:             0.073407
+  saved_fps:                 2
+  known_correct_vetoes:      51
+  must_veto_block_rate:      1.000000
+
+0.600 threshold:
+  coverage_loss:             0.091413
+  saved_fps:                 2
+  known_correct_vetoes:      64
+  must_veto_block_rate:      1.000000
+```
+
+Trap-only calibration:
+
+```text
+candidate:                  field threshold first_content_link=0.34
+baseline_coverage_rate:     0.639889
+trap_only_coverage_rate:    0.635734
+coverage_loss:              0.004155
+baseline_false_positive_rate: 0.004155
+trap_only_false_positive_rate: 0.001385
+candidate_recall@40:        0.987498
+veto_count:                 3
+true_veto_positives:        2
+known_correct_vetoes:       1
+must_keep_veto_rate:        0.014286
+must_veto_block_rate:       1.000000
+```
+
+Decision:
+
+```text
+Do not promote broad ranker-local-safe-veto.
+Do not change defaults.
+Keep broad veto internal/opt-in.
+Keep trap-only behavior as an internal calibration candidate, not a public policy.
+```
+
+Defaults remain:
+
+```text
+candidate-ranker-v3
+packs/ecommerce-v1
+ranker-local-safe
+```
+
+Report:
+
+```text
+docs/m21_veto_distillation_report.md
+```

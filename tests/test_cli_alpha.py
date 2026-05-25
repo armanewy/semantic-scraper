@@ -337,6 +337,62 @@ def test_ranker_veto_report_checks_promotion_gates(tmp_path, capsys) -> None:
     assert "| fpr_not_regressed_everywhere | true |" in report_text
 
 
+def test_ranker_veto_calibrate_finds_narrow_threshold(tmp_path, capsys) -> None:
+    baseline = tmp_path / "baseline.jsonl"
+    veto = tmp_path / "veto.jsonl"
+    must_keep = tmp_path / "must_keep.jsonl"
+    must_veto = tmp_path / "must_veto.jsonl"
+    out = tmp_path / "veto-calibration.jsonl"
+    summary = tmp_path / "veto-calibration.md"
+    baseline_rows = [
+        _metric_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong"),
+        _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good"),
+        *[_metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good") for index in range(40)],
+    ]
+    veto_rows = [
+        _metric_row("case_a", "price", correct=False, false_positive=True, status="extracted", candidate_id="wrong", veto_confidence=0.30),
+        _metric_row("case_b", "title", correct=True, status="extracted", candidate_id="good", veto_confidence=0.80),
+        *[
+            _metric_row(f"case_keep_{index}", "title", correct=True, status="extracted", candidate_id="good", veto_confidence=0.80)
+            for index in range(40)
+        ],
+    ]
+    _write_rows(baseline, baseline_rows)
+    _write_rows(veto, veto_rows)
+    _write_rows(must_keep, [{"key": "case_b||title", "field": "title"}])
+    _write_rows(must_veto, [{"key": "case_a||price", "field": "price"}])
+
+    assert (
+        main(
+            [
+                "ranker",
+                "veto-calibrate",
+                "--suite",
+                f"oracle={baseline}=>{veto}",
+                "--must-keep",
+                str(must_keep),
+                "--must-veto",
+                str(must_veto),
+                "--threshold",
+                "0.5",
+                "0.9",
+                "--out",
+                str(out),
+                "--summary-out",
+                str(summary),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["best"]["threshold"] == 0.5
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert next(row for row in rows if row["threshold"] == 0.5)["passed"] is True
+    assert next(row for row in rows if row["threshold"] == 0.9)["passed"] is False
+    assert "Best threshold: `0.5`" in summary.read_text(encoding="utf-8")
+
+
 def test_alpha_run_collects_untrusted_evidence_without_training_export(tmp_path, capsys) -> None:
     spec = tmp_path / "spec.yml"
     html = tmp_path / "page.html"
@@ -609,6 +665,7 @@ def _metric_row(
     candidate_id: str | None = None,
     reason: str | None = None,
     vetoed: bool = False,
+    veto_confidence: float | None = None,
 ) -> dict:
     row = _summary_row(field, abstained=status == "abstained")
     row.update(
@@ -627,6 +684,8 @@ def _metric_row(
             "ranker_confidence": 0.95 if status == "extracted" else 0.4,
             "ranker_margin": 0.1,
             "vetoed": vetoed,
+            "veto_called": veto_confidence is not None or vetoed,
+            "veto_confidence": veto_confidence,
             "veto_reason": reason if vetoed else None,
         }
     )

@@ -2696,6 +2696,45 @@ def cmd_ranker_veto_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ranker_veto_calibrate(args: argparse.Namespace) -> int:
+    suites = [_ranker_veto_report_suite(value) for value in args.suite]
+    must_keep_keys = _ranker_veto_label_keys(args.must_keep) if args.must_keep else set()
+    must_veto_keys = _ranker_veto_label_keys(args.must_veto) if args.must_veto else set()
+    thresholds = sorted(set(float(value) for value in args.threshold))
+    field_thresholds = _ranker_veto_field_thresholds(args.field_threshold)
+    rows: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        suite_rows = [_ranker_veto_threshold_suite(suite, threshold, must_keep_keys, must_veto_keys, field_thresholds) for suite in suites]
+        aggregate = _ranker_veto_threshold_aggregate(suite_rows, must_keep_keys, must_veto_keys)
+        gates = _ranker_veto_calibration_gates(
+            suite_rows,
+            aggregate,
+            max_total_coverage_loss=args.max_total_coverage_loss,
+            max_suite_coverage_loss=args.max_suite_coverage_loss,
+            max_must_keep_veto_rate=args.max_must_keep_veto_rate,
+            min_must_veto_block_rate=args.min_must_veto_block_rate,
+            max_fpr_regression=args.max_fpr_regression,
+            max_adversarial_false_positive_rate=args.max_adversarial_false_positive_rate,
+        )
+        rows.append(
+            {
+                "threshold": threshold,
+                "field_thresholds": field_thresholds,
+                "passed": all(gates.values()),
+                "aggregate": aggregate,
+                "gates": gates,
+                "suites": suite_rows,
+            }
+        )
+    _write_jsonl(args.out, rows)
+    best = _ranker_veto_best_calibration(rows)
+    if args.summary_out:
+        Path(args.summary_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.summary_out).write_text(_ranker_veto_calibration_markdown(rows, best), encoding="utf-8", newline="\n")
+    _print_json({"out": args.out, "summary_out": args.summary_out, "rows": len(rows), "best": best})
+    return 0
+
+
 def _ranker_veto_report_suite(value: str) -> dict[str, str]:
     if "=" not in value:
         raise CliError("--suite must use name=baseline.jsonl=>veto.jsonl", 2)
@@ -2712,6 +2751,10 @@ def _ranker_veto_report_suite(value: str) -> dict[str, str]:
 
 
 def _ranker_veto_must_keep_keys(path: str) -> set[str]:
+    return _ranker_veto_label_keys(path)
+
+
+def _ranker_veto_label_keys(path: str) -> set[str]:
     rows = read_jsonl(path)
     keys: set[str] = set()
     for row in rows:
@@ -2721,6 +2764,223 @@ def _ranker_veto_must_keep_keys(path: str) -> set[str]:
         else:
             keys.add(_ranker_diff_key(row))
     return keys
+
+
+def _ranker_veto_field_thresholds(values: list[str]) -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    for value in values:
+        if "=" not in value:
+            raise CliError("--field-threshold must use field=value", 2)
+        field, raw_threshold = value.split("=", 1)
+        if not field.strip():
+            raise CliError("--field-threshold must include a field name", 2)
+        try:
+            thresholds[field.strip()] = float(raw_threshold)
+        except ValueError as exc:
+            raise CliError(f"Invalid field threshold: {value}", 2) from exc
+    return thresholds
+
+
+def _ranker_veto_threshold_suite(
+    suite: dict[str, str],
+    threshold: float,
+    must_keep_keys: set[str],
+    must_veto_keys: set[str],
+    field_thresholds: dict[str, float],
+) -> dict[str, Any]:
+    baseline_rows = [row for row in read_jsonl(suite["baseline"]) if row.get("field") is not None]
+    veto_rows = [row for row in read_jsonl(suite["veto"]) if row.get("field") is not None]
+    baseline_by_key = {_ranker_diff_key(row): row for row in baseline_rows}
+    veto_by_key = {_ranker_diff_key(row): row for row in veto_rows}
+    simulated: list[dict[str, Any]] = []
+    veto_count = 0
+    saved_fps = 0
+    coverage_lost_correct = 0
+    must_keep_seen = 0
+    must_keep_vetoed = 0
+    must_veto_seen = 0
+    must_veto_blocked = 0
+    for key, baseline in baseline_by_key.items():
+        veto = veto_by_key.get(key)
+        row_threshold = field_thresholds.get(str(baseline.get("field") or ""), threshold)
+        row = _ranker_simulated_veto_row(baseline, veto, row_threshold)
+        simulated.append(row)
+        vetoed = _ranker_row_vetoed(row)
+        if vetoed:
+            veto_count += 1
+        if bool(baseline.get("false_positive")) and not bool(row.get("false_positive")):
+            saved_fps += 1
+        if bool(baseline.get("correct")) and vetoed:
+            coverage_lost_correct += 1
+        if key in must_keep_keys:
+            must_keep_seen += 1
+            if vetoed:
+                must_keep_vetoed += 1
+        if key in must_veto_keys:
+            must_veto_seen += 1
+            if vetoed:
+                must_veto_blocked += 1
+    baseline_metrics = _first_metrics(baseline_rows)
+    metrics = _first_metrics(simulated)
+    return {
+        "name": suite["name"],
+        "rows": int(metrics.get("rows") or len(simulated)),
+        "baseline_metrics": baseline_metrics,
+        "veto_metrics": metrics,
+        "coverage_loss": max(0.0, float(baseline_metrics.get("coverage_rate", 0.0)) - float(metrics.get("coverage_rate", 0.0))),
+        "veto_count": veto_count,
+        "veto_true_positive_count": saved_fps,
+        "veto_false_positive_count": coverage_lost_correct,
+        "false_positives_prevented": saved_fps,
+        "false_positive_regressions": 0,
+        "coverage_lost_correct": coverage_lost_correct,
+        "coverage_lost_to_veto": coverage_lost_correct,
+        "missing_veto_reason_codes": 0,
+        "must_keep_seen": must_keep_seen,
+        "must_keep_vetoed": must_keep_vetoed,
+        "must_keep_positive_veto_rate": must_keep_vetoed / must_keep_seen if must_keep_seen else 0.0,
+        "must_veto_seen": must_veto_seen,
+        "must_veto_blocked": must_veto_blocked,
+        "must_veto_block_rate": must_veto_blocked / must_veto_seen if must_veto_seen else 0.0,
+    }
+
+
+def _ranker_simulated_veto_row(baseline: dict[str, Any], veto: dict[str, Any] | None, threshold: float) -> dict[str, Any]:
+    row = dict(baseline)
+    confidence = veto.get("veto_confidence") if veto else None
+    row["veto_called"] = bool(veto and veto.get("veto_called"))
+    row["veto_confidence"] = confidence
+    row["veto_confidence_below"] = threshold
+    row["vetoed"] = False
+    row["veto_reason"] = None
+    if _ranker_row_abstained(baseline) or confidence is None:
+        return row
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        return row
+    if confidence_value >= threshold:
+        return row
+    row.update(
+        {
+            "status": "abstained",
+            "abstained": True,
+            "validated": False,
+            "correct": False,
+            "model_choice_correct": False,
+            "false_positive": False,
+            "ranker_false_positive": False,
+            "ranker_validated_recovery": False,
+            "ranker_recovered": False,
+            "failure_reason": "safety_veto_low_positive_confidence",
+            "abstention_reason": "safety_veto_low_positive_confidence",
+            "vetoed": True,
+            "veto_reason": "safety_veto_low_positive_confidence",
+        }
+    )
+    return row
+
+
+def _ranker_veto_threshold_aggregate(
+    suites: list[dict[str, Any]],
+    must_keep_keys: set[str],
+    must_veto_keys: set[str],
+) -> dict[str, Any]:
+    base = _ranker_veto_aggregate(suites, must_keep_keys)
+    must_veto_seen = sum(int(row["must_veto_seen"]) for row in suites)
+    must_veto_blocked = sum(int(row["must_veto_blocked"]) for row in suites)
+    base.update(
+        {
+            "must_veto_total": len(must_veto_keys),
+            "must_veto_seen": must_veto_seen,
+            "must_veto_blocked": must_veto_blocked,
+            "must_veto_block_rate": must_veto_blocked / must_veto_seen if must_veto_seen else 0.0,
+        }
+    )
+    return base
+
+
+def _ranker_veto_calibration_gates(
+    suites: list[dict[str, Any]],
+    aggregate: dict[str, Any],
+    *,
+    max_total_coverage_loss: float,
+    max_suite_coverage_loss: float,
+    max_must_keep_veto_rate: float,
+    min_must_veto_block_rate: float,
+    max_fpr_regression: float,
+    max_adversarial_false_positive_rate: float,
+) -> dict[str, bool]:
+    gates = _ranker_veto_promotion_gates(
+        suites,
+        aggregate,
+        max_total_coverage_loss=max_total_coverage_loss,
+        max_suite_coverage_loss=max_suite_coverage_loss,
+        max_must_keep_veto_rate=max_must_keep_veto_rate,
+        max_fpr_regression=max_fpr_regression,
+        max_adversarial_false_positive_rate=max_adversarial_false_positive_rate,
+    )
+    gates["must_veto_block_rate"] = float(aggregate["must_veto_block_rate"]) >= min_must_veto_block_rate
+    return gates
+
+
+def _ranker_veto_best_calibration(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    viable = [row for row in rows if row.get("passed")]
+    if not viable:
+        return None
+    viable.sort(
+        key=lambda row: (
+            float(row["aggregate"].get("must_veto_block_rate", 0.0)),
+            float(row["aggregate"].get("veto_coverage_rate", 0.0)),
+            -float(row["aggregate"].get("coverage_loss", 1.0)),
+        ),
+        reverse=True,
+    )
+    best = viable[0]
+    return {"threshold": best["threshold"], "aggregate": best["aggregate"], "gates": best["gates"]}
+
+
+def _ranker_veto_calibration_markdown(rows: list[dict[str, Any]], best: dict[str, Any] | None) -> str:
+    field_thresholds = rows[0].get("field_thresholds") if rows else {}
+    field_threshold_text = ", ".join(f"{field}={threshold}" for field, threshold in sorted((field_thresholds or {}).items())) or "none"
+    lines = [
+        "# Safety Veto Calibration",
+        "",
+        f"Best threshold: `{best['threshold'] if best else 'none'}`.",
+        f"Field thresholds: `{field_threshold_text}`.",
+        "",
+        "| threshold | passed | coverage | FPR | coverage loss | vetoes | saved FPs | known-correct vetoes | must-keep veto rate | must-veto block rate |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        aggregate = row["aggregate"]
+        lines.append(
+            f"| {float(row['threshold']):.3f} | {str(bool(row['passed'])).lower()} | "
+            f"{float(aggregate.get('veto_coverage_rate', 0.0)):.6f} | {float(aggregate.get('veto_false_positive_rate', 0.0)):.6f} | "
+            f"{float(aggregate.get('coverage_loss', 0.0)):.6f} | {int(aggregate.get('veto_count', 0))} | "
+            f"{int(aggregate.get('false_positives_prevented', 0))} | {int(aggregate.get('veto_false_positive_count', 0))} | "
+            f"{float(aggregate.get('must_keep_positive_veto_rate', 0.0)):.6f} | {float(aggregate.get('must_veto_block_rate', 0.0)):.6f} |"
+        )
+    lines.append("")
+    if best:
+        lines.extend(
+            [
+                "## Decision",
+                "",
+                "At least one threshold passed the calibration gates.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "## Decision",
+                "",
+                "No threshold passed the calibration gates. Keep the veto internal and use the labeled rows for later distillation.",
+                "",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _ranker_veto_suite_report(suite: dict[str, str], must_keep_keys: set[str]) -> dict[str, Any]:
@@ -4556,6 +4816,22 @@ def build_parser() -> argparse.ArgumentParser:
     ranker_veto_report.add_argument("--max-fpr-regression", type=float, default=0.0)
     ranker_veto_report.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
     ranker_veto_report.set_defaults(func=cmd_ranker_veto_report)
+
+    ranker_veto_calibrate = ranker_sub.add_parser("veto-calibrate", help="Sweep safety-veto thresholds across baseline/veto result pairs")
+    ranker_veto_calibrate.add_argument("--suite", action="append", required=True, help="Named pair as name=baseline.jsonl=>veto.jsonl")
+    ranker_veto_calibrate.add_argument("--must-keep", default=None, help="Optional must-keep positive JSONL")
+    ranker_veto_calibrate.add_argument("--must-veto", default=None, help="Optional must-veto negative JSONL")
+    ranker_veto_calibrate.add_argument("--threshold", nargs="+", type=float, default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    ranker_veto_calibrate.add_argument("--field-threshold", action="append", default=[], help="Optional field-specific override as field=threshold")
+    ranker_veto_calibrate.add_argument("--out", required=True, help="Calibration JSONL path")
+    ranker_veto_calibrate.add_argument("--summary-out", default=None, help="Optional Markdown summary path")
+    ranker_veto_calibrate.add_argument("--max-total-coverage-loss", type=float, default=0.03)
+    ranker_veto_calibrate.add_argument("--max-suite-coverage-loss", type=float, default=0.05)
+    ranker_veto_calibrate.add_argument("--max-must-keep-veto-rate", type=float, default=0.02)
+    ranker_veto_calibrate.add_argument("--min-must-veto-block-rate", type=float, default=1.0)
+    ranker_veto_calibrate.add_argument("--max-fpr-regression", type=float, default=0.0)
+    ranker_veto_calibrate.add_argument("--max-adversarial-false-positive-rate", type=float, default=0.0)
+    ranker_veto_calibrate.set_defaults(func=cmd_ranker_veto_calibrate)
 
     ranker_calibrate = ranker_sub.add_parser("calibrate", help="Sweep ranker confidence/margin thresholds")
     ranker_calibrate.add_argument("input")
